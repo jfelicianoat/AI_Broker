@@ -1,14 +1,19 @@
 # 🧠 AI Broker — Neural Gateway Service
 
-Gateway inteligente entre un pipeline de captura de YouTube y procesamiento con LLMs locales (Ollama) y externos (DeepSeek). Enrutamiento dinámico, cola serial, dashboard HTMX y control de presupuesto.
+Gateway inteligente de procesamiento con LLMs locales (Ollama) y externos (DeepSeek). Enrutamiento dinámico, cola serial, dashboard HTMX y control de presupuesto.
 
 ## Arquitectura
 
 ```
-YouTuber ──► Plugin Chrome ──► Orchestrator ──► AI Broker ──► Ollama / DeepSeek
-                                                    │
-                                              Dashboard Web
-                                              (FastAPI + HTMX)
+App ──► AI Broker ──► Ollama (local)
+Cliente          │         ├── llama3.1:70b
+  HTTP           │         ├── llama3.1:8b
+                 │         └── qwen2.5:72b
+                 │
+                 ├──► DeepSeek API
+                 │
+                 └──► Dashboard Web
+                     (FastAPI + HTMX)
 ```
 
 ## Stack
@@ -62,29 +67,27 @@ El dashboard web incluye:
 - Monitor de VRAM y presupuesto mensual
 - Actualización automática cada 3s
 
-## Despliegue rápido
+## Algoritmo de enrutamiento
 
-```bash
-# Broker (máquina con GPU)
-python -m venv venv && venv\Scripts\activate
-pip install fastapi uvicorn httpx pyyaml jinja2 python-multipart structlog psutil python-dotenv
-uvicorn app.main:app --host 192.168.1.x --port 8080 --workers 1
+Matriz de decisión que prioriza el modelo preferido del perfil, con fallbacks progresivos según tamaño de contenido:
 
-# Orchestrator (máquina principal)
-pip install customtkinter watchdog httpx pyyaml markdown matplotlib
-python -m orchestrator.main
-```
-
-Ver [Deployment_Guide.md](Deployment_Guide.md) para la instalación completa.
+| Tokens | Condición | Acción |
+|--------|-----------|--------|
+| Cualquiera | Modelo preferido disponible | Usar preferido |
+| > 15k | VRAM disponible y alta calidad | Modelo local grande |
+| > 15k | Sin VRAM, presupuesto disponible | deepseek-chat |
+| > 15k | Sin VRAM ni presupuesto | Encolar para después |
+| 8k – 15k | — | llama3.1:8b (rápido) |
+| < 8k | — | Modelo más rápido disponible |
 
 ## Contrato normativo del MVP
 
 - API asíncrona con persistencia SQLite (`state/broker.db`)
 - Planificador estrictamente serial: `max_active_llm_tasks: 1`
 - Enrutamiento respeta `preferred_model`, `fallback_allowed`, `max_cost_usd` y presupuesto mensual
-- Chunking por límites naturales con solape, sin truncar silenciosamente
-- Cancelación con descarga de modelo (`keep_alive: 0`) solo si ninguna otra tarea lo usa
-- Sin autenticación entre máquinas (decisión del MVP). CORS desactivado. Solo LAN privada.
+- Chunking por límites naturales con solape configurable, sin truncar silenciosamente
+- Cancelación con descarga de modelo (`keep_alive: 0`) solo si ninguna otra tarea activa lo usa
+- Sin autenticación entre clientes y broker (decisión del MVP). CORS desactivado. Solo LAN privada.
 - API keys solo en `.env`, visibles solo últimos 4 caracteres en dashboard
 
 ## Seguridad operativa (MVP)
