@@ -542,7 +542,8 @@ El Broker acepta prompts y contenido opaco. No genera frontmatter, no clasifica 
 
 ### API asíncrona y durable
 
-- `POST /api/v1/tasks` valida, persiste y devuelve `202` con `task_id`, `status: "queued"` y URLs de consulta/cancelación.
+- `POST /api/v1/tasks` valida el objeto completo contra el contrato Broker v1 antes de persistir. Solo después devuelve `202` con `task_id`, `status: "queued"` y URLs de consulta/cancelación.
+- Una petición que no cumple el 100% del esquema se rechaza inmediatamente con `422 CONTRACT_VALIDATION_FAILED`, lista estructurada de campos y ningún efecto en SQLite o la cola.
 - `GET /api/v1/tasks/{task_id}` devuelve el estado actual y, en estado terminal, resultado o error.
 - `DELETE /api/v1/tasks/{task_id}` solicita cancelación idempotente.
 - `GET /api/v1/models`, `GET /api/v1/queue`, `PATCH /api/v1/queue`, `GET /api/v1/usage` y `GET /health` soportan las dos interfaces.
@@ -571,10 +572,23 @@ El progreso es por fases (`queued`, `routing`, `chunking`, `generating`, `synthe
 
 ### Cancelación y VRAM
 
+- El control de VRAM y el slot serial se implementan antes que enrutamiento, dashboard o proveedores externos.
+- Proteger toda llamada LLM con un `asyncio.Semaphore(1)` global y un lease persistido de tarea/modelo.
+- Antes de cargar un modelo, consultar `/api/ps`, verificar VRAM disponible y descargar modelos residuales que no tengan lease activo.
 - Cancelar la tarea `asyncio` y cerrar la respuesta HTTP en curso.
 - Marcar `cancel_requested` antes del efecto y `cancelled` al confirmarlo.
-- Descargar un modelo con `keep_alive: 0` solo cuando ninguna otra tarea activa lo utiliza.
+- En `finally`, enviar `keep_alive: 0` para descargar el modelo si `unload_after_task` está activo y confirmar su ausencia mediante `/api/ps` antes de entregar el slot a la siguiente tarea.
+- Nunca usar `keep_alive: 0` sobre un modelo con lease activo. Si la descarga falla, marcar el Broker `degraded`, impedir otra carga que exceda la VRAM y reintentar la limpieza.
 - Una cancelación repetida devuelve el estado terminal existente.
+
+### Servicio siempre encendido y salud proactiva
+
+- Ejecutar un `HealthSupervisor` independiente del worker y del dashboard.
+- Comprobar SQLite y capacidad de escritura cada 10 segundos; Ollama, `/api/ps`, VRAM y espacio en disco cada 30 segundos; proveedores externos configurados cada 5 minutos.
+- Persistir cambios de salud y exponer `healthy`, `degraded` o `unavailable` con causa, última comprobación y latencia.
+- `/health/live` responde si el proceso y el event loop están vivos; `/health/ready` solo responde `200` si SQLite y el dispatcher pueden aceptar tareas; `/health` devuelve el detalle de dependencias.
+- Ollama o un proveedor caído degrada el servicio pero no impide aceptar tareas en cola. SQLite no disponible devuelve readiness `503` e impide aceptar tareas.
+- Instalar el Broker como servicio de Windows con inicio automático, reinicio tras fallo y logs persistentes.
 
 ### Seguridad operativa del MVP
 
@@ -582,10 +596,11 @@ Por decisión del hilo, no hay autenticación entre las dos máquinas. En consec
 
 - Escuchar solo en la interfaz LAN seleccionada, nunca publicar el puerto 8080 en Internet.
 - CORS desactivado salvo orígenes exactos configurados para el dashboard.
-- Las API keys se leen de variables de entorno y nunca se devuelven al frontend, logs o endpoints de configuración.
+- Las API keys se guardan mediante `keyring` en Windows Credential Manager y nunca en SQLite, YAML o logs. `.env` solo puede aportar una clave inicial para migrarla al almacén seguro.
 - El dashboard permite sustituir una clave, pero solo muestra si está configurada y sus últimos cuatro caracteres.
 
 ### Recuperación y pruebas
 
 - Al arrancar, devolver tareas `processing` a `queued` incrementando `attempt`, salvo cancelaciones confirmadas.
-- Probar reinicio, cancelación, reordenación, Ollama offline, presupuesto agotado, modelo preferido ausente, contenido largo y varias tareas encoladas verificando que solo una ejecuta llamadas LLM.
+- Antes de aceptar tráfico, ejecutar limpieza segura de modelos residuales y reconciliar el lease de VRAM.
+- Probar reinicio, cancelación, reordenación, Ollama offline, SQLite sin escritura, VRAM insuficiente, fallo de descarga, presupuesto agotado, contrato inválido, contenido largo y varias tareas encoladas verificando que solo una ejecuta llamadas LLM.

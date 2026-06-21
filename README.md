@@ -36,6 +36,7 @@ Cliente          │         ├── llama3.1:70b
 - **Autodescubrimiento de modelos**: consulta dinámica a Ollama `/api/tags`
 - **Control de presupuesto** DeepSeek con tracking de coste y alertas al 80%
 - **Health checks**: Ollama cada 30s, APIs externas cada 5min, VRAM >90% alerta
+- **Servicio siempre encendido**: supervisor proactivo, readiness/liveness e instalación como servicio Windows con reinicio automático
 - **Logging estructurado** con structlog
 - **Recuperación al arranque**: tareas `processing` vuelven a `queued`
 
@@ -51,6 +52,8 @@ Cliente          │         ├── llama3.1:70b
 | `/api/v1/queue` | PATCH | Reordenar cola |
 | `/api/v1/usage` | GET | Uso mensual |
 | `/health` | GET | Health check |
+| `/health/live` | GET | Liveness de proceso y event loop |
+| `/health/ready` | GET | Readiness de persistencia y dispatcher |
 
 ## Estados de progreso
 
@@ -87,8 +90,10 @@ Matriz de decisión que prioriza el modelo preferido del perfil, con fallbacks p
 - Enrutamiento respeta `preferred_model`, `fallback_allowed`, `max_cost_usd` y presupuesto mensual
 - Chunking por límites naturales con solape configurable, sin truncar silenciosamente
 - Cancelación con descarga de modelo (`keep_alive: 0`) solo si ninguna otra tarea activa lo usa
+- Lease global y `Semaphore(1)` antes de cualquier llamada LLM; descarga verificada mediante `/api/ps` antes de ejecutar la siguiente tarea
+- Validación Pydantic completa antes de crear una fila o consumir cola
 - Sin autenticación entre clientes y broker (decisión del MVP). CORS desactivado. Solo LAN privada.
-- API keys solo en `.env`, visibles solo últimos 4 caracteres en dashboard
+- API keys en Windows Credential Manager mediante `keyring`, visibles solo últimos 4 caracteres en dashboard
 
 ## Seguridad operativa (MVP)
 

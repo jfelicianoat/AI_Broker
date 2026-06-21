@@ -574,7 +574,7 @@ En la máquina principal:
 $pipeline = "C:\YT-Pipeline"
 $downloadInbox = Join-Path $env:USERPROFILE "Downloads\YT-Knowledge-Inbox"
 New-Item -ItemType Directory -Force -Path $downloadInbox
-New-Item -ItemType Directory -Force -Path "$pipeline\processing", "$pipeline\completed", "$pipeline\failed", "$pipeline\rejected\notes", "$pipeline\rejected\sources", "$pipeline\state", "$pipeline\logs"
+New-Item -ItemType Directory -Force -Path "$pipeline\staging", "$pipeline\processing", "$pipeline\completed", "$pipeline\failed\contracts", "$pipeline\rejected\notes", "$pipeline\rejected\sources", "$pipeline\state", "$pipeline\logs"
 ```
 
 El valor inicial de `paths.inbox` será `%USERPROFILE%/Downloads/YT-Knowledge-Inbox`. La UI permite cambiarlo para adaptarse a una carpeta Descargas personalizada.
@@ -587,6 +587,7 @@ En el Broker se crean `state/` y `logs/` junto a la aplicación. SQLite usa modo
 # Orchestrator
 paths:
   inbox: "%USERPROFILE%/Downloads/YT-Knowledge-Inbox"
+  staging: "C:/YT-Pipeline/staging"
   processing: "C:/YT-Pipeline/processing"
   completed: "C:/YT-Pipeline/completed"
   failed: "C:/YT-Pipeline/failed"
@@ -601,8 +602,10 @@ broker:
 
 processing:
   max_concurrent_ingestion: 2
-  stable_file_checks: 2
+  stable_file_checks: 3
   stable_file_interval_seconds: 1
+  file_lock_retry_attempts: 3
+  file_lock_retry_backoff_seconds: [1, 2, 4]
 ```
 
 ```yaml
@@ -621,13 +624,21 @@ processing:
   max_active_llm_tasks: 1
   queue_max_size: 1000
   task_timeout_seconds: 300
+  unload_after_task: true
+
+health:
+  sqlite_interval_seconds: 10
+  local_dependencies_interval_seconds: 30
+  external_providers_interval_seconds: 300
+  disk_free_alert_gb: 10
 ```
 
-Las claves se suministran exclusivamente en `.env`; `broker_config.yaml` solo referencia `${DEEPSEEK_API_KEY}`. Los precios y presupuestos son configuración operativa y deben revisarse antes de activar un proveedor externo.
+Las claves se almacenan con `keyring` en Windows Credential Manager. `.env` puede aportar una clave inicial que se migra y elimina del entorno operativo; nunca se persiste en SQLite o YAML. Los precios y presupuestos deben revisarse antes de activar un proveedor externo.
 
 ### Arranque y red
 
 - Ejecutar el Broker con un worker Uvicorn. `--reload` se usa solo durante desarrollo.
+- Instalarlo como servicio de Windows con inicio automático y recuperación tras fallo; el servicio no se considera listo hasta que `/health/ready` responda `200`.
 - Permitir TCP 8080 exclusivamente desde la subred privada o desde la IP de la máquina principal.
 - No configurar redirección de puertos en el router.
 - El MVP mantiene la decisión de no usar autenticación; si el servicio sale de la LAN, TLS y autenticación pasan a ser obligatorios antes del despliegue.
@@ -645,6 +656,11 @@ Las claves se suministran exclusivamente en `.env`; `broker_config.yaml` solo re
 9. Agotar de forma simulada el presupuesto externo y comprobar fallback o error controlado.
 10. Ejecutar las suites unitarias, de contratos y end-to-end antes de empaquetar.
 11. Encolar al menos tres tareas mientras la primera permanece generando; comprobar que solo la primera está `processing`, las otras siguen `queued` y la API continúa aceptando consultas y nuevas tareas.
+12. Mantener un archivo bloqueado y verificar tres reintentos antes de `FILE_LOCKED`; después desbloquearlo y reprocesarlo manualmente.
+13. Interrumpir el Orchestrator después del commit `STAGED` y antes/después de `os.replace`; ambos reinicios deben recuperar el fichero sin duplicarlo.
+14. Enviar fixtures inválidos en cada frontera y verificar rechazo inmediato, mensaje de campo y ausencia de efectos parciales.
+15. Verificar que al finalizar o cancelar una tarea se envía `keep_alive: 0`, `/api/ps` confirma la descarga y la siguiente tarea no comienza antes de liberar VRAM.
+16. Detener Ollama y bloquear SQLite por separado; validar estados `degraded`/`unavailable`, readiness y recuperación automática.
 
 ### Empaquetado
 
