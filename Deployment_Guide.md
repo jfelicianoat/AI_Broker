@@ -652,7 +652,7 @@ Las claves se almacenan con `keyring` en Windows Credential Manager. `.env` pued
 5. Desconectar Ollama y el Broker, restaurarlos y comprobar recuperación.
 6. Cancelar una tarea y reordenar pendientes desde el dashboard.
 7. Rechazar una nota publicada y reprocesar su fuente.
-8. Procesar contenido que requiera varios chunks.
+8. Procesar desde el Orchestrator contenido que requiera varios chunks y verificar que el Broker recibe una inferencia independiente por chunk y otra de síntesis.
 9. Agotar de forma simulada el presupuesto externo y comprobar fallback o error controlado.
 10. Ejecutar las suites unitarias, de contratos y end-to-end antes de empaquetar.
 11. Encolar al menos tres tareas mientras la primera permanece generando; comprobar que solo la primera está `processing`, las otras siguen `queued` y la API continúa aceptando consultas y nuevas tareas.

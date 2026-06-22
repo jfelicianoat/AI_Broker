@@ -44,9 +44,9 @@
 
 def select_optimal_model(request):
 
-    tokens = estimate_tokens(request.content.transcript)
+    tokens = estimate_inference_tokens(request.inference)
 
-    preferred = request.profile.preferred_model
+    preferred = request.routing.preferred_model
 
     
 
@@ -62,7 +62,7 @@ def select_optimal_model(request):
 
     if tokens > 15000:  # Contenido muy largo
 
-        if has_available_vram() and request.quality_priority == "high":
+        if has_available_vram() and request.routing.quality_priority == "high":
 
             return select_largest_available_local()
 
@@ -288,7 +288,7 @@ async def abort_task(task_id: str):
 
   "model_used": "llama3.1:70b",
 
-  "result_markdown": "# Cómo Configurar Ollama...\\n\\n## Resumen...",
+  "assistant_content": "Respuesta del modelo sin interpretación del Broker...",
 
   "processing_time_seconds": 45.2,
 
@@ -304,7 +304,7 @@ async def abort_task(task_id: str):
 
     "fallback_used": false,
 
-    "chunk_strategy": "single_pass"
+    "inference_kind": "chat"
 
   }
 
@@ -424,7 +424,7 @@ async def abort_task_and_free_vram(task_id: str):
 
 ```python
 
-async def call_deepseek_api(prompt: str, max_tokens: int):
+async def call_deepseek_api(inference, model_name: str):
 
     headers = {
 
@@ -438,19 +438,13 @@ async def call_deepseek_api(prompt: str, max_tokens: int):
 
     payload = {
 
-        "model": "deepseek-chat",
+        "model": model_name,
 
-        "messages": [
+        "messages": inference.messages,
 
-            {"role": "system", "content": system_prompt},
+        "temperature": inference.temperature,
 
-            {"role": "user", "content": prompt}
-
-        ],
-
-        "temperature": 0.3,
-
-        "max_tokens": max_tokens
+        "max_tokens": inference.max_output_tokens
 
     }
 
@@ -480,7 +474,7 @@ async def call_deepseek_api(prompt: str, max_tokens: int):
 
     
 
-    return response.json()["choices"][0]["message"]["content"]
+    return normalize_provider_response(response.json())
 
 ```
 
@@ -538,7 +532,7 @@ logger.info(
 
 ### Independencia de dominio
 
-El Broker acepta prompts y contenido opaco. No genera frontmatter, no clasifica temas y no contiene lógica específica de YouTube u Obsidian. Los modelos cloud instalados mediante Ollama se descubren y ejecutan a través del mismo endpoint de Ollama; no existe un conector `ollama_cloud` separado.
+El Broker acepta inferencias ya preparadas y contenido opaco. Su responsabilidad funcional termina en recibir, validar el contrato técnico, encolar, enrutar al modelo/proveedor y devolver su respuesta. No genera prompts, no resuelve placeholders, no divide contenido, no sintetiza resultados, no interpreta respuestas y no contiene lógica de fuentes, afirmaciones, YouTube u Obsidian. Los modelos cloud instalados mediante Ollama se descubren y ejecutan a través del mismo endpoint de Ollama; no existe un conector `ollama_cloud` separado.
 
 ### API asíncrona y durable
 
@@ -556,7 +550,7 @@ La base `state/broker.db` almacena tareas, orden, intentos, uso por proveedor y 
 - La API acepta y persiste tareas aunque exista una generación LLM en curso; responder `202` no consume el slot de ejecución.
 - Solo una tarea puede estar en una fase que invoque un LLM. La limitación es global y también se aplica si las tareas usarían modelos o proveedores distintos.
 - El dispatcher no crea varias tareas de generación. Espera a que la tarea activa sea terminal antes de reclamar la siguiente por orden de cola.
-- Los chunks de una misma tarea también se procesan uno a uno y la síntesis comienza después del último chunk.
+- Cada tarea equivale a una única inferencia. Chunking, encadenamiento y síntesis son workflows externos controlados por el cliente.
 - Una generación lenta permanece activa; las tareas siguientes permanecen `queued`, mientras el dashboard, el polling, el alta de nuevas tareas y la cancelación siguen respondiendo.
 - No se permite configurar un valor mayor que uno en el MVP. Un valor distinto provoca error de configuración al arrancar.
 
@@ -566,9 +560,9 @@ La base `state/broker.db` almacena tareas, orden, intentos, uso por proveedor y 
 2. Si no está disponible y `fallback_allowed` es falso, terminar con `MODEL_UNAVAILABLE`.
 3. Si se permite fallback, elegir primero un modelo Ollama compatible; después un proveedor externo dentro de `max_cost_usd` y del presupuesto mensual.
 4. Los precios se leen de configuración y el coste estimado se reserva transaccionalmente antes de lanzar una petición externa.
-5. Para entradas que no caben, dividir por límites naturales con solape configurable, ejecutar `chunk_prompt` y combinar con `synthesis_prompt`. Nunca truncar silenciosamente.
+5. Si la inferencia excede el contexto del modelo, rechazarla antes de ejecutar con `CONTEXT_LIMIT_EXCEEDED` y límites calculados. El Broker no trunca ni divide; el Orchestrator decide cómo reconstruir el workflow.
 
-El progreso es por fases (`queued`, `routing`, `chunking`, `generating`, `synthesizing`, `completed`) y, cuando aplique, `chunk_current/chunk_total`; no se inventa un porcentaje de tokens restantes.
+El progreso del Broker se limita a `queued`, `routing`, `generating` y `completed`. Fases como extracción, chunking, comparación o síntesis pertenecen al Orchestrator.
 
 ### Cancelación y VRAM
 

@@ -58,7 +58,7 @@ Cliente          │         ├── llama3.1:70b
 ## Estados de progreso
 
 ```
-queued → routing → chunking → generating → synthesizing → completed
+queued → routing → generating → completed
 ```
 
 ## Dashboard
@@ -88,7 +88,8 @@ Matriz de decisión que prioriza el modelo preferido del perfil, con fallbacks p
 - API asíncrona con persistencia SQLite (`state/broker.db`)
 - Planificador estrictamente serial: `max_active_llm_tasks: 1`
 - Enrutamiento respeta `preferred_model`, `fallback_allowed`, `max_cost_usd` y presupuesto mensual
-- Chunking por límites naturales con solape configurable, sin truncar silenciosamente
+- Cada tarea representa una inferencia ya preparada; el Broker no crea prompts, chunks, síntesis ni interpreta respuestas
+- Una entrada que exceda el contexto se rechaza con `CONTEXT_LIMIT_EXCEEDED` para que el cliente reconstruya su workflow
 - Cancelación con descarga de modelo (`keep_alive: 0`) solo si ninguna otra tarea activa lo usa
 - Lease global y `Semaphore(1)` antes de cualquier llamada LLM; descarga verificada mediante `/api/ps` antes de ejecutar la siguiente tarea
 - Validación Pydantic completa antes de crear una fila o consumir cola
