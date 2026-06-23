@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -28,6 +29,8 @@ class Database:
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 request_id TEXT,
+                idempotency_key TEXT,
+                request_hash TEXT,
                 request_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 100,
@@ -126,6 +129,15 @@ class Database:
         with self._lock:
             for statement in statements:
                 self._conn.execute(statement)
+            task_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
+            if "idempotency_key" not in task_columns:
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN idempotency_key TEXT")
+            if "request_hash" not in task_columns:
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN request_hash TEXT")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
+                "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"
+            )
             self._conn.commit()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -142,8 +154,16 @@ class Database:
         with self._lock:
             return self._conn.execute(sql, tuple(params)).fetchall()
 
-    def transaction(self) -> sqlite3.Connection:
-        return self._conn
+    @contextmanager
+    def transaction(self):
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                yield self._conn
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
 
 
 def dumps_json(value: Any) -> str:

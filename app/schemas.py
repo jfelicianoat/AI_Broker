@@ -101,6 +101,11 @@ class TaskOutput(StrictBaseModel):
         return self
 
 
+class GenerationConfig(StrictBaseModel):
+    temperature: float = Field(default=0.3, ge=0, le=2)
+    max_output_tokens: int = Field(default=4000, ge=1)
+
+
 class ModelReference(StrictBaseModel):
     provider: str = Field(min_length=1, max_length=64)
     deployment: str = Field(min_length=1, max_length=64)
@@ -189,9 +194,11 @@ class RiskConfig(StrictBaseModel):
 
 
 class TaskCreateRequest(StrictBaseModel):
-    request_id: str | None = Field(default=None, max_length=128)
+    idempotency_key: str = Field(min_length=1, max_length=240, pattern=r"^[A-Za-z0-9._:-]+$")
+    request_id: str | None = Field(default=None, max_length=240)
     content: TaskContent
     output: TaskOutput = Field(default_factory=TaskOutput)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
     model_requirements: ModelRequirements = Field(default_factory=ModelRequirements)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)

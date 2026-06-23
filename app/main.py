@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.db import Database
-from app.repository import TaskRepository
+from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
     HealthDependency,
@@ -37,8 +38,24 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         db.init_schema()
         repository.recover_interrupted_tasks()
-        yield
-        db.close()
+        stop_dispatcher = asyncio.Event()
+        dispatcher_task = None
+        if broker_config.processing.auto_dispatch:
+            dispatcher_task = asyncio.create_task(
+                _dispatcher_loop(
+                    repository,
+                    coordinator,
+                    stop_dispatcher,
+                    broker_config.processing.dispatcher_interval_seconds,
+                )
+            )
+        try:
+            yield
+        finally:
+            stop_dispatcher.set()
+            if dispatcher_task is not None:
+                await dispatcher_task
+            db.close()
 
     app = FastAPI(title="AI Broker", version="0.1.0", lifespan=lifespan)
     app.state.config = broker_config
@@ -59,13 +76,19 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
         )
 
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
-    async def create_task(payload: TaskCreateRequest) -> TaskAcceptedResponse:
-        queue = repository.list_queue()
-        if len(queue.pending) >= broker_config.processing.queue_max_size:
-            raise HTTPException(status_code=429, detail="QUEUE_FULL")
-
-        task = repository.create_task(payload)
-        coordinator.initialize_run(task.task_id, payload)
+    async def create_task(payload: TaskCreateRequest, response: Response) -> TaskAcceptedResponse:
+        try:
+            task, created = repository.create_task(
+                payload, queue_max_size=broker_config.processing.queue_max_size
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
+        except QueueFull as exc:
+            raise HTTPException(status_code=429, detail="QUEUE_FULL") from exc
+        if created:
+            coordinator.initialize_run(task.task_id, payload)
+        else:
+            response.status_code = 200
         return TaskAcceptedResponse(
             task_id=task.task_id,
             status=TaskStatus.queued,
@@ -134,6 +157,36 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
         return response
 
     return app
+
+
+async def _dispatcher_loop(
+    repository: TaskRepository,
+    coordinator: ConsensusCoordinator,
+    stop: asyncio.Event,
+    interval_seconds: float,
+) -> None:
+    while not stop.is_set():
+        task_id = repository.get_next_queued_task_id()
+        if task_id is not None:
+            try:
+                await coordinator.process_task(repository, task_id)
+            except Exception as error:
+                repository.update_task(
+                    task_id,
+                    TaskStatus.failed,
+                    progress={"phase": TaskStatus.failed.value},
+                    error={
+                        "code": "INTERNAL_ERROR",
+                        "message": f"Dispatcher failure: {type(error).__name__}",
+                        "retryable": False,
+                    },
+                    clear_queue_position=True,
+                )
+        else:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+            except TimeoutError:
+                pass
 
 
 def _health_response(db: Database) -> HealthResponse:

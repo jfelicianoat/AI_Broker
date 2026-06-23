@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +20,14 @@ from app.schemas import (
 )
 
 
+class IdempotencyConflict(ValueError):
+    pass
+
+
+class QueueFull(ValueError):
+    pass
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -30,12 +40,12 @@ class TaskRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def create_task(self, request: TaskCreateRequest) -> TaskStateResponse:
+    def create_task(self, request: TaskCreateRequest, *, queue_max_size: int) -> tuple[TaskStateResponse, bool]:
         task_id = f"task_{uuid4().hex}"
         now = _utc_now_iso()
-        row = self.db.query_one("SELECT COALESCE(MAX(queue_position), 0) AS pos FROM tasks")
-        queue_position = int(row["pos"]) + 1 if row else 1
         request_json = request.model_dump(mode="json")
+        canonical = json.dumps(request_json, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         progress = {
             "phase": TaskStatus.queued.value,
             "invocations_completed": 0,
@@ -44,28 +54,34 @@ class TaskRepository:
             else request.execution.max_proposers,
         }
 
-        self.db.execute(
-            """
-            INSERT INTO tasks (
-                id, request_id, request_json, status, priority, queue_position,
-                progress_json, created_at, updated_at
+        with self.db.transaction() as connection:
+            existing = connection.execute(
+                "SELECT id, request_hash FROM tasks WHERE idempotency_key = ?", (request.idempotency_key,)
+            ).fetchone()
+            if existing is not None:
+                if existing["request_hash"] != request_hash:
+                    raise IdempotencyConflict(request.idempotency_key)
+                return self.get_task(existing["id"]), False
+            queued = connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'queued'").fetchone()[0]
+            if int(queued) >= queue_max_size:
+                raise QueueFull("QUEUE_FULL")
+            row = connection.execute("SELECT COALESCE(MAX(queue_position), 0) AS pos FROM tasks").fetchone()
+            queue_position = int(row["pos"]) + 1 if row else 1
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    id, request_id, idempotency_key, request_hash, request_json, status, priority, queue_position,
+                    progress_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, request.request_id, request.idempotency_key, request_hash, dumps_json(request_json),
+                 TaskStatus.queued.value, request.priority, queue_position, dumps_json(progress), now, now),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                task_id,
-                request.request_id,
-                dumps_json(request_json),
-                TaskStatus.queued.value,
-                request.priority,
-                queue_position,
-                dumps_json(progress),
-                now,
-                now,
-            ),
-        )
-        self.add_event(task_id, "task.created", {"status": TaskStatus.queued.value})
-        return self.get_task(task_id)
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.created", dumps_json({"status": TaskStatus.queued.value}), now),
+            )
+        return self.get_task(task_id), True
 
     def get_task(self, task_id: str) -> TaskStateResponse:
         row = self.db.query_one("SELECT * FROM tasks WHERE id = ?", (task_id,))

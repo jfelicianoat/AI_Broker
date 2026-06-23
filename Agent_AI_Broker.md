@@ -536,21 +536,21 @@ El Broker acepta inferencias ya preparadas y contenido opaco. Su responsabilidad
 
 ### API asíncrona y durable
 
-- `POST /api/v1/tasks` valida el objeto completo contra el contrato Broker v1 antes de persistir. Solo después devuelve `202` con `task_id`, `status: "queued"` y URLs de consulta/cancelación.
+- `POST /api/v1/tasks` valida el contrato v2 antes de persistir. Una creación nueva devuelve `202`; la misma `idempotency_key` con el mismo hash devuelve la tarea existente con `200`; contenido diferente devuelve `409 IDEMPOTENCY_CONFLICT`.
 - Una petición que no cumple el 100% del esquema se rechaza inmediatamente con `422 CONTRACT_VALIDATION_FAILED`, lista estructurada de campos y ningún efecto en SQLite o la cola.
 - `GET /api/v1/tasks/{task_id}` devuelve el estado actual y, en estado terminal, resultado o error.
 - `DELETE /api/v1/tasks/{task_id}` solicita cancelación idempotente.
 - `GET /api/v1/models`, `GET /api/v1/queue`, `PATCH /api/v1/queue`, `GET /api/v1/usage` y `GET /health` soportan las dos interfaces.
 - `PATCH /api/v1/queue` recibe la lista completa de `task_id` pendientes en el nuevo orden. No permite reordenar tareas activas.
 
-La base `state/broker.db` almacena tareas, orden, intentos, uso por proveedor y eventos. El servidor se ejecuta con un solo worker Uvicorn y un único slot global `max_active_llm_tasks: 1`.
+La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, intentos, uso y eventos. El servidor usa un worker Uvicorn y un solo workflow activo global; el dispatcher consume la cola autónomamente.
 
 ### Planificador serial y no bloqueo de la API
 
 - La API acepta y persiste tareas aunque exista una generación LLM en curso; responder `202` no consume el slot de ejecución.
-- Solo una tarea puede estar en una fase que invoque un LLM. La limitación es global y también se aplica si las tareas usarían modelos o proveedores distintos.
+- Solo un workflow Broker está activo globalmente. En `single` realiza una invocación; `mixture_of_agents` puede planificar invocaciones internas acotadas.
 - El dispatcher no crea varias tareas de generación. Espera a que la tarea activa sea terminal antes de reclamar la siguiente por orden de cola.
-- Cada tarea equivale a una única inferencia. Chunking, encadenamiento y síntesis son workflows externos controlados por el cliente.
+- Una tarea `single` equivale a una inferencia. Una tarea `mixture_of_agents` puede realizar consenso técnico interno; el chunking y los workflows de conocimiento siguen siendo externos.
 - Una generación lenta permanece activa; las tareas siguientes permanecen `queued`, mientras el dashboard, el polling, el alta de nuevas tareas y la cancelación siguen respondiendo.
 - No se permite configurar un valor mayor que uno en el MVP. Un valor distinto provoca error de configuración al arrancar.
 

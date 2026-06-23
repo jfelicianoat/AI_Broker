@@ -1,21 +1,23 @@
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
-from app.config import BrokerConfig, PersistenceConfig
+from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
 from app.main import create_app
 
 
 def make_client(tmp_path: Path) -> TestClient:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False),
     )
     return TestClient(create_app(config))
 
 
 def test_create_and_read_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        response = client.post("/api/v1/tasks", json={"content": {"prompt": "Hola"}})
+        response = client.post("/api/v1/tasks", json={"idempotency_key": "test:create", "content": {"prompt": "Hola"}})
 
         assert response.status_code == 202
         body = response.json()
@@ -31,7 +33,7 @@ def test_create_and_read_task(tmp_path: Path) -> None:
 
 def test_invalid_contract_has_structured_error(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        response = client.post("/api/v1/tasks", json={"content": {"prompt": ""}})
+        response = client.post("/api/v1/tasks", json={"idempotency_key": "test:invalid", "content": {"prompt": ""}})
 
         assert response.status_code == 422
         assert response.json()["code"] == "CONTRACT_VALIDATION_FAILED"
@@ -39,7 +41,7 @@ def test_invalid_contract_has_structured_error(tmp_path: Path) -> None:
 
 def test_cancel_is_idempotent(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        created = client.post("/api/v1/tasks", json={"content": {"prompt": "Hola"}}).json()
+        created = client.post("/api/v1/tasks", json={"idempotency_key": "test:cancel", "content": {"prompt": "Hola"}}).json()
 
         first = client.delete(created["cancel_url"])
         second = client.delete(created["cancel_url"])
@@ -68,7 +70,7 @@ def test_models_endpoint_is_available(tmp_path: Path) -> None:
 
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        created = client.post("/api/v1/tasks", json={"content": {"prompt": "Resume esto"}}).json()
+        created = client.post("/api/v1/tasks", json={"idempotency_key": "test:single", "content": {"prompt": "Resume esto"}}).json()
 
         tick = client.post("/api/v1/dispatcher/tick")
         task = client.get(created["status_url"]).json()
@@ -82,6 +84,7 @@ def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
 
 def test_dispatcher_processes_fast_consensus(tmp_path: Path) -> None:
     payload = {
+        "idempotency_key": "test:consensus",
         "content": {"prompt": "Compara dos enfoques de routing"},
         "execution": {
             "strategy": "mixture_of_agents",
@@ -107,6 +110,7 @@ def test_dispatcher_processes_fast_consensus(tmp_path: Path) -> None:
 
 def test_standard_consensus_fails_until_phase_c(tmp_path: Path) -> None:
     payload = {
+        "idempotency_key": "test:standard",
         "content": {"prompt": "Analiza con rúbrica"},
         "execution": {
             "strategy": "mixture_of_agents",
@@ -122,3 +126,59 @@ def test_standard_consensus_fails_until_phase_c(tmp_path: Path) -> None:
 
         assert task["status"] == "failed"
         assert task["error"]["code"] == "CONSENSUS_PRESET_NOT_IMPLEMENTED"
+
+
+def test_create_is_idempotent_and_conflicting_payload_returns_409(tmp_path: Path) -> None:
+    payload = {"idempotency_key": "idem:same", "request_id": "local-1", "content": {"prompt": "Hola"}}
+    with make_client(tmp_path) as client:
+        first = client.post("/api/v1/tasks", json=payload)
+        replay = client.post("/api/v1/tasks", json=payload)
+        conflict = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "idem:same", "request_id": "local-1", "content": {"prompt": "Otro"}},
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 200
+        assert replay.json()["task_id"] == first.json()["task_id"]
+        assert conflict.status_code == 409
+        assert len(client.get("/api/v1/queue").json()["pending"]) == 1
+
+
+def test_background_dispatcher_consumes_queue_without_tick(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-auto.db")),
+        processing=ProcessingConfig(auto_dispatch=True, dispatcher_interval_seconds=0.01),
+    )
+    with TestClient(create_app(config)) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "auto:single", "content": {"prompt": "Procesa automáticamente"}},
+        ).json()
+        deadline = time.monotonic() + 2
+        task = client.get(created["status_url"]).json()
+        while task["status"] not in {"completed", "failed", "cancelled"} and time.monotonic() < deadline:
+            time.sleep(0.01)
+            task = client.get(created["status_url"]).json()
+
+        assert task["status"] == "completed"
+        assert task["result"]["result_markdown"]
+
+
+def test_idempotency_survives_broker_restart(tmp_path: Path) -> None:
+    database = tmp_path / "broker-restart.db"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(database)),
+        processing=ProcessingConfig(auto_dispatch=False),
+    )
+    payload = {"idempotency_key": "restart:same", "content": {"prompt": "No duplicar"}}
+    with TestClient(create_app(config)) as first_client:
+        first = first_client.post("/api/v1/tasks", json=payload)
+        assert first.status_code == 202
+        task_id = first.json()["task_id"]
+
+    with TestClient(create_app(config)) as restarted_client:
+        replay = restarted_client.post("/api/v1/tasks", json=payload)
+        assert replay.status_code == 200
+        assert replay.json()["task_id"] == task_id
+        assert len(restarted_client.get("/api/v1/queue").json()["pending"]) == 1

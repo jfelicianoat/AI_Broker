@@ -621,10 +621,13 @@ persistence:
   journal_mode: "WAL"
 
 processing:
-  max_active_llm_tasks: 1
+  max_active_workflows: 1
+  max_parallel_invocations: "auto"
   queue_max_size: 1000
   task_timeout_seconds: 300
   unload_after_task: true
+  auto_dispatch: true
+  dispatcher_interval_seconds: 0.1
 
 health:
   sqlite_interval_seconds: 10

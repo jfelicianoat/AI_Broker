@@ -38,6 +38,8 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 - Cancelación idempotente con flag `cancel_requested`
 - Sistema completo de eventos (`task.created`, `task.status_changed`, `task.cancelled`, `task.recovered`, `queue.reordered`, `model_invocation.completed`, `artifact.created`)
 - Recuperación automática al arranque: tareas en estado activo vuelven a `queued` con incremento de `attempt`
+- Creación idempotente con `idempotency_key` y hash canónico: replay idéntico devuelve `200`; contenido distinto devuelve `409`
+- Dispatcher autónomo de fondo; `/api/v1/dispatcher/tick` queda para diagnóstico y pruebas
 
 ### 4. Artefactos con integridad criptográfica
 
@@ -71,12 +73,12 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 
 | Endpoint | Método | Descripción |
 |----------|--------|-------------|
-| `/api/v1/tasks` | POST | Crear tarea (validación estricta, devuelve 202) |
+| `/api/v1/tasks` | POST | Crear tarea (`202`) o recuperar la misma operación idempotente (`200`) |
 | `/api/v1/tasks/{id}` | GET | Estado y resultado de tarea |
 | `/api/v1/tasks/{id}` | DELETE | Cancelación idempotente |
 | `/api/v1/queue` | GET | Snapshot de cola (pending / active / terminal) |
 | `/api/v1/queue` | PATCH | Reordenar tareas pendientes |
-| `/api/v1/dispatcher/tick` | POST | Tick del dispatcher para procesar siguiente tarea |
+| `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico; el dispatcher normal es autónomo |
 | `/api/v1/models` | GET | Modelos disponibles |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/health` | GET | Estado detallado de dependencias |
@@ -87,6 +89,7 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 
 ```json
 {
+  "idempotency_key": "orchestrator:capture-001:1:single",
   "request_id": "cli-001",
   "content": {
     "prompt": "Analiza el impacto...",
@@ -96,6 +99,10 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
   "output": {
     "format": "markdown",
     "language": "es"
+  },
+  "generation": {
+    "temperature": 0.3,
+    "max_output_tokens": 4000
   },
   "model_requirements": {
     "preferred_model": null,

@@ -25,6 +25,8 @@ class ProcessingConfig(BaseModel):
     queue_max_size: int = 1000
     task_timeout_seconds: int = 300
     unload_after_task: bool = True
+    auto_dispatch: bool = True
+    dispatcher_interval_seconds: float = Field(default=0.1, gt=0, le=60)
 
     @model_validator(mode="after")
     def validate_single_workflow(self) -> "ProcessingConfig":
