@@ -1,162 +1,212 @@
-# AI Broker — Neural Gateway Service
+# AI Broker — Consensus Gateway
 
-Gateway inteligente de inferencia para LLMs locales (Ollama) y externos (DeepSeek). Enrutamiento dinámico, cola serial, dashboard HTMX, control de presupuesto y health checks proactivos.
-
-## Arquitectura
-
-```
- Cliente HTTP ──► AI Broker ──► Ollama (local)
-                      │         ├── llama3.1:70b
-                      │         ├── llama3.1:8b
-                      │         └── qwen2.5:72b
-                      │
-                      ├──► DeepSeek API
-                      │
-                      └──► Dashboard Web (FastAPI + HTMX)
-```
+Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
 
 ## Stack
 
 | Capa | Tecnología |
 |------|------------|
-| Backend | FastAPI (Python 3.10+) |
-| Frontend | Jinja2 + Tailwind CSS + HTMX |
-| Cliente HTTP | httpx async |
-| Logging | structlog |
-| Persistencia | SQLite + WAL journal |
-| LLMs locales | Ollama |
-| LLMs externos | DeepSeek API |
-| Seguridad | keyring (Windows Credential Manager) |
+| Framework | FastAPI (Python 3.10+) |
+| Validación | Pydantic v2 (schemas estrictos, `extra="forbid"`) |
+| Persistencia | SQLite + WAL + event sourcing |
+| Serialización | JSON canónico con `separators=(',',':')` |
+| Scheduling adaptativo | Paralelo / Waves / Secuencial según VRAM |
+| LLMs | Ollama (local), DeepSeek (cloud), extensible |
 
 ## Funcionalidades
 
-- **Enrutamiento inteligente**: selecciona el modelo óptimo según tamaño de inferencia, VRAM, coste y preferencias del cliente
-- **Cola serial estricta**: un solo slot LLM global, aceptación asíncrona (`202 Accepted`), reordenación y cancelación de tareas
-- **Dashboard en tiempo real**: polling HTMX cada 3s, cola Kanban, monitor de VRAM y presupuesto
-- **Autodescubrimiento de modelos**: consulta dinámica a Ollama `/api/tags` con metadata enriquecida
-- **Control de presupuesto DeepSeek**: tracking de coste y alertas al 80% del límite mensual
-- **Health supervisor**: `HealthSupervisor` independiente con checks de SQLite, Ollama, VRAM, disco y proveedores externos
-- **Servicio Windows**: instalación con inicio automático y reinicio tras fallo
-- **Logging estructurado**: `structlog` con trazabilidad por task_id
-- **Recuperación al arranque**: tareas `processing` se devuelven a `queued` con incremento de `attempt`
+### 1. Consenso multi-LLM (*mixture of agents*)
+
+- **Estrategia `single`**: inferencia con un solo modelo (modo legacy)
+- **Estrategia `mixture_of_agents`**: ejecución por consenso con múltiples proponentes y un árbitro
+- **Presets**: `fast` (sin evaluación), `standard`, `verified`, `high_stakes`
+- Pipeline por etapas: `resource_planning → proposing → [evaluating] → synthesizing`
+- Trazabilidad total: cada invocación individual queda registrada con tokens, coste y latencia
+
+### 2. Planificación adaptativa de recursos
+
+- **Modos de scheduling**: `parallel`, `waves`, `sequential`
+- Cálculo automático de capacidad paralela según VRAM disponible (`local_vram_budget_gb`)
+- Plan de ejecución con olas de invocaciones paralelas
+- Reserva de VRAM por tarea y modelo
+
+### 3. Cola durable con event sourcing
+
+- Aceptación asíncrona (`202 Accepted`) con persistencia inmediata
+- Cola ordenada por prioridad y posición
+- Reordenación mediante PATCH
+- Cancelación idempotente con flag `cancel_requested`
+- Sistema completo de eventos (`task.created`, `task.status_changed`, `task.cancelled`, `task.recovered`, `queue.reordered`, `model_invocation.completed`, `artifact.created`)
+- Recuperación automática al arranque: tareas en estado activo vuelven a `queued` con incremento de `attempt`
+
+### 4. Artefactos con integridad criptográfica
+
+- Escritura atómica (temp file + `os.replace`)
+- Hash SHA-256 de cada artefacto
+- Almacenamiento por tarea en `state/tasks/{task_id}/`
+- Trazabilidad en BD: cada artefacto vinculado a su invocación y run de consenso
+
+### 5. Selección de modelos
+
+- **Modos**: `auto`, `manual`, `hybrid`
+- Política de diversidad (`different_families`)
+- Proponentes requeridos y preferidos
+- Árbitro explícito o automático (`strongest_available`)
+- Política de sustitución si un modelo no está disponible
+
+### 6. Configuración declarativa
+
+- Archivo YAML (`broker_config.yaml`) con merge profundo sobre defaults
+- Secciones: `server`, `persistence`, `processing`, `resources`, `health`
+- Validación en arranque via Pydantic
+
+### 7. Health checks
+
+- Endpoints: `/health` (detallado), `/health/live` (liveness), `/health/ready` (readiness)
+- Dependencias con estado `healthy` / `degraded` / `unavailable`
+- Latencia medida en ms por dependencia
+- SQLite, Ollama, VRAM, disco y proveedores externos (configurable)
 
 ## API
 
 | Endpoint | Método | Descripción |
 |----------|--------|-------------|
-| `/api/v1/tasks` | POST | Crear tarea (validación Pydantic, devuelve 202) |
+| `/api/v1/tasks` | POST | Crear tarea (validación estricta, devuelve 202) |
 | `/api/v1/tasks/{id}` | GET | Estado y resultado de tarea |
 | `/api/v1/tasks/{id}` | DELETE | Cancelación idempotente |
-| `/api/v1/models` | GET | Modelos disponibles con estado |
-| `/api/v1/queue` | GET | Snapshot de la cola |
+| `/api/v1/queue` | GET | Snapshot de cola (pending / active / terminal) |
 | `/api/v1/queue` | PATCH | Reordenar tareas pendientes |
+| `/api/v1/dispatcher/tick` | POST | Tick del dispatcher para procesar siguiente tarea |
+| `/api/v1/models` | GET | Modelos disponibles |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/health` | GET | Estado detallado de dependencias |
-| `/health/live` | GET | Liveness del proceso y event loop |
+| `/health/live` | GET | Liveness del proceso |
 | `/health/ready` | GET | Readiness de SQLite y dispatcher |
 
-### Contrato de tarea
+## Esquema de petición
 
 ```json
 {
-  "task_id": "proc_20240620_143022_dQw4w9WgXcQ",
-  "status": "completed",
-  "model_used": "llama3.1:70b",
-  "assistant_content": "Respuesta del modelo sin interpretación del Broker...",
-  "processing_time_seconds": 45.2,
-  "tokens_input": 8400,
-  "tokens_output": 2100,
-  "cost_usd": 0.001176,
-  "metadata": {
-    "model_tier": "local",
-    "fallback_used": false,
-    "inference_kind": "chat"
-  }
+  "request_id": "cli-001",
+  "content": {
+    "prompt": "Analiza el impacto...",
+    "attachments": [],
+    "metadata": {}
+  },
+  "output": {
+    "format": "markdown",
+    "language": "es"
+  },
+  "model_requirements": {
+    "preferred_model": null,
+    "fallback_allowed": true,
+    "cloud_allowed": false,
+    "allowed_providers": ["ollama"],
+    "max_cost_usd": null
+  },
+  "execution": {
+    "strategy": "mixture_of_agents",
+    "preset": "fast",
+    "scheduling": "adaptive",
+    "max_proposers": 3,
+    "max_judges": 1,
+    "max_rounds": 1,
+    "timeout_seconds": 600,
+    "early_stop": true,
+    "selection": {
+      "mode": "auto",
+      "diversity_policy": "different_families",
+      "arbiter_policy": "strongest_available",
+      "proposer_count": 3
+    }
+  },
+  "risk": {
+    "data_classification": "internal",
+    "human_review_required": false
+  },
+  "priority": 100
 }
 ```
 
-## Estados de progreso
-
-```
-queued → routing → generating → completed
-```
-
-## Algoritmo de enrutamiento
-
-Matriz de decisión que prioriza el modelo preferido del cliente, con fallbacks progresivos:
-
-| Condición | Acción |
-|-----------|--------|
-| Modelo preferido disponible con VRAM suficiente | Usar preferido |
-| > 15k tokens, VRAM disponible, calidad alta | Modelo local grande |
-| > 15k tokens, sin VRAM, presupuesto disponible | deepseek-chat |
-| > 15k tokens, sin VRAM ni presupuesto | Encolar para después |
-| 8k – 15k tokens | llama3.1:8b |
-| < 8k tokens | Modelo más rápido disponible |
-
-## Dashboard
-
-- Panel de modelos disponibles (locales y externos) con estado
-- Cola Kanban: Pendiente / Procesando / Hecho
-- Tarea activa con barra de progreso, modelo asignado y botón de cancelación
-- Monitor de VRAM y presupuesto mensual
-- Drag & drop para reordenar cola (HTMX)
-- Actualización automática cada 3s
-
-## Contrato normativo del MVP
+## Contrato normativo
 
 ### Responsabilidad del Broker
 
-El Broker recibe inferencias ya preparadas. Su responsabilidad termina en validar el contrato técnico, encolar, enrutar al modelo/proveedor y devolver la respuesta cruda. No genera prompts, no resuelve placeholders, no divide contenido, no sintetiza resultados y no interpreta respuestas.
+El Broker recibe inferencias ya preparadas. Su responsabilidad termina en validar el contrato técnico, encolar, ejecutar la estrategia de consenso (proponentes + árbitro) y devolver la respuesta sintetizada. No genera prompts, no resuelve placeholders, no divide contenido y no interpreta respuestas.
 
 ### API y persistencia
 
-- Validación Pydantic estricta en `POST /api/v1/tasks`. Una petición inválida se rechaza con `422 CONTRACT_VALIDATION_FAILED` sin efectos en SQLite ni la cola.
+- Validación Pydantic estricta con `extra="forbid"`. Petición inválida → `422 CONTRACT_VALIDATION_FAILED`
 - Persistencia en SQLite WAL (`state/broker.db`)
-- `POST` devuelve `202` con `task_id`, `status: "queued"` y URLs de consulta/cancelación
-- `DELETE` es idempotente
+- Event sourcing completo: toda mutación registra un evento en la tabla `events`
+- Reordenación validada: requiere la lista completa de IDs pendientes
 
-### Planificador serial
+### Ejecución por consenso
 
-- Un solo worker Uvicorn y un slot global `max_active_llm_tasks: 1`
-- La API acepta y persiste tareas aunque haya una generación en curso
-- Cada tarea equivale a una única inferencia. Chunking, encadenamiento y síntesis son responsabilidad del cliente
-- Si la inferencia excede el contexto del modelo, se rechaza con `CONTEXT_LIMIT_EXCEEDED`
-
-### VRAM y cancelación
-
-- Protección global con `asyncio.Semaphore(1)` y lease persistido de tarea/modelo
-- Cancelación: cierra la respuesta HTTP, marca `cancel_requested`, envía `keep_alive: 0` y verifica con `/api/ps` antes de entregar el slot
-- `keep_alive: 0` nunca se envía sobre un modelo con lease activo
+- Un solo workflow activo global (`max_active_workflows: 1`)
+- Scheduling adaptativo: paralelo si hay VRAM suficiente, waves en caso intermedio, secuencial en caso contrario
+- Cada invocación individual se persiste en `model_invocations`
+- Si no se alcanza quórum mínimo (2 proponentes), la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`
+- Cancelación en cualquier etapa: verifica `cancel_requested` entre invocaciones
 
 ### Seguridad (MVP)
 
-- Sin autenticación entre cliente y broker. Solo LAN privada. CORS desactivado.
-- API keys en Windows Credential Manager (`keyring`). Sin claves en SQLite, YAML ni logs.
-- Dashboard solo muestra si una clave está configurada y sus últimos 4 caracteres.
-- Service Windows con inicio automático y recuperación tras fallo.
-
-### Health supervisor
-
-- SQLite cada 10s, Ollama/VRAM/disco cada 30s, proveedores externos cada 5min
-- `/health/live`: proceso y event loop vivos
-- `/health/ready`: `200` solo si SQLite y dispatcher pueden aceptar tareas
-- Ollama o proveedor caído degrada el servicio pero no impide encolar
+- Sin autenticación entre cliente y broker (solo LAN privada, CORS desactivado por defecto)
+- Clasificación de datos: `public`, `internal`, `confidential`, `local_only`
+- Modo `local_only`: fuerza proveedor Ollama y deshabilita cloud automáticamente
 
 ### Recuperación
 
-- Al arrancar: limpieza de modelos residuales, reconciliación de leases, tareas `processing` a `queued`
+- Al arrancar: tareas en estado activo se devuelven a `queued` con `attempt + 1`
+- Reconciliación de artefactos huérfanos
+- Integridad referencial vía foreign keys con `ON DELETE CASCADE`
+
+## Estados de progreso
+
+### Estrategia `single`
+```
+queued → generating → completed
+```
+
+### Estrategia `mixture_of_agents` / preset `fast`
+```
+queued → resource_planning → proposing → synthesizing → completed
+```
+
+### Estrategia `mixture_of_agents` / preset `standard`, `verified`, `high_stakes`
+```
+queued → resource_planning → proposing → evaluating → synthesizing → completed
+```
+
+Cada tarea puede terminal en `completed`, `failed` o `cancelled` desde cualquier estado.
 
 ## Inicio rápido
 
 ```bash
-python -m venv venv
-venv\Scripts\activate
-pip install fastapi uvicorn httpx pyyaml jinja2 python-multipart structlog psutil python-dotenv keyring
-uvicorn app.main:app --host 192.168.1.x --port 8080 --workers 1
+pip install -e .[dev]
+uvicorn app.main:app --reload --port 8080 --workers 1
 ```
 
-Ver [Agent_AI_Broker.md](Agent_AI_Broker.md) para el diseño completo y [Deployment_Guide.md](Deployment_Guide.md) para el despliegue normativo.
+## Estructura del proyecto
+
+```
+├── app/
+│   ├── artifacts.py        # Almacén atómico con hash SHA-256
+│   ├── config.py           # Configuración YAML + merge profundo
+│   ├── coordinator.py      # Orquestador de consenso multi-LLM
+│   ├── db.py               # SQLite con WAL, schema y event sourcing
+│   ├── main.py             # FastAPI app + endpoints
+│   ├── providers.py        # Proveedor bootstrap (mock determinista)
+│   ├── repository.py       # Capa de acceso a datos
+│   ├── resource_scheduler.py  # Planificador adaptativo de recursos
+│   └── schemas.py          # Modelos Pydantic (contrato completo)
+├── tests/
+│   ├── test_api.py         # Tests de integración de API
+│   └── test_contract.py    # Tests de validación de contrato
+├── broker_config.yaml      # Configuración del broker
+├── pyproject.toml          # Proyecto Python + dependencias
+└── state/tasks/            # Artefactos de ejecución (gitignored)
+```
 
 ## Licencia
 
