@@ -549,7 +549,7 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 
 - La API acepta y persiste tareas aunque exista una generación LLM en curso; responder `202` no consume el slot de ejecución.
 - Solo un workflow Broker está activo globalmente. En `single` realiza una invocación; `mixture_of_agents` puede planificar invocaciones internas acotadas.
-- El dispatcher no crea varias tareas de generación. Espera a que la tarea activa sea terminal antes de reclamar la siguiente por orden de cola.
+- El dispatcher reclama mediante una transición atómica `queued → routing` dentro de `BEGIN IMMEDIATE`. El loop automático y el tick manual comparten esa operación y nunca activan un segundo workflow mientras exista uno activo.
 - Una tarea `single` equivale a una inferencia. Una tarea `mixture_of_agents` puede realizar consenso técnico interno; el chunking y los workflows de conocimiento siguen siendo externos.
 - Una generación lenta permanece activa; las tareas siguientes permanecen `queued`, mientras el dashboard, el polling, el alta de nuevas tareas y la cancelación siguen respondiendo.
 - No se permite configurar un valor mayor que uno en el MVP. Un valor distinto provoca error de configuración al arrancar.

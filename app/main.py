@@ -166,7 +166,7 @@ async def _dispatcher_loop(
     interval_seconds: float,
 ) -> None:
     while not stop.is_set():
-        task_id = repository.get_next_queued_task_id()
+        task_id = repository.claim_next_queued_task_id()
         if task_id is not None:
             try:
                 await coordinator.process_task(repository, task_id)

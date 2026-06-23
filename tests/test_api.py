@@ -182,3 +182,22 @@ def test_idempotency_survives_broker_restart(tmp_path: Path) -> None:
         assert replay.status_code == 200
         assert replay.json()["task_id"] == task_id
         assert len(restarted_client.get("/api/v1/queue").json()["pending"]) == 1
+
+
+def test_claim_is_atomic_and_never_activates_second_workflow(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        for ordinal in (1, 2):
+            response = client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": f"claim:{ordinal}", "content": {"prompt": f"Tarea {ordinal}"}},
+            )
+            assert response.status_code == 202
+        repository = client.app.state.repository
+        first = repository.claim_next_queued_task_id()
+        second = repository.claim_next_queued_task_id()
+        queue = client.get("/api/v1/queue").json()
+
+        assert first is not None
+        assert second is None
+        assert len(queue["active"]) == 1
+        assert len(queue["pending"]) == 1

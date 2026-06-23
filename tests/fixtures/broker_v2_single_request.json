@@ -1,0 +1,39 @@
+{
+  "idempotency_key": "contract:capture-001:1:single",
+  "request_id": "proc_capture-001_r1_single",
+  "content": {
+    "prompt": "<system_instructions>Analiza con precisión.</system_instructions>\n\n<user_request>Resume la evidencia proporcionada.</user_request>",
+    "attachments": [],
+    "metadata": {"workflow_id": "wf_capture-001_r1", "step_id": "single"}
+  },
+  "output": {"format": "markdown", "json_schema": null, "language": "es"},
+  "generation": {"temperature": 0.3, "max_output_tokens": 4000},
+  "model_requirements": {
+    "preferred_model": "llama3.1:8b",
+    "fallback_allowed": true,
+    "cloud_allowed": false,
+    "allowed_providers": ["ollama"],
+    "max_cost_usd": 0.05
+  },
+  "execution": {
+    "strategy": "single",
+    "preset": "fast",
+    "scheduling": "adaptive",
+    "max_proposers": 1,
+    "max_judges": 0,
+    "max_rounds": 1,
+    "timeout_seconds": 600,
+    "early_stop": true,
+    "selection": {
+      "mode": "auto",
+      "diversity_policy": "different_families",
+      "arbiter_policy": "strongest_available",
+      "allow_substitution": true,
+      "proposers": [],
+      "required_proposers": [],
+      "proposer_count": 1
+    }
+  },
+  "risk": {"data_classification": "local_only", "human_review_required": false},
+  "priority": 100
+}

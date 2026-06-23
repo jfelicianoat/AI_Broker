@@ -95,16 +95,39 @@ class TaskRepository:
             raise KeyError(task_id)
         return TaskCreateRequest.model_validate(loads_json(row["request_json"]))
 
-    def get_next_queued_task_id(self) -> str | None:
-        row = self.db.query_one(
-            """
-            SELECT id FROM tasks
-            WHERE status = 'queued'
-            ORDER BY queue_position ASC, priority ASC, created_at ASC
-            LIMIT 1
-            """
+    def claim_next_queued_task_id(self) -> str | None:
+        """Reclama como máximo un workflow dentro de una transacción inmediata."""
+        active = (
+            "routing", "planning", "resource_planning", "chunking", "generating",
+            "proposing", "evaluating", "debating", "synthesizing", "verifying",
         )
-        return str(row["id"]) if row else None
+        marks = ",".join("?" for _ in active)
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            if connection.execute(
+                f"SELECT 1 FROM tasks WHERE status IN ({marks}) LIMIT 1", active
+            ).fetchone():
+                return None
+            row = connection.execute(
+                "SELECT id, progress_json FROM tasks WHERE status = 'queued' "
+                "ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            progress = loads_json(row["progress_json"], {})
+            progress["phase"] = TaskStatus.routing.value
+            cursor = connection.execute(
+                "UPDATE tasks SET status = ?, queue_position = NULL, progress_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'queued'",
+                (TaskStatus.routing.value, dumps_json(progress), now, row["id"]),
+            )
+            if cursor.rowcount != 1:
+                return None
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (row["id"], "task.claimed", dumps_json({"status": "routing"}), now),
+            )
+            return str(row["id"])
 
     def update_task(
         self,

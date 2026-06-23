@@ -40,6 +40,7 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 - Recuperación automática al arranque: tareas en estado activo vuelven a `queued` con incremento de `attempt`
 - Creación idempotente con `idempotency_key` y hash canónico: replay idéntico devuelve `200`; contenido distinto devuelve `409`
 - Dispatcher autónomo de fondo; `/api/v1/dispatcher/tick` queda para diagnóstico y pruebas
+- Reclamación atómica `queued → routing` dentro de `BEGIN IMMEDIATE`; el dispatcher automático y el tick manual no pueden activar dos workflows
 
 ### 4. Artefactos con integridad criptográfica
 

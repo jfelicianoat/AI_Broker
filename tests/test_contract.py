@@ -61,7 +61,7 @@ def test_local_only_forces_ollama_provider() -> None:
 
 
 def test_shared_v2_single_fixture_matches_broker_schema() -> None:
-    fixture = Path(__file__).parents[2] / "docs" / "contracts" / "broker_v2_single_request.json"
+    fixture = Path(__file__).parent / "fixtures" / "broker_v2_single_request.json"
     payload = TaskCreateRequest.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
     assert payload.execution.strategy == ExecutionStrategy.single
     assert payload.idempotency_key == "contract:capture-001:1:single"

@@ -68,7 +68,7 @@ class ConsensusCoordinator:
         return run_id
 
     async def process_next(self, repository) -> str | None:
-        task_id = repository.get_next_queued_task_id()
+        task_id = repository.claim_next_queued_task_id()
         if task_id is None:
             return None
         await self.process_task(repository, task_id)
