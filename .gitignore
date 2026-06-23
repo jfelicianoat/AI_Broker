@@ -1,1 +1,6 @@
 /.local/
+/.pytest_cache/
+/__pycache__/
+/ai_broker.egg-info/
+/state/
+*.pyc

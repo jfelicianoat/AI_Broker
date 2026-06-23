@@ -1,0 +1,30 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+  workers: 1
+  cors_enabled: false
+
+persistence:
+  database: "state/broker.db"
+  journal_mode: "WAL"
+
+processing:
+  max_active_workflows: 1
+  max_parallel_invocations: "auto"
+  queue_max_size: 1000
+  task_timeout_seconds: 300
+  unload_after_task: true
+
+resources:
+  local_vram_budget_gb: 64
+  vram_safety_margin_gb: 6
+  max_loaded_local_models: "auto"
+  scheduling_policy: "adaptive"
+  allow_execution_waves: true
+
+health:
+  sqlite_interval_seconds: 10
+  local_dependencies_interval_seconds: 30
+  external_providers_interval_seconds: 300
+  disk_free_alert_gb: 10
+

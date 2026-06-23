@@ -1,0 +1,23 @@
+[project]
+name = "ai-broker"
+version = "0.1.0"
+description = "Durable AI Broker gateway with FastAPI, SQLite and adaptive execution contracts."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.111.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.7.0",
+    "pyyaml>=6.0.1",
+    "structlog>=24.1.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
