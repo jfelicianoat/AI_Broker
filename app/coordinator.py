@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from app.artifacts import ArtifactStore
 from app.db import Database, dumps_json
-from app.providers import BootstrapModelProvider, ModelOutput
+from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.repository import _utc_now_iso
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import ExecutionStrategy, ModelReference, TaskCreateRequest, TaskStatus
@@ -19,7 +21,7 @@ class ConsensusCoordinator:
         db: Database,
         scheduler: ResourceScheduler,
         artifacts: ArtifactStore | None = None,
-        provider: BootstrapModelProvider | None = None,
+        provider: Any | None = None,
     ) -> None:
         self.db = db
         self.scheduler = scheduler
@@ -75,44 +77,59 @@ class ConsensusCoordinator:
         return task_id
 
     async def process_task(self, repository, task_id: str) -> None:
-        request = repository.get_task_request(task_id)
-        if repository.is_cancel_requested(task_id):
-            repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-            return
-
-        if request.execution.strategy == ExecutionStrategy.single:
-            await self._process_single(repository, task_id, request)
-            return
-
-        if request.execution.preset.value != "fast":
+        try:
+            request = repository.get_task_request(task_id)
+            if repository.is_cancel_requested(task_id):
+                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
+            if request.execution.strategy == ExecutionStrategy.single:
+                await self._process_single(repository, task_id, request)
+                return
+            if request.execution.preset.value != "fast":
+                repository.update_task(
+                    task_id,
+                    TaskStatus.failed,
+                    progress={"phase": TaskStatus.failed.value},
+                    error={
+                        "code": "CONSENSUS_PRESET_NOT_IMPLEMENTED",
+                        "message": "Fase B only implements mixture_of_agents/fast",
+                    },
+                    clear_queue_position=True,
+                )
+                return
+            await self._process_fast_consensus(repository, task_id, request)
+        except ProviderError as error:
+            if repository.is_cancel_requested(task_id):
+                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
                 progress={"phase": TaskStatus.failed.value},
                 error={
-                    "code": "CONSENSUS_PRESET_NOT_IMPLEMENTED",
-                    "message": "Fase B only implements mixture_of_agents/fast",
+                    "code": error.code,
+                    "message": str(error),
+                    "retryable": error.retryable,
                 },
                 clear_queue_position=True,
             )
-            return
-
-        await self._process_fast_consensus(repository, task_id, request)
 
     async def _process_single(self, repository, task_id: str, request: TaskCreateRequest) -> None:
-        model = ModelReference(
-            provider=request.model_requirements.allowed_providers[0],
-            deployment="bootstrap",
-            model=request.model_requirements.preferred_model or "bootstrap-single",
-            role="single",
-        )
+        model = (await self.provider.select(request, 1, ["single"]))[0]
         repository.update_task(
             task_id,
             TaskStatus.generating,
             progress={"phase": TaskStatus.generating.value, "invocations_completed": 0, "invocations_total": 1},
             clear_queue_position=True,
         )
-        output = await self.provider.propose(request, model, 1)
+        output = await self._run_cancellable(
+            repository,
+            task_id,
+            self.provider.propose(request, model, 1),
+        )
+        if repository.is_cancel_requested(task_id):
+            repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+            return
         invocation_id = repository.record_invocation(task_id, None, "single", model, output)
         artifact = self.artifacts.write_markdown(task_id, "single/final.md", output.content)
         repository.record_artifact(task_id, None, invocation_id, "single_output", artifact)
@@ -130,8 +147,8 @@ class ConsensusCoordinator:
     async def _process_fast_consensus(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         run_id = repository.get_consensus_run_id(task_id) or self.initialize_run(task_id, request)
         assert run_id is not None
-        proposers = self._select_proposers(request)
-        arbiter = self._select_arbiter(request)
+        proposers = await self._select_proposers(request)
+        arbiter = await self._select_arbiter(request)
         resource_plan = self.scheduler.plan(request)
         progress = {
             "phase": TaskStatus.resource_planning.value,
@@ -152,13 +169,29 @@ class ConsensusCoordinator:
         repository.update_task(task_id, TaskStatus.proposing, progress={**progress, "phase": TaskStatus.proposing.value})
         for wave_index, labels in enumerate(resource_plan.waves, start=1):
             active_models = proposers[completed : completed + len(labels)]
+            if repository.is_cancel_requested(task_id):
+                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
             wave_outputs: list[tuple[ModelReference, ModelOutput]] = []
-            for model in active_models:
-                if repository.is_cancel_requested(task_id):
-                    repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-                    return
-                output = await self.provider.propose(request, model, len(proposals) + len(wave_outputs) + 1)
-                wave_outputs.append((model, output))
+            for ordinal, model in enumerate(active_models, start=1):
+                invocation_request = self._with_remaining_budget(
+                    request,
+                    [output for _, output in proposals] + [output for _, output in wave_outputs],
+                )
+                try:
+                    output = await self._run_cancellable(
+                        repository,
+                        task_id,
+                        self.provider.propose(invocation_request, model, len(proposals) + ordinal),
+                    )
+                    wave_outputs.append((model, output))
+                except ProviderError as error:
+                    if not error.retryable:
+                        raise
+
+            if repository.is_cancel_requested(task_id):
+                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
 
             for model, output in wave_outputs:
                 ordinal = len(proposals) + 1
@@ -172,6 +205,7 @@ class ConsensusCoordinator:
                 repository.record_artifact(task_id, run_id, invocation_id, "proposer_output", artifact)
                 proposals.append((model, output))
                 completed += 1
+                self._enforce_budget(request, [item for _, item in proposals])
                 repository.update_task(
                     task_id,
                     TaskStatus.proposing,
@@ -211,7 +245,16 @@ class ConsensusCoordinator:
                 "cost_actual_usd": sum(output.cost_usd for _, output in proposals),
             },
         )
-        synthesis = await self.provider.synthesize(request, arbiter, [output for _, output in proposals])
+        synthesis_request = self._with_remaining_budget(request, [output for _, output in proposals])
+        synthesis = await self._run_cancellable(
+            repository,
+            task_id,
+            self.provider.synthesize(synthesis_request, arbiter, [output for _, output in proposals]),
+        )
+        if repository.is_cancel_requested(task_id):
+            repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+            return
+        self._enforce_budget(request, [output for _, output in proposals] + [synthesis])
         synthesis_invocation_id = repository.record_invocation(task_id, run_id, "arbiter", arbiter, synthesis)
         synthesis_artifact = self.artifacts.write_markdown(
             task_id,
@@ -226,12 +269,12 @@ class ConsensusCoordinator:
         result = {
             "result_markdown": synthesis.content,
             "consensus": {
-                "level": "bootstrap",
-                "confidence": 0.0,
+                "level": "fast",
+                "confidence": None,
                 "proposers_completed": len(proposals),
                 "rounds": 1,
                 "remaining_disagreements": [],
-                "warnings": ["Bootstrap provider used; real LLM adapters are not connected yet."],
+                "warnings": [],
             },
             "scheduling": {
                 "mode_used": resource_plan.mode.value,
@@ -281,35 +324,62 @@ class ConsensusCoordinator:
         manifest_artifact = self.artifacts.write_text(task_id, "manifest.json", dumps_json(manifest))
         repository.record_artifact(task_id, run_id, None, "manifest", manifest_artifact)
 
-    def _select_proposers(self, request: TaskCreateRequest) -> list[ModelReference]:
+    async def _select_proposers(self, request: TaskCreateRequest) -> list[ModelReference]:
         selection = request.execution.selection
         if selection.mode.value == "manual":
             return selection.proposers[: request.execution.max_proposers]
 
-        provider = request.model_requirements.allowed_providers[0]
         selected = list(selection.required_proposers) if selection.mode.value == "hybrid" else []
         target_count = request.execution.max_proposers
         roles = ["generalist", "specialist", "skeptic", "analyst", "reviewer"]
-        while len(selected) < target_count:
-            ordinal = len(selected) + 1
-            selected.append(
-                ModelReference(
-                    provider=provider,
-                    deployment="bootstrap",
-                    model=f"bootstrap-proposer-{ordinal}",
-                    role=roles[ordinal - 1],
-                )
-            )
+        missing = target_count - len(selected)
+        if missing > 0:
+            selected.extend(await self.provider.select(request, missing, roles[len(selected):target_count]))
         return selected[:target_count]
 
-    def _select_arbiter(self, request: TaskCreateRequest) -> ModelReference:
+    async def _select_arbiter(self, request: TaskCreateRequest) -> ModelReference:
         selection = request.execution.selection
         if selection.arbiter is not None:
             return selection.arbiter
         if selection.preferred_arbiter is not None:
             return selection.preferred_arbiter
-        provider = request.model_requirements.allowed_providers[0]
-        return ModelReference(provider=provider, deployment="bootstrap", model="bootstrap-arbiter", role="arbiter")
+        return (await self.provider.select(request, 1, ["arbiter"]))[0]
+
+    def _enforce_budget(self, request: TaskCreateRequest, outputs: list[ModelOutput]) -> None:
+        maximum = request.model_requirements.max_cost_usd
+        actual = sum(output.cost_usd for output in outputs)
+        if maximum is not None and actual > maximum:
+            raise ProviderError(
+                "BUDGET_EXCEEDED",
+                f"El coste acumulado ({actual:.6f} USD) supera el presupuesto ({maximum:.6f} USD)",
+            )
+
+    def _with_remaining_budget(
+        self,
+        request: TaskCreateRequest,
+        outputs: list[ModelOutput],
+    ) -> TaskCreateRequest:
+        maximum = request.model_requirements.max_cost_usd
+        if maximum is None:
+            return request
+        remaining = maximum - sum(output.cost_usd for output in outputs)
+        if remaining <= 0:
+            raise ProviderError("BUDGET_EXCEEDED", "No queda presupuesto para otra invocación")
+        requirements = request.model_requirements.model_copy(update={"max_cost_usd": remaining})
+        return request.model_copy(update={"model_requirements": requirements})
+
+    async def _run_cancellable(self, repository, task_id: str, operation) -> ModelOutput:
+        task = asyncio.create_task(operation)
+        while not task.done():
+            await asyncio.wait({task}, timeout=0.1)
+            if repository.is_cancel_requested(task_id):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise ProviderError("TASK_CANCELLED", "La inferencia fue cancelada")
+        return await task
 
     def _usage(self, outputs: list[ModelOutput]) -> dict:
         return {

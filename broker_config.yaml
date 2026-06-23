@@ -16,6 +16,7 @@ processing:
   unload_after_task: true
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
+  provider_mode: "real"
 
 resources:
   local_vram_budget_gb: 64
@@ -29,4 +30,21 @@ health:
   local_dependencies_interval_seconds: 30
   external_providers_interval_seconds: 300
   disk_free_alert_gb: 10
+
+providers:
+  ollama:
+    enabled: true
+    base_url: "http://127.0.0.1:11434"
+    timeout_seconds: 300
+    unload_timeout_seconds: 10
+  deepseek:
+    enabled: false
+    base_url: "https://api.deepseek.com"
+    timeout_seconds: 300
+    api_key_env: "DEEPSEEK_API_KEY"
+    keyring_service: "ai-broker"
+    keyring_username: "deepseek_api_key"
+    default_model: "deepseek-chat"
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
 

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.db import Database
+from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
@@ -32,7 +33,8 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
     repository = TaskRepository(db)
     scheduler = ResourceScheduler(broker_config)
-    coordinator = ConsensusCoordinator(db, scheduler)
+    provider = build_provider(broker_config)
+    coordinator = ConsensusCoordinator(db, scheduler, provider=provider)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -55,6 +57,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
             stop_dispatcher.set()
             if dispatcher_task is not None:
                 await dispatcher_task
+            await provider.close()
             db.close()
 
     app = FastAPI(title="AI Broker", version="0.1.0", lifespan=lifespan)
@@ -63,6 +66,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     app.state.repository = repository
     app.state.scheduler = scheduler
     app.state.coordinator = coordinator
+    app.state.provider = provider
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -131,10 +135,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
 
     @app.get("/api/v1/models")
     async def list_models() -> dict[str, object]:
-        return {
-            "models": [],
-            "note": "Ollama discovery will be added after the durable API and scheduler baseline.",
-        }
+        return {"models": await provider.models()}
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
     async def get_usage() -> UsageResponse:
@@ -143,18 +144,18 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
-        return _health_response(db)
+        return await _health_response(db, provider)
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:
         return {"status": "live"}
 
     @app.get("/health/ready", response_model=HealthResponse)
-    async def ready() -> HealthResponse:
-        response = _health_response(db)
-        if response.status == "unavailable":
-            raise HTTPException(status_code=503, detail=response.model_dump(mode="json"))
-        return response
+    async def ready(response: Response) -> HealthResponse:
+        health_response = await _health_response(db, provider)
+        if health_response.dependencies["sqlite"].status == "unavailable":
+            response.status_code = 503
+        return health_response
 
     return app
 
@@ -189,7 +190,7 @@ async def _dispatcher_loop(
                 pass
 
 
-def _health_response(db: Database) -> HealthResponse:
+async def _health_response(db: Database, provider) -> HealthResponse:
     checked_at = datetime.now(timezone.utc)
     try:
         start = datetime.now(timezone.utc)
@@ -209,7 +210,20 @@ def _health_response(db: Database) -> HealthResponse:
             detail=str(exc),
         )
         status = "unavailable"
-    return HealthResponse(status=status, checked_at=checked_at, dependencies={"sqlite": sqlite})
+    dependencies = {"sqlite": sqlite}
+    for name, check in (await provider.health()).items():
+        dependencies[name] = HealthDependency(
+            status=check["status"],
+            checked_at=datetime.now(timezone.utc),
+            detail=check.get("detail"),
+            latency_ms=check.get("latency_ms"),
+        )
+    states = {dependency.status for dependency in dependencies.values()}
+    if "unavailable" in states and sqlite.status != "unavailable":
+        status = "degraded"
+    elif "degraded" in states:
+        status = "degraded"
+    return HealthResponse(status=status, checked_at=checked_at, dependencies=dependencies)
 
 
 app = create_app()

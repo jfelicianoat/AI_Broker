@@ -2,6 +2,8 @@
 
 Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
 
+Estado actual: fases 1–3 operativas. El Broker usa proveedores reales por defecto, descubre el catálogo de Ollama dinámicamente y mantiene una única llamada LLM activa global. El proveedor `bootstrap` queda reservado para pruebas.
+
 ## Stack
 
 | Capa | Tecnología |
@@ -25,9 +27,9 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 
 ### 2. Planificación adaptativa de recursos
 
-- **Modos de scheduling**: `parallel`, `waves`, `sequential`
-- Cálculo automático de capacidad paralela según VRAM disponible (`local_vram_budget_gb`)
-- Plan de ejecución con olas de invocaciones paralelas
+- **Modos de planificación**: `parallel`, `waves`, `sequential`
+- Cálculo de capacidad según VRAM disponible (`local_vram_budget_gb`)
+- Las invocaciones planificadas se serializan mediante un semáforo global en el MVP
 - Reserva de VRAM por tarea y modelo
 
 ### 3. Cola durable con event sourcing
@@ -56,11 +58,14 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 - Proponentes requeridos y preferidos
 - Árbitro explícito o automático (`strongest_available`)
 - Política de sustitución si un modelo no está disponible
+- Catálogo real de Ollama (`/api/tags` + `/api/show`) sin listas hardcodeadas
+- DeepSeek opcional con credencial en variable de entorno o Windows Credential Manager
+- Control preventivo y acumulado de `max_cost_usd`
 
 ### 6. Configuración declarativa
 
 - Archivo YAML (`broker_config.yaml`) con merge profundo sobre defaults
-- Secciones: `server`, `persistence`, `processing`, `resources`, `health`
+- Secciones: `server`, `persistence`, `processing`, `resources`, `health`, `providers`
 - Validación en arranque via Pydantic
 
 ### 7. Health checks
@@ -68,7 +73,7 @@ Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixtur
 - Endpoints: `/health` (detallado), `/health/live` (liveness), `/health/ready` (readiness)
 - Dependencias con estado `healthy` / `degraded` / `unavailable`
 - Latencia medida en ms por dependencia
-- SQLite, Ollama, VRAM, disco y proveedores externos (configurable)
+- SQLite y proveedores configurados; Ollama caído degrada el servicio sin bloquear la cola
 
 ## API
 
@@ -152,7 +157,7 @@ El Broker recibe inferencias ya preparadas. Su responsabilidad termina en valida
 ### Ejecución por consenso
 
 - Un solo workflow activo global (`max_active_workflows: 1`)
-- Scheduling adaptativo: paralelo si hay VRAM suficiente, waves en caso intermedio, secuencial en caso contrario
+- Un único workflow y una única llamada LLM activos globalmente; la planificación conserva waves para evolución posterior
 - Cada invocación individual se persiste en `model_invocations`
 - Si no se alcanza quórum mínimo (2 proponentes), la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`
 - Cancelación en cualquier etapa: verifica `cancel_requested` entre invocaciones
@@ -195,6 +200,12 @@ pip install -e .[dev]
 uvicorn app.main:app --reload --port 8080 --workers 1
 ```
 
+Para activar DeepSeek, configura sus precios en `broker_config.yaml`, cambia `providers.deepseek.enabled` a `true` y guarda la clave sin mostrarla en consola:
+
+```powershell
+python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_api_key',getpass.getpass('DeepSeek API key: '))"
+```
+
 ## Estructura del proyecto
 
 ```
@@ -204,13 +215,14 @@ uvicorn app.main:app --reload --port 8080 --workers 1
 │   ├── coordinator.py      # Orquestador de consenso multi-LLM
 │   ├── db.py               # SQLite con WAL, schema y event sourcing
 │   ├── main.py             # FastAPI app + endpoints
-│   ├── providers.py        # Proveedor bootstrap (mock determinista)
+│   ├── providers.py        # Ollama, DeepSeek, routing, secretos y ciclo de VRAM
 │   ├── repository.py       # Capa de acceso a datos
 │   ├── resource_scheduler.py  # Planificador adaptativo de recursos
 │   └── schemas.py          # Modelos Pydantic (contrato completo)
 ├── tests/
 │   ├── test_api.py         # Tests de integración de API
-│   └── test_contract.py    # Tests de validación de contrato
+│   ├── test_contract.py    # Tests de validación de contrato
+│   └── test_providers.py   # Tests de proveedores, routing, VRAM y presupuesto
 ├── broker_config.yaml      # Configuración del broker
 ├── pyproject.toml          # Proyecto Python + dependencias
 └── state/tasks/            # Artefactos de ejecución (gitignored)

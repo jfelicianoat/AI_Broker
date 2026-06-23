@@ -10,7 +10,7 @@ from app.main import create_app
 def make_client(tmp_path: Path) -> TestClient:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
-        processing=ProcessingConfig(auto_dispatch=False),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
     )
     return TestClient(create_app(config))
 
@@ -65,7 +65,7 @@ def test_models_endpoint_is_available(tmp_path: Path) -> None:
         response = client.get("/api/v1/models")
 
         assert response.status_code == 200
-        assert response.json()["models"] == []
+        assert response.json()["models"][0]["deployment"] == "bootstrap"
 
 
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
@@ -148,7 +148,7 @@ def test_create_is_idempotent_and_conflicting_payload_returns_409(tmp_path: Path
 def test_background_dispatcher_consumes_queue_without_tick(tmp_path: Path) -> None:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker-auto.db")),
-        processing=ProcessingConfig(auto_dispatch=True, dispatcher_interval_seconds=0.01),
+        processing=ProcessingConfig(auto_dispatch=True, dispatcher_interval_seconds=0.01, provider_mode="bootstrap"),
     )
     with TestClient(create_app(config)) as client:
         created = client.post(
@@ -169,7 +169,7 @@ def test_idempotency_survives_broker_restart(tmp_path: Path) -> None:
     database = tmp_path / "broker-restart.db"
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(database)),
-        processing=ProcessingConfig(auto_dispatch=False),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
     )
     payload = {"idempotency_key": "restart:same", "content": {"prompt": "No duplicar"}}
     with TestClient(create_app(config)) as first_client:

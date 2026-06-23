@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -27,6 +27,7 @@ class ProcessingConfig(BaseModel):
     unload_after_task: bool = True
     auto_dispatch: bool = True
     dispatcher_interval_seconds: float = Field(default=0.1, gt=0, le=60)
+    provider_mode: Literal["real", "bootstrap"] = "real"
 
     @model_validator(mode="after")
     def validate_single_workflow(self) -> "ProcessingConfig":
@@ -54,12 +55,37 @@ class HealthConfig(BaseModel):
     disk_free_alert_gb: int = 10
 
 
+class OllamaConfig(BaseModel):
+    enabled: bool = True
+    base_url: str = "http://127.0.0.1:11434"
+    timeout_seconds: float = Field(default=300, gt=0)
+    unload_timeout_seconds: float = Field(default=10, gt=0)
+
+
+class DeepSeekConfig(BaseModel):
+    enabled: bool = False
+    base_url: str = "https://api.deepseek.com"
+    timeout_seconds: float = Field(default=300, gt=0)
+    api_key_env: str = "DEEPSEEK_API_KEY"
+    keyring_service: str = "ai-broker"
+    keyring_username: str = "deepseek_api_key"
+    default_model: str = "deepseek-chat"
+    input_cost_per_million: float = Field(default=0.0, ge=0)
+    output_cost_per_million: float = Field(default=0.0, ge=0)
+
+
+class ProvidersConfig(BaseModel):
+    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
+
+
 class BrokerConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
+    providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

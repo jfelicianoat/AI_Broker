@@ -628,6 +628,24 @@ processing:
   unload_after_task: true
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
+  provider_mode: "real"
+
+providers:
+  ollama:
+    enabled: true
+    base_url: "http://127.0.0.1:11434"
+    timeout_seconds: 300
+    unload_timeout_seconds: 10
+  deepseek:
+    enabled: false
+    base_url: "https://api.deepseek.com"
+    timeout_seconds: 300
+    api_key_env: "DEEPSEEK_API_KEY"
+    keyring_service: "ai-broker"
+    keyring_username: "deepseek_api_key"
+    default_model: "deepseek-chat"
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
 
 health:
   sqlite_interval_seconds: 10
@@ -637,6 +655,14 @@ health:
 ```
 
 Las claves se almacenan con `keyring` en Windows Credential Manager. `.env` puede aportar una clave inicial que se migra y elimina del entorno operativo; nunca se persiste en SQLite o YAML. Los precios y presupuestos deben revisarse antes de activar un proveedor externo.
+
+Para registrar la clave de DeepSeek de forma interactiva, sin dejarla en el historial de PowerShell:
+
+```powershell
+python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_api_key',getpass.getpass('DeepSeek API key: '))"
+```
+
+El Broker consulta primero `DEEPSEEK_API_KEY` y después Credential Manager. Si no encuentra credencial, devuelve `CREDENTIALS_UNAVAILABLE`; nunca realiza fallback silencioso que incumpla `fallback_allowed`.
 
 ### Arranque y red
 
