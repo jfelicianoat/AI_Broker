@@ -60,6 +60,38 @@ def test_local_only_forces_ollama_provider() -> None:
     assert payload.model_requirements.allowed_providers == ["ollama"]
 
 
+def test_exact_target_must_respect_provider_and_local_only_boundaries() -> None:
+    try:
+        TaskCreateRequest.model_validate({
+            "idempotency_key": "contract:target-provider",
+            "content": {"prompt": "Privado"},
+            "model_requirements": {
+                "allowed_providers": ["ollama"],
+                "target_model": {"provider": "deepseek", "deployment": "api", "model": "chat"},
+            },
+        })
+    except Exception as exc:
+        assert "target_model.provider" in str(exc) or "cloud_allowed" in str(exc)
+    else:
+        raise AssertionError("target provider outside allowlist should fail")
+
+    try:
+        TaskCreateRequest.model_validate({
+            "idempotency_key": "contract:target-local-only",
+            "content": {"prompt": "Privado"},
+            "model_requirements": {
+                "cloud_allowed": True,
+                "allowed_providers": ["deepseek"],
+                "target_model": {"provider": "deepseek", "deployment": "api", "model": "chat"},
+            },
+            "risk": {"data_classification": "local_only"},
+        })
+    except Exception as exc:
+        assert "local_only target_model" in str(exc)
+    else:
+        raise AssertionError("local_only cloud target should fail")
+
+
 def test_shared_v2_single_fixture_matches_broker_schema() -> None:
     fixture = Path(__file__).parent / "fixtures" / "broker_v2_single_request.json"
     payload = TaskCreateRequest.model_validate(json.loads(fixture.read_text(encoding="utf-8")))

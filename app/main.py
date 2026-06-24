@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -16,6 +17,7 @@ from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
+    BrokerCapabilitiesResponse,
     HealthDependency,
     HealthResponse,
     QueueReorderRequest,
@@ -75,7 +77,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
             content={
                 "code": "CONTRACT_VALIDATION_FAILED",
                 "message": "Request does not satisfy Broker contract v1",
-                "fields": exc.errors(),
+                "fields": jsonable_encoder(exc.errors(), custom_encoder={ValueError: str}),
             },
         )
 
@@ -136,6 +138,25 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     @app.get("/api/v1/models")
     async def list_models() -> dict[str, object]:
         return {"models": await provider.models()}
+
+    @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
+    async def capabilities() -> BrokerCapabilitiesResponse:
+        return BrokerCapabilitiesResponse(
+            contract_version="2.1",
+            strategies=["single", "mixture_of_agents"],
+            presets={
+                "single": ["fast"],
+                "mixture_of_agents": ["fast", "slow"],
+            },
+            scheduling_by_preset={
+                "fast": ["sequential"],
+                "slow": ["adaptive", "parallel", "waves", "sequential"],
+            },
+            max_active_workflows=broker_config.processing.max_active_workflows,
+            max_parallel_invocations=scheduler.max_parallel_invocations(),
+            exact_target_model=True,
+            task_timeout=True,
+        )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
     async def get_usage() -> UsageResponse:

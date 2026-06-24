@@ -38,6 +38,7 @@ class ExecutionStrategy(str, Enum):
 
 class ExecutionPreset(str, Enum):
     fast = "fast"
+    slow = "slow"
     standard = "standard"
     verified = "verified"
     high_stakes = "high_stakes"
@@ -121,6 +122,7 @@ class ModelReference(StrictBaseModel):
 
 class ModelRequirements(StrictBaseModel):
     preferred_model: str | None = Field(default=None, max_length=128)
+    target_model: ModelReference | None = None
     fallback_allowed: bool = True
     cloud_allowed: bool = False
     allowed_providers: list[str] = Field(default_factory=lambda: ["ollama"])
@@ -135,10 +137,23 @@ class ModelRequirements(StrictBaseModel):
 
     @model_validator(mode="after")
     def enforce_cloud_policy(self) -> "ModelRequirements":
+        allowed = {provider.lower() for provider in self.allowed_providers}
         if not self.cloud_allowed:
             cloudish = {"deepseek", "ollama_cloud", "openai", "anthropic", "google"}
-            if cloudish.intersection({provider.lower() for provider in self.allowed_providers}):
+            if cloudish.intersection(allowed):
                 raise ValueError("cloud providers are not allowed when cloud_allowed is false")
+        if self.target_model is not None:
+            target_provider = self.target_model.provider.lower()
+            if target_provider not in allowed:
+                raise ValueError("target_model.provider must be included in allowed_providers")
+            if self.preferred_model is not None and self.preferred_model != self.target_model.model:
+                raise ValueError("preferred_model and target_model.model must match when both are provided")
+            target_is_cloud = (
+                self.target_model.deployment.lower() == "cloud"
+                or target_provider in {"deepseek", "ollama_cloud", "openai", "anthropic", "google"}
+            )
+            if target_is_cloud and not self.cloud_allowed:
+                raise ValueError("target_model requires cloud_allowed=true")
         return self
 
 
@@ -213,6 +228,11 @@ class TaskCreateRequest(StrictBaseModel):
     @model_validator(mode="after")
     def enforce_data_boundary(self) -> "TaskCreateRequest":
         if self.risk.data_classification == DataClassification.local_only:
+            target = self.model_requirements.target_model
+            if target is not None and (
+                target.provider.lower() != "ollama" or target.deployment.lower() == "cloud"
+            ):
+                raise ValueError("local_only target_model must be a local Ollama deployment")
             self.model_requirements.cloud_allowed = False
             self.model_requirements.allowed_providers = [
                 provider
@@ -276,6 +296,17 @@ class QueueReorderRequest(StrictBaseModel):
 class UsageResponse(StrictBaseModel):
     month: str
     providers: dict[str, dict[str, float]]
+
+
+class BrokerCapabilitiesResponse(StrictBaseModel):
+    contract_version: str
+    strategies: list[ExecutionStrategy]
+    presets: dict[str, list[ExecutionPreset]]
+    scheduling_by_preset: dict[str, list[SchedulingPolicy]]
+    max_active_workflows: int
+    max_parallel_invocations: int
+    exact_target_model: bool
+    task_timeout: bool
 
 
 class HealthDependency(StrictBaseModel):

@@ -5,7 +5,11 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from app.config import BrokerConfig
-from app.schemas import ExecutionStrategy, TaskCreateRequest
+from app.schemas import ExecutionPreset, ExecutionStrategy, SchedulingPolicy, TaskCreateRequest
+
+
+class ResourcePlanningError(RuntimeError):
+    pass
 
 
 class SchedulingMode(str, Enum):
@@ -27,18 +31,32 @@ class ResourceScheduler:
         self.config = config
 
     def plan(self, request: TaskCreateRequest) -> ResourcePlan:
-        if request.execution.strategy == ExecutionStrategy.single:
+        if request.execution.strategy == ExecutionStrategy.single or request.execution.preset != ExecutionPreset.slow:
             model = request.model_requirements.preferred_model or "auto"
+            count = 1 if request.execution.strategy == ExecutionStrategy.single else request.execution.max_proposers
+            labels = [model] if count == 1 else [f"proposer_{index}" for index in range(1, count + 1)]
             return ResourcePlan(
                 mode=SchedulingMode.sequential,
-                waves=[[model]],
-                invocations_total=1,
-                reasons=["single strategy uses one invocation"],
+                waves=[[label] for label in labels],
+                invocations_total=count,
+                reasons=["single and mixture_of_agents/fast are serial"],
             )
 
         count = request.execution.max_proposers
         labels = [f"proposer_{index}" for index in range(1, count + 1)]
+        if request.execution.scheduling == SchedulingPolicy.sequential:
+            return ResourcePlan(
+                mode=SchedulingMode.sequential,
+                waves=[[label] for label in labels],
+                invocations_total=count,
+                reasons=["sequential scheduling requested"],
+            )
         max_parallel = self._max_parallel_invocations()
+
+        if request.execution.scheduling == SchedulingPolicy.parallel and max_parallel < count:
+            raise ResourcePlanningError(
+                f"parallel requires {count} slots but only {max_parallel} are safely available"
+            )
 
         if max_parallel >= count:
             return ResourcePlan(
@@ -74,4 +92,7 @@ class ResourceScheduler:
         )
         # Conservative bootstrap estimate until real model telemetry exists.
         return max(1, min(3, int(usable_vram // 18)))
+
+    def max_parallel_invocations(self) -> int:
+        return self._max_parallel_invocations()
 

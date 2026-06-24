@@ -12,7 +12,14 @@ from typing import Any
 import httpx
 
 from app.config import BrokerConfig, DeepSeekConfig, OllamaConfig
-from app.schemas import InferenceKind, ModelReference, OutputFormat, TaskCreateRequest
+from app.schemas import (
+    ExecutionPreset,
+    ExecutionStrategy,
+    InferenceKind,
+    ModelReference,
+    OutputFormat,
+    TaskCreateRequest,
+)
 
 
 class ProviderError(RuntimeError):
@@ -356,7 +363,17 @@ class RoutedModelProvider:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
-        self._inference_slot = asyncio.Semaphore(1)
+        configured = config.processing.max_parallel_invocations
+        if isinstance(configured, int):
+            parallel_limit = configured
+        else:
+            usable_vram = max(
+                1.0,
+                config.resources.local_vram_budget_gb - config.resources.vram_safety_margin_gb,
+            )
+            parallel_limit = max(1, min(3, int(usable_vram // 18)))
+        self._serial_inference_slot = asyncio.Semaphore(1)
+        self._parallel_inference_slot = asyncio.Semaphore(parallel_limit)
 
     async def close(self) -> None:
         await self.ollama.close()
@@ -412,7 +429,47 @@ class RoutedModelProvider:
             item for item in capability_catalog
             if item.get("context_window") is not None and int(item["context_window"]) >= required_context
         ]
-        preferred = request.model_requirements.preferred_model
+        target = request.model_requirements.target_model
+        if target is not None:
+            def matches_target(item: dict[str, Any]) -> bool:
+                return (
+                    item["provider"].lower() == target.provider.lower()
+                    and str(item.get("deployment") or "").lower() == target.deployment.lower()
+                    and item["name"] == target.model
+                )
+
+            target_available = [item for item in catalog if matches_target(item)]
+            target_capable = [item for item in capability_catalog if matches_target(item)]
+            target_items = [item for item in context_catalog if matches_target(item)]
+            if target_items:
+                chosen = target_items[0]
+                return [
+                    ModelReference(
+                        provider=chosen["provider"],
+                        deployment=chosen["deployment"],
+                        model=chosen["name"],
+                        role=roles[index],
+                    )
+                    for index in range(count)
+                ]
+            if not request.model_requirements.fallback_allowed:
+                identity = f"{target.provider}/{target.deployment}/{target.model}"
+                if target_capable and target_capable[0].get("context_window") is None:
+                    raise ProviderError("CONTEXT_WINDOW_UNKNOWN", f"El modelo exacto {identity} no declara su contexto")
+                if target_capable:
+                    window = target_capable[0].get("context_window")
+                    raise ProviderError(
+                        "CONTEXT_LIMIT_EXCEEDED",
+                        f"El modelo exacto {identity} admite {window} tokens y la inferencia requiere {required_context}",
+                    )
+                if target_available:
+                    raise ProviderError(
+                        "MODEL_CAPABILITY_MISMATCH",
+                        f"El modelo exacto {identity} no declara capacidad {required_capability}",
+                    )
+                raise ProviderError("MODEL_UNAVAILABLE", f"Modelo exacto no disponible: {identity}")
+
+        preferred = request.model_requirements.preferred_model or (target.model if target is not None else None)
         if preferred:
             preferred_available = [item for item in catalog if item["name"] == preferred]
             preferred_capable = [item for item in capability_catalog if item["name"] == preferred]
@@ -459,31 +516,54 @@ class RoutedModelProvider:
         return await self._generate(request, model, prompt)
 
     async def _generate(self, request: TaskCreateRequest, model: ModelReference, prompt: str) -> ModelOutput:
-        async with self._inference_slot:
+        allow_parallel = (
+            request.execution.strategy == ExecutionStrategy.mixture_of_agents
+            and request.execution.preset == ExecutionPreset.slow
+        )
+        inference_slot = self._parallel_inference_slot if allow_parallel else self._serial_inference_slot
+        async with inference_slot:
             allowed = {item.lower() for item in request.model_requirements.allowed_providers}
-            if model.provider.lower() not in allowed:
+            provider_name = model.provider.lower()
+            if provider_name not in allowed:
                 raise ProviderError("PROVIDER_NOT_ALLOWED", f"Proveedor no permitido: {model.provider}")
-            if model.provider == "ollama":
+            if provider_name == "ollama":
                 if not self.config.providers.ollama.enabled:
                     raise ProviderError("PROVIDER_UNAVAILABLE", "Ollama está deshabilitado")
                 catalog = await self.ollama.models()
-                entry = next((item for item in catalog if item["name"] == model.model), None)
+                entry = next(
+                    (
+                        item for item in catalog
+                        if item["name"] == model.model
+                        and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                    ),
+                    None,
+                )
                 if entry is None:
-                    raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model.model}")
+                    same_name = any(item["name"] == model.model for item in catalog)
+                    code = "MODEL_DEPLOYMENT_MISMATCH" if same_name else "MODEL_UNAVAILABLE"
+                    raise ProviderError(code, f"Modelo Ollama no disponible: {model.deployment}/{model.model}")
                 if entry.get("deployment") == "cloud" and not request.model_requirements.cloud_allowed:
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"El modelo {model.model} requiere cloud")
                 if request.inference_kind == InferenceKind.embedding:
                     return await self.ollama.embed(request, model.model, prompt)
                 return await self.ollama.generate(request, model.model, prompt)
-            if model.provider == "deepseek":
+            if provider_name == "deepseek":
                 if request.inference_kind == InferenceKind.embedding:
                     raise ProviderError("PROVIDER_CAPABILITY_MISMATCH", "DeepSeek no admite embeddings en este adapter")
                 if not self.config.providers.deepseek.enabled:
                     raise ProviderError("PROVIDER_UNAVAILABLE", "DeepSeek está deshabilitado")
                 if not request.model_requirements.cloud_allowed:
                     raise ProviderError("CLOUD_NOT_ALLOWED", "DeepSeek requiere cloud_allowed=true")
-                if not any(item["name"] == model.model for item in await self.deepseek.models()):
-                    raise ProviderError("MODEL_UNAVAILABLE", f"Modelo DeepSeek no disponible: {model.model}")
+                catalog = await self.deepseek.models()
+                exact = any(
+                    item["name"] == model.model
+                    and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                    for item in catalog
+                )
+                if not exact:
+                    same_name = any(item["name"] == model.model for item in catalog)
+                    code = "MODEL_DEPLOYMENT_MISMATCH" if same_name else "MODEL_UNAVAILABLE"
+                    raise ProviderError(code, f"Modelo DeepSeek no disponible: {model.deployment}/{model.model}")
                 return await self.deepseek.generate(request, model.model, prompt)
             raise ProviderError("PROVIDER_UNAVAILABLE", f"Proveedor no soportado: {model.provider}")
 
@@ -494,6 +574,9 @@ class BootstrapModelProvider:
                  "context_window": 1_000_000, "capabilities": ["completion", "embedding"]}]
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
+        target = request.model_requirements.target_model
+        if target is not None:
+            return [target.model_copy(update={"role": roles[index]}) for index in range(count)]
         return [ModelReference(provider=request.model_requirements.allowed_providers[0], deployment="bootstrap",
                                model=request.model_requirements.preferred_model or f"bootstrap-{i+1}", role=roles[i])
                 for i in range(count)]

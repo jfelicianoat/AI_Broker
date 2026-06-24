@@ -14,7 +14,7 @@ from app.config import (
     ProvidersConfig,
 )
 from app.providers import DeepSeekProvider, OllamaProvider, ProviderError, RoutedModelProvider
-from app.schemas import TaskCreateRequest
+from app.schemas import ModelReference, TaskCreateRequest
 
 
 class OllamaProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -210,6 +210,47 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "MODEL_UNAVAILABLE")
         await router.close()
 
+    async def test_exact_target_matches_provider_deployment_and_model(self) -> None:
+        class StubProvider:
+            def __init__(self, models):
+                self._models = models
+
+            async def models(self):
+                return self._models
+
+            async def close(self):
+                return None
+
+        ollama = StubProvider([
+            {"name": "shared", "provider": "ollama", "deployment": "gpu-a", "context_window": 100000},
+            {"name": "shared", "provider": "ollama", "deployment": "gpu-b", "context_window": 100000},
+        ])
+        router = RoutedModelProvider(BrokerConfig(), ollama=ollama, deepseek=StubProvider([]))
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "route:exact",
+            "content": {"prompt": "hola"},
+            "model_requirements": {
+                "target_model": {"provider": "ollama", "deployment": "gpu-b", "model": "shared"},
+                "fallback_allowed": False,
+            },
+        })
+
+        selected = await router.select(request, 1, ["single"])
+        self.assertEqual(
+            (selected[0].provider, selected[0].deployment, selected[0].model),
+            ("ollama", "gpu-b", "shared"),
+        )
+
+        wrong = request.model_copy(update={
+            "model_requirements": request.model_requirements.model_copy(update={
+                "target_model": ModelReference(provider="ollama", deployment="gpu-c", model="shared"),
+            }),
+        })
+        with self.assertRaises(ProviderError) as raised:
+            await router.select(wrong, 1, ["single"])
+        self.assertEqual(raised.exception.code, "MODEL_UNAVAILABLE")
+        await router.close()
+
     async def test_serializes_all_llm_calls_globally(self) -> None:
         class StubProvider:
             def __init__(self) -> None:
@@ -240,6 +281,17 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
             router.propose(request, model, 2),
         )
         self.assertEqual(ollama.peak, 1)
+
+        slow_request = TaskCreateRequest.model_validate({
+            "idempotency_key": "route:parallel",
+            "content": {"prompt": "hola"},
+            "execution": {"strategy": "mixture_of_agents", "preset": "slow"},
+        })
+        await asyncio.gather(
+            router.propose(slow_request, model, 1),
+            router.propose(slow_request, model, 2),
+        )
+        self.assertEqual(ollama.peak, 2)
         await router.close()
 
     async def test_excludes_ollama_cloud_tags_when_cloud_is_not_allowed(self) -> None:

@@ -1,5 +1,7 @@
 # Diseño de consenso multi-LLM para AI Broker
 
+> **Restricción normativa:** solo existe un workflow activo. `mixture_of_agents/fast` recorre proponentes y árbitro serialmente; `mixture_of_agents/slow` permite proponentes paralelos o por oleadas dentro de ese workflow, con reservas previas de VRAM/coste y árbitro posterior. El dashboard solo afirma paralelismo cuando existe solapamiento observado. Para la lógica verificable de las pantallas prevalece `docs/Phase_5_Dashboard.md`.
+
 Fecha: 23 de junio de 2026
 
 ## 1. Conclusión ejecutiva
@@ -338,7 +340,8 @@ DeepSeek mediante su API puede configurarse inicialmente como **árbitro preferi
 | Estrategia/preset | Flujo | Llamadas típicas | Uso recomendado |
 |---|---|---:|---|
 | `single` | Un modelo | 1 | Tareas simples o baratas |
-| `mixture_of_agents/fast` | 3 propuestas + 1 árbitro | 4 | Calidad general con coste moderado |
+| `mixture_of_agents/fast` | 3 propuestas seriales + 1 árbitro | 4 | Calidad general con uso conservador de recursos |
+| `mixture_of_agents/slow` | 3–5 propuestas paralelas/oleadas + 1 árbitro | 4–6 | Comparación más amplia con paralelismo interno seguro |
 | `mixture_of_agents/standard` | plan + 3 propuestas + 1 juez + síntesis | 6 | Análisis y decisiones importantes |
 | `mixture_of_agents/verified` | standard + validadores + posible reparación | 6-8 | Código, datos, investigación |
 | `mixture_of_agents/high_stakes` | 5 propuestas + 2 jueces + síntesis + verificación | 9-11 | Casos críticos, con supervisión humana |
@@ -742,7 +745,7 @@ Controles mínimos:
 
 ## 14. Dashboard
 
-El dashboard de consenso incluirá en fase 5 un **Probador de Prompts**. Permitirá elegir `single` con un modelo exacto o `mixture_of_agents/fast` con selección `manual` de proponentes, roles y árbitro. Solo se ofrecerán referencias presentes en el catálogo y cada una conservará proveedor, deployment y modelo.
+El dashboard de consenso incluirá en fase 5 un **Probador de Prompts**. Permitirá elegir `single` con un modelo exacto o `mixture_of_agents/fast|slow` con selección `manual` de proponentes, etiquetas de rol y árbitro. Solo se ofrecerán referencias presentes en el catálogo y cada una conservará proveedor, deployment y modelo. `fast` será serial; `slow` permitirá paralelismo interno seguro entre proponentes.
 
 El probador aceptará prompt libre o JSON sintácticamente válido como contenido opaco, conservará exactamente el texto introducido y enviará una tarea normal a la cola durable. No podrá invocar providers directamente, alterar el quórum, relajar privacidad/presupuesto ni habilitar presets todavía no implementados. Mostrará respuesta raw, uso, coste, modelos, fallback, scheduling, consenso y advertencias con escape HTML obligatorio. Véase `docs/Prompt_Tester.md`.
 
@@ -757,8 +760,10 @@ La tarea activa debería mostrar:
 - coste reservado y real;
 - tiempo por invocación;
 - botón de cancelación;
-- resultado final, confianza y advertencias.
-- planificación `parallel`, `waves` o `sequential`, reserva y pico real de VRAM.
+- resultado final y advertencias realmente producidas por el contrato;
+- secuencia serial para `fast` o carriles concurrentes para `slow`, junto con reserva y pico real de VRAM cuando exista una medición observada.
+
+No se presentarán confianza, relevancia, cobertura, consistencia ni atribución de candidatos mientras esos datos no sean producidos y validados. Tampoco se mostrarán porcentajes de generación o tokens/s con providers no streaming.
 
 Métricas globales:
 

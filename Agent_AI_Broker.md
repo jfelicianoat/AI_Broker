@@ -122,6 +122,8 @@ $$\\text{Presupuesto Restante} < (\\text{Coste Estimado} \\times 1.5)$$
 
 ## Dashboard Web (FastAPI + HTMX)
 
+> **Precedencia de fase 5:** el contrato operativo verificable está en `docs/Phase_5_Dashboard.md`. El layout histórico siguiente es solo una referencia visual y no autoriza valores simulados, múltiples tareas activas, progreso porcentual, tokens en vivo ni estados de modelo que no procedan de una fuente real.
+
 
 
 ### Layout Principal del Dashboard
@@ -226,10 +228,10 @@ El dashboard incluirá una vista `Probador` con dos entradas mutuamente exclusiv
 La ejecución ofrece:
 
 - `single` contra una referencia exacta `provider/deployment/model`;
-- `mixture_of_agents/fast` manual, con uno a cinco proponentes, roles y árbitro seleccionados explícitamente;
+- `mixture_of_agents/fast|slow` manual, con uno a cinco proponentes, etiquetas de rol y árbitro seleccionados explícitamente; `fast` es serial y `slow` admite paralelismo interno acotado;
 - controles de generación, formato/schema, privacidad, cloud, fallback, timeout y coste.
 
-El probador debe construir un `TaskCreateRequest` v2 y usar `POST /api/v1/tasks`. Queda prohibido que una ruta HTMX o componente del dashboard invoque directamente Ollama o DeepSeek. Sus tareas comparten cola, slot serial, persistencia, cancelación, contexto, VRAM y presupuesto con el resto del sistema.
+El probador debe construir un `TaskCreateRequest` v2 y usar `POST /api/v1/tasks`. Queda prohibido que una ruta HTMX o componente del dashboard invoque directamente Ollama o DeepSeek. Sus tareas comparten cola, controlador de admisión, persistencia, cancelación, contexto, VRAM y presupuesto con el resto del sistema.
 
 El resultado se muestra raw y escapado, junto con uso, modelo efectivo, fallback y metadata de consenso. El historial procede de SQLite y sobrevive a recargas o reinicios. La especificación operativa está en `docs/Prompt_Tester.md`.
 
@@ -549,7 +551,7 @@ logger.info(
 
 ### Independencia de dominio
 
-El Broker acepta inferencias ya preparadas y contenido opaco. Su responsabilidad funcional termina en recibir, validar el contrato técnico, encolar, enrutar al modelo/proveedor y devolver su respuesta. No genera prompts, no resuelve placeholders, no divide contenido, no sintetiza resultados, no interpreta respuestas y no contiene lógica de fuentes, afirmaciones, YouTube u Obsidian. Los modelos cloud instalados mediante Ollama se descubren y ejecutan a través del mismo endpoint de Ollama; no existe un conector `ollama_cloud` separado.
+El Broker acepta inferencias ya preparadas y contenido opaco. Su responsabilidad funcional termina en recibir, validar el contrato técnico, encolar, enrutar al modelo/proveedor y devolver su respuesta. No genera pasos de negocio, no resuelve placeholders, no divide contenido, no interpreta respuestas y no contiene lógica de fuentes, afirmaciones, YouTube u Obsidian. Si el cliente solicita `mixture_of_agents/fast`, el Broker aplica únicamente el algoritmo técnico versionado que entrega candidatos a un árbitro; esa envoltura no sustituye la orquestación de conocimiento. Los modelos cloud instalados mediante Ollama se descubren y ejecutan a través del mismo endpoint de Ollama; no existe un conector `ollama_cloud` separado.
 
 ### API asíncrona y durable
 
@@ -562,14 +564,14 @@ El Broker acepta inferencias ya preparadas y contenido opaco. Su responsabilidad
 
 La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, intentos, uso y eventos. El servidor usa un worker Uvicorn y un solo workflow activo global; el dispatcher consume la cola autónomamente.
 
-### Planificador serial y no bloqueo de la API
+### Planificador, concurrencia interna y no bloqueo de la API
 
 - La API acepta y persiste tareas aunque exista una generación LLM en curso; responder `202` no consume el slot de ejecución.
-- Solo un workflow Broker está activo globalmente. En `single` realiza una invocación; `mixture_of_agents` puede planificar invocaciones internas acotadas.
+- Solo un workflow Broker está activo globalmente. `single` y `mixture_of_agents/fast` ejecutan estrictamente una invocación a la vez. `mixture_of_agents/slow` puede solapar proponentes dentro de ese workflow; el árbitro espera a la barrera.
 - El dispatcher reclama mediante una transición atómica `queued → routing` dentro de `BEGIN IMMEDIATE`. El loop automático y el tick manual comparten esa operación y nunca activan un segundo workflow mientras exista uno activo.
 - Una tarea `single` equivale a una inferencia. Una tarea `mixture_of_agents` puede realizar consenso técnico interno; el chunking y los workflows de conocimiento siguen siendo externos.
 - Una generación lenta permanece activa; las tareas siguientes permanecen `queued`, mientras el dashboard, el polling, el alta de nuevas tareas y la cancelación siguen respondiendo.
-- No se permite configurar un valor mayor que uno en el MVP. Un valor distinto provoca error de configuración al arrancar.
+- `max_active_workflows` debe seguir siendo uno. `max_parallel_invocations` puede ser mayor que uno únicamente para `slow` y queda limitado por reservas de VRAM, coste, cuotas y timeout.
 
 ### Enrutamiento y contexto
 
@@ -583,7 +585,7 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 
 La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de plantilla. Ollama embedding se ejecuta con `truncate: false`. Chat entrega `assistant_content`; embedding entrega un único vector numérico. Invocación y resultado terminal `single` se persisten atómicamente antes de que otro workflow pueda ocupar el slot.
 
-El progreso del Broker se limita a `queued`, `routing`, `generating` y `completed`. Fases como extracción, chunking, comparación o síntesis pertenecen al Orchestrator.
+En `single`, el progreso se limita a `queued`, `routing`, `generating` y un estado terminal. En `mixture_of_agents/fast|slow` también existen `resource_planning`, `proposing` y `synthesizing` como etapas técnicas internas. `slow` persiste plan, wave y concurrencia observada. Extracción, chunking y workflows de conocimiento pertenecen al Orchestrator.
 
 ### Cancelación y VRAM
 
@@ -612,7 +614,7 @@ Por decisión del hilo, no hay autenticación entre las dos máquinas. En consec
 - Escuchar solo en la interfaz LAN seleccionada, nunca publicar el puerto 8080 en Internet.
 - CORS desactivado salvo orígenes exactos configurados para el dashboard.
 - Las API keys se guardan mediante `keyring` en Windows Credential Manager y nunca en SQLite, YAML o logs. `.env` solo puede aportar una clave inicial para migrarla al almacén seguro.
-- El dashboard permite sustituir una clave, pero solo muestra si está configurada y sus últimos cuatro caracteres.
+- La primera entrega del dashboard no permite leer ni sustituir claves. La gestión se mantiene en Windows Credential Manager mediante CLI hasta disponer de autenticación administrativa y auditoría específicas.
 - El Probador de Prompts escapa siempre input y output, no renderiza HTML generado por modelos y nunca muestra secretos o cabeceras. Validar JSON no autoriza a interpretarlo ni transformarlo.
 
 ### Recuperación y pruebas

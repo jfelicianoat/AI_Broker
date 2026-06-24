@@ -2,7 +2,7 @@
 
 Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
 
-Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings y mantiene una única llamada LLM activa global. El proveedor `bootstrap` queda reservado para pruebas.
+Estado actual: fases 1–4 operativas y base 5.0 completada. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings, admite destino exacto y aplica timeout global. `fast` es serial; `slow` puede lanzar proponentes concurrentes dentro de un solo workflow. El proveedor `bootstrap` queda reservado para pruebas.
 
 ## Stack
 
@@ -12,7 +12,7 @@ Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubr
 | Validación | Pydantic v2 (schemas estrictos, `extra="forbid"`) |
 | Persistencia | SQLite + WAL + event sourcing |
 | Serialización | JSON canónico con `separators=(',',':')` |
-| Scheduling adaptativo | Paralelo / Waves / Secuencial según VRAM |
+| Scheduling | Un workflow activo; `fast` serial y `slow` con paralelismo interno acotado |
 | LLMs | Ollama (local), DeepSeek (cloud), extensible |
 
 ## Funcionalidades
@@ -20,16 +20,17 @@ Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubr
 ### 1. Consenso multi-LLM (*mixture of agents*)
 
 - **Estrategia `single`**: inferencia con un solo modelo (modo legacy)
-- **Estrategia `mixture_of_agents`**: ejecución por consenso con múltiples proponentes y un árbitro
-- **Presets**: `fast` (sin evaluación), `standard`, `verified`, `high_stakes`
-- Pipeline por etapas: `resource_planning → proposing → [evaluating] → synthesizing`
+- **Estrategia `mixture_of_agents/fast`**: consenso técnico con múltiples proponentes y un árbitro, ejecutados serialmente
+- **Estrategia `mixture_of_agents/slow`**: proponentes paralelos o por oleadas y árbitro posterior
+- **Presets implementados**: `fast` y base funcional de `slow`; su activación productiva requiere todavía smoke tests con providers reales y telemetría completa de recursos
+- Pipeline implementado: `resource_planning → proposing → synthesizing`
 - Trazabilidad total: cada invocación individual queda registrada con tokens, coste y latencia
 
-### 2. Planificación adaptativa de recursos
+### 2. Planificación de recursos
 
-- **Modos de planificación**: `parallel`, `waves`, `sequential`
-- Cálculo de capacidad según VRAM disponible (`local_vram_budget_gb`)
-- Las invocaciones planificadas se serializan mediante un semáforo global en el MVP
+- **Modo efectivo actual**: `sequential`; `slow` habilitará `parallel`, `waves` o `sequential` según recursos
+- Cálculo preventivo de capacidad según VRAM disponible (`local_vram_budget_gb`)
+- Nunca se activan dos workflows. `single/fast` usan una invocación; `slow` podrá admitir varias invocaciones de proponentes dentro de ese workflow
 - Reserva de VRAM por tarea y modelo
 
 ### 3. Cola durable con event sourcing
@@ -61,6 +62,8 @@ Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubr
 - Catálogo real de Ollama (`/api/tags` + `/api/show`) sin listas hardcodeadas
 - DeepSeek opcional con credencial en variable de entorno o Windows Credential Manager
 - Control preventivo y acumulado de `max_cost_usd`
+- Selección exacta opcional mediante `target_model.provider/deployment/model`
+- Timeout efectivo de tarea con cancelación de las operaciones provider pendientes
 
 ### 6. Configuración declarativa
 
@@ -87,14 +90,15 @@ Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubr
 ### 9. Probador de Prompts — planificado para fase 5
 
 - Entrada como prompt libre o JSON con validación sintáctica
-- Ejecución contra un modelo exacto o un `mixture_of_agents/fast` determinado manualmente
+- Ejecución contra un modelo exacto o un `mixture_of_agents/fast|slow` determinado manualmente cuando cada preset esté operativo
 - Selección explícita de proponentes, roles y árbitro desde el catálogo real
 - Controles de temperatura, tokens, formato/schema, privacidad, cloud, fallback, timeout y coste
 - Uso obligatorio de la misma API y cola durable; la UI no llama directamente a providers
 - Resultado raw, métricas, modelo efectivo, fallback y metadata de consenso
 - Historial persistente, cancelación y repetición segura; prompts y respuestas siempre escapados
+- Vista comparativa con línea temporal serial para `fast` y carriles concurrentes medidos para `slow`, sin métricas simuladas
 
-Especificación: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md).
+Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) y [`docs/Mixture_Slow_Concurrency.md`](docs/Mixture_Slow_Concurrency.md).
 
 ## API
 
@@ -107,6 +111,7 @@ Especificación: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md).
 | `/api/v1/queue` | PATCH | Reordenar tareas pendientes |
 | `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico; el dispatcher normal es autónomo |
 | `/api/v1/models` | GET | Modelos disponibles |
+| `/api/v1/capabilities` | GET | Versión de contrato, presets, scheduling y límites admitidos |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/health` | GET | Estado detallado de dependencias |
 | `/health/live` | GET | Liveness del proceso |
@@ -167,7 +172,7 @@ Especificación: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md).
 
 ### Responsabilidad del Broker
 
-El Broker recibe inferencias ya preparadas. Su responsabilidad termina en validar el contrato técnico, encolar, ejecutar la estrategia de consenso (proponentes + árbitro) y devolver la respuesta sintetizada. No genera prompts, no resuelve placeholders, no divide contenido y no interpreta respuestas.
+El Broker recibe inferencias ya preparadas. Su responsabilidad termina en validar el contrato técnico, encolar, enrutar y devolver la respuesta. Cuando se solicita explícitamente `mixture_of_agents/fast`, aplica un algoritmo técnico versionado de proponentes y árbitro; no crea pasos de negocio, no resuelve placeholders, no divide contenido y no interpreta respuestas.
 
 ### API y persistencia
 
@@ -179,7 +184,7 @@ El Broker recibe inferencias ya preparadas. Su responsabilidad termina en valida
 ### Ejecución por consenso
 
 - Un solo workflow activo global (`max_active_workflows: 1`)
-- Un único workflow y una única llamada LLM activos globalmente; la planificación conserva waves para evolución posterior
+- Un único workflow activo globalmente; `single/fast` ejecutan una llamada cada vez y `slow` permite paralelismo únicamente entre sus proponentes, dentro de límites reservados
 - Cada invocación individual se persiste en `model_invocations`
 - Si no se alcanza quórum mínimo (2 proponentes), la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`
 - Cancelación en cualquier etapa: verifica `cancel_requested` entre invocaciones
@@ -208,7 +213,12 @@ queued → generating → completed
 queued → resource_planning → proposing → synthesizing → completed
 ```
 
-### Estrategia `mixture_of_agents` / preset `standard`, `verified`, `high_stakes`
+### Estrategia `mixture_of_agents` / preset `slow`
+```
+queued → resource_planning → proposing (parallel/waves/sequential) → synthesizing → completed
+```
+
+### Estados reservados para `standard`, `verified`, `high_stakes` — no implementados
 ```
 queued → resource_planning → proposing → evaluating → synthesizing → completed
 ```

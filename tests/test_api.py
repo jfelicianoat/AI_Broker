@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 import time
 
@@ -5,6 +6,35 @@ from fastapi.testclient import TestClient
 
 from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
 from app.main import create_app
+from app.providers import BootstrapModelProvider
+
+
+class ConcurrencyProbeProvider(BootstrapModelProvider):
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def propose(self, request, model, ordinal):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.05)
+            return await super().propose(request, model, ordinal)
+        finally:
+            self.active -= 1
+
+
+class TimeoutProbeProvider(BootstrapModelProvider):
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def propose(self, request, model, ordinal):
+        try:
+            await asyncio.sleep(5)
+            return await super().propose(request, model, ordinal)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
 
 
 def make_client(tmp_path: Path) -> TestClient:
@@ -68,6 +98,28 @@ def test_models_endpoint_is_available(tmp_path: Path) -> None:
         assert response.json()["models"][0]["deployment"] == "bootstrap"
 
 
+def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-capabilities.db")),
+        processing=ProcessingConfig(
+            auto_dispatch=False,
+            provider_mode="bootstrap",
+            max_parallel_invocations=2,
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.get("/api/v1/capabilities")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["contract_version"] == "2.1"
+    assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
+    assert body["scheduling_by_preset"]["fast"] == ["sequential"]
+    assert "parallel" in body["scheduling_by_preset"]["slow"]
+    assert body["max_active_workflows"] == 1
+    assert body["max_parallel_invocations"] == 2
+
+
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={"idempotency_key": "test:single", "content": {"prompt": "Resume esto"}}).json()
@@ -106,6 +158,132 @@ def test_dispatcher_processes_fast_consensus(tmp_path: Path) -> None:
         assert task["result"]["scheduling"]["mode_used"] in {"parallel", "waves", "sequential"}
         assert Path(task["result"]["artifacts_root"]).exists()
         assert (Path(task["result"]["artifacts_root"]) / "synthesis" / "final.md").exists()
+
+
+def test_slow_consensus_runs_proposers_in_parallel_but_fast_remains_serial(tmp_path: Path) -> None:
+    def execute(preset: str, database_name: str) -> tuple[dict, int]:
+        config = BrokerConfig(
+            persistence=PersistenceConfig(database=str(tmp_path / database_name)),
+            processing=ProcessingConfig(
+                auto_dispatch=False,
+                provider_mode="bootstrap",
+                max_parallel_invocations=3,
+            ),
+        )
+        probe = ConcurrencyProbeProvider()
+        with TestClient(create_app(config)) as client:
+            client.app.state.coordinator.provider = probe
+            payload = {
+                "idempotency_key": f"test:{preset}:parallelism",
+                "content": {"prompt": "Compara tres alternativas"},
+                "execution": {
+                    "strategy": "mixture_of_agents",
+                    "preset": preset,
+                    "scheduling": "adaptive",
+                    "max_proposers": 3,
+                    "selection": {"mode": "auto", "proposer_count": 3},
+                },
+            }
+            created = client.post("/api/v1/tasks", json=payload)
+            assert created.status_code == 202
+            task_id = created.json()["task_id"]
+            client.post("/api/v1/dispatcher/tick")
+            task = client.get(f"/api/v1/tasks/{task_id}").json()
+        return task, probe.max_active
+
+    slow_task, slow_parallelism = execute("slow", "broker-slow.db")
+    fast_task, fast_parallelism = execute("fast", "broker-fast.db")
+
+    assert slow_task["status"] == "completed"
+    assert slow_task["result"]["consensus"]["level"] == "slow"
+    assert slow_task["result"]["scheduling"]["mode_used"] == "parallel"
+    assert slow_task["result"]["scheduling"]["max_parallel_invocations_launched"] == 3
+    assert slow_parallelism == 3
+
+    assert fast_task["status"] == "completed"
+    assert fast_task["result"]["consensus"]["level"] == "fast"
+    assert fast_task["result"]["scheduling"]["mode_used"] == "sequential"
+    assert fast_parallelism == 1
+
+
+def test_slow_parallel_fails_before_launch_when_capacity_is_insufficient(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-slow-capacity.db")),
+        processing=ProcessingConfig(
+            auto_dispatch=False,
+            provider_mode="bootstrap",
+            max_parallel_invocations=1,
+        ),
+    )
+    probe = ConcurrencyProbeProvider()
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.provider = probe
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "test:slow:insufficient",
+                "content": {"prompt": "Compara tres alternativas"},
+                "execution": {
+                    "strategy": "mixture_of_agents",
+                    "preset": "slow",
+                    "scheduling": "parallel",
+                    "max_proposers": 3,
+                    "selection": {"mode": "auto", "proposer_count": 3},
+                },
+            },
+        ).json()
+
+        client.post("/api/v1/dispatcher/tick")
+        task = client.get(created["status_url"]).json()
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "PARALLEL_CAPACITY_INSUFFICIENT"
+    assert probe.max_active == 0
+
+
+def test_single_rejects_slow_preset(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "test:single:slow",
+                "content": {"prompt": "No válido"},
+                "execution": {"strategy": "single", "preset": "slow"},
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "CONTRACT_VALIDATION_FAILED"
+
+
+def test_execution_timeout_cancels_provider_and_persists_typed_error(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-timeout.db")),
+        processing=ProcessingConfig(
+            auto_dispatch=False,
+            provider_mode="bootstrap",
+            task_timeout_seconds=10,
+        ),
+    )
+    probe = TimeoutProbeProvider()
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.provider = probe
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "test:task:timeout",
+                "content": {"prompt": "Tarea lenta"},
+                "execution": {"strategy": "single", "timeout_seconds": 1},
+            },
+        ).json()
+
+        client.post("/api/v1/dispatcher/tick")
+        task = client.get(created["status_url"]).json()
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "TASK_TIMEOUT"
+    assert task["progress"]["timeout_seconds"] == 1
+    assert probe.cancelled
 
 
 def test_standard_consensus_fails_until_phase_c(tmp_path: Path) -> None:

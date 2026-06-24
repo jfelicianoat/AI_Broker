@@ -2,7 +2,7 @@
 
 ## Estado y fase
 
-Funcionalidad planificada para la **fase 5 — Dashboard operativo**. Este documento define el alcance; todavía no existe implementación de UI ni endpoints específicos del probador.
+Funcionalidad planificada para la **fase 5 — Dashboard operativo**. Este documento define el alcance; todavía no existe implementación de UI ni endpoints específicos del probador. La lógica común de las tres pantallas y sus prerrequisitos están en [`Phase_5_Dashboard.md`](Phase_5_Dashboard.md).
 
 ## Objetivo
 
@@ -28,16 +28,18 @@ En ambos modos se muestran longitud, cota conservadora de contexto y errores ant
 
 - `execution.strategy = single`.
 - El usuario elige una referencia exacta `provider + deployment + model` del catálogo descubierto.
-- La UI usa selección manual y desactiva sustitución cuando se solicita probar exactamente ese modelo.
+- La selección exacta usa la referencia contractual `target_model` con `provider + deployment + model`; `preferred_model` se conserva para compatibilidad, pero no basta para distinguir destinos homónimos.
+- La UI desactiva sustitución cuando se solicita probar exactamente ese modelo.
 - Puede habilitarse fallback explícitamente; nunca se activa de forma implícita.
 
 ### Mixture of LLMs determinado
 
 - `execution.strategy = mixture_of_agents`.
-- La primera versión usa `preset = fast` y `selection.mode = manual`.
-- El usuario selecciona de uno a cinco proponentes, sus roles y un árbitro exacto.
+- `preset = fast` usa ejecución serial; `preset = slow` permite proponentes paralelos o por oleadas. Ambos usan `selection.mode = manual` en el probador.
+- El usuario selecciona de uno a cinco proponentes, sus etiquetas de rol y un árbitro exacto.
 - Cada referencia incluye proveedor, deployment y modelo para distinguir local de cloud.
-- La UI valida modelos disponibles, política cloud, presupuesto, quórum, timeout y contexto antes de encolar.
+- La UI valida modelos disponibles, referencias completas, política cloud, presupuesto, quórum, timeout y contexto antes de encolar.
+- En `fast`, proponentes y árbitro se ejecutan uno a uno. En `slow`, los proponentes pueden solaparse dentro de una única tarea y el árbitro espera a la barrera. Los roles son metadata auditable y no provocan que el Broker reescriba el prompt.
 - Presets `standard`, `verified` y `high_stakes` solo se habilitarán cuando estén implementados en el coordinador; no aparecerán como opciones funcionales antes.
 
 ## Controles
@@ -70,10 +72,12 @@ La pantalla muestra sin interpretar:
 - contenido raw o embedding;
 - modelo efectivo y si hubo fallback;
 - tokens, coste y latencia;
-- para mixture: proponentes, árbitro, oleadas, advertencias y metadata de consenso;
+- para mixture: proponentes, árbitro, plan solicitado/efectivo, waves, concurrencia observada, advertencias y metadata de consenso disponible;
 - request final validado y respuesta técnica para copiar.
 
 El HTML escapa siempre prompts y respuestas. El contenido del LLM nunca se inserta como HTML confiable. No se muestran secretos, cabeceras de autorización ni cadenas privadas de razonamiento.
+
+No se muestran porcentajes de generación, tokens/s, confianza ni atribución de candidatos si el provider o el contrato no producen esos datos. `output.language` se trata como metadata y no como una orden que el Broker añada al prompt.
 
 ## Errores esperados
 
@@ -84,10 +88,20 @@ La UI presenta códigos tipados como `CONTRACT_VALIDATION_FAILED`, `MODEL_UNAVAI
 1. Un prompt libre llega al provider sin modificaciones.
 2. Un JSON inválido no crea una tarea; uno válido conserva exactamente el texto introducido.
 3. El modo single usa el modelo exacto seleccionado o falla si fallback está desactivado.
-4. El modo mixture persiste y ejecuta exactamente los proponentes, roles y árbitro elegidos.
+4. El modo mixture persiste los proponentes, etiquetas de rol y árbitro elegidos; `fast` es serial y `slow` demuestra solapamiento real cuando el plan efectivo es paralelo.
 5. Las pruebas comparten cola y nunca ejecutan LLMs fuera del worker normal.
 6. Una generación lenta no bloquea la interfaz; puede consultarse y cancelarse.
 7. Recargar el navegador conserva el historial y los estados mediante SQLite.
 8. Prompts y respuestas con HTML o instrucciones hostiles se muestran como texto seguro.
 9. Privacidad, cloud, presupuesto y contexto se validan igual que en la API pública.
 10. Las pruebas automáticas cubren construcción de requests, validación JSON, selección manual, XSS, cancelación y recuperación tras reinicio.
+11. El timeout elegido limita realmente la ejecución completa y produce un error tipado.
+12. Ningún dato visible se simula: las métricas proceden de tareas, invocaciones o health checks con timestamp.
+13. `slow` nunca activa un segundo workflow Broker y nunca supera el límite de invocaciones, VRAM, presupuesto o cuotas reservado para su wave.
+
+## Base backend completada
+
+- `target_model` se valida por identidad completa y vuelve a comprobarse justo antes de invocar.
+- `execution.timeout_seconds` limita la tarea completa y cancela las operaciones provider pendientes con `TASK_TIMEOUT`.
+- El progreso separa `budget_limit_usd`, `cost_estimated_usd` y `cost_actual_usd`; un límite no se presenta como coste reservado.
+- `fast` conserva concurrencia uno y `slow` puede lanzar proponentes concurrentes dentro del único workflow activo.
