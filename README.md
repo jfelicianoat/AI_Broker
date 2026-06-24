@@ -113,6 +113,10 @@ Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase
 | `/api/v1/models` | GET | Modelos disponibles |
 | `/api/v1/capabilities` | GET | Versión de contrato, presets, scheduling y límites admitidos |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
+| `/api/v1/dashboard/summary` | GET | Resumen operativo por ventana temporal |
+| `/api/v1/dashboard/tasks` | GET | Tareas paginadas y filtrables |
+| `/api/v1/dashboard/tasks/{id}` | GET | Request, resultado, invocaciones y eventos de una tarea |
+| `/api/v1/dashboard/resources` | GET | Snapshot de VRAM, reservas, leases y modelos cargados |
 | `/health` | GET | Estado detallado de dependencias |
 | `/health/live` | GET | Liveness del proceso |
 | `/health/ready` | GET | Readiness de SQLite y dispatcher |
@@ -246,6 +250,7 @@ python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_ap
 │   ├── config.py           # Configuración YAML + merge profundo
 │   ├── coordinator.py      # Orquestador de consenso multi-LLM
 │   ├── db.py               # SQLite con WAL, schema y event sourcing
+│   ├── dashboard.py        # Read models paginados y métricas operativas
 │   ├── main.py             # FastAPI app + endpoints
 │   ├── providers.py        # Ollama, DeepSeek, routing, secretos y ciclo de VRAM
 │   ├── repository.py       # Capa de acceso a datos

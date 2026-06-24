@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -13,11 +13,16 @@ from fastapi.responses import JSONResponse
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.db import Database
+from app.dashboard import DashboardQueryRepository
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
     BrokerCapabilitiesResponse,
+    DashboardResourcesResponse,
+    DashboardSummaryResponse,
+    DashboardTaskDetail,
+    DashboardTaskPage,
     HealthDependency,
     HealthResponse,
     QueueReorderRequest,
@@ -34,6 +39,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     broker_config = config or load_config()
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
     repository = TaskRepository(db)
+    dashboard_queries = DashboardQueryRepository(db)
     scheduler = ResourceScheduler(broker_config)
     provider = build_provider(broker_config)
     coordinator = ConsensusCoordinator(db, scheduler, provider=provider)
@@ -66,6 +72,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     app.state.config = broker_config
     app.state.db = db
     app.state.repository = repository
+    app.state.dashboard_queries = dashboard_queries
     app.state.scheduler = scheduler
     app.state.coordinator = coordinator
     app.state.provider = provider
@@ -159,9 +166,53 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
-    async def get_usage() -> UsageResponse:
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
-        return UsageResponse(month=month, providers={})
+    async def get_usage(month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$")) -> UsageResponse:
+        selected_month = month or datetime.now(timezone.utc).strftime("%Y-%m")
+        try:
+            return dashboard_queries.usage(selected_month)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="INVALID_MONTH") from error
+
+    @app.get("/api/v1/dashboard/summary", response_model=DashboardSummaryResponse)
+    async def dashboard_summary(
+        window_hours: int = Query(default=24, ge=1, le=24 * 90),
+    ) -> DashboardSummaryResponse:
+        return dashboard_queries.summary(window_hours=window_hours)
+
+    @app.get("/api/v1/dashboard/tasks", response_model=DashboardTaskPage)
+    async def dashboard_tasks(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
+        status: TaskStatus | None = None,
+        origin: str | None = Query(default=None, min_length=1, max_length=64),
+    ) -> DashboardTaskPage:
+        return dashboard_queries.list_tasks(
+            page=page,
+            page_size=page_size,
+            status=status,
+            origin=origin,
+        )
+
+    @app.get("/api/v1/dashboard/tasks/{task_id}", response_model=DashboardTaskDetail)
+    async def dashboard_task_detail(task_id: str) -> DashboardTaskDetail:
+        try:
+            return dashboard_queries.task_detail(task_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
+
+    @app.get("/api/v1/dashboard/resources", response_model=DashboardResourcesResponse)
+    async def dashboard_resources() -> DashboardResourcesResponse:
+        snapshot = await provider.resource_snapshot()
+        return DashboardResourcesResponse(
+            checked_at=datetime.now(timezone.utc),
+            provider=snapshot["provider"],
+            vram_budget_bytes=int(broker_config.resources.local_vram_budget_gb * 1024**3),
+            vram_safety_margin_bytes=int(broker_config.resources.vram_safety_margin_gb * 1024**3),
+            used_vram_bytes=int(snapshot["used_vram_bytes"]),
+            reserved_vram_bytes=int(snapshot["reserved_vram_bytes"]),
+            max_parallel_invocations=scheduler.max_parallel_invocations(),
+            loaded_models=snapshot["loaded_models"],
+        )
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

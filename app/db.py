@@ -125,6 +125,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_events_task
             ON events(task_id, created_at)
             """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_updated
+            ON tasks(status, updated_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_invocations_task
+            ON model_invocations(task_id, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_invocations_usage
+            ON model_invocations(status, updated_at, provider)
+            """,
         ]
         with self._lock:
             for statement in statements:

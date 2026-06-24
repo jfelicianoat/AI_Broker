@@ -120,6 +120,58 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
     assert body["max_parallel_invocations"] == 2
 
 
+def test_dashboard_read_models_are_paged_filterable_and_source_backed(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        first = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "dashboard:first",
+                "content": {
+                    "prompt": "Primera tarea",
+                    "metadata": {"origin": "prompt_tester"},
+                },
+            },
+        ).json()
+        client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "dashboard:second",
+                "content": {
+                    "prompt": "Segunda tarea",
+                    "metadata": {"origin": "orchestrator"},
+                },
+            },
+        )
+        client.post("/api/v1/dispatcher/tick")
+
+        summary = client.get("/api/v1/dashboard/summary?window_hours=24")
+        page = client.get("/api/v1/dashboard/tasks?page=1&page_size=1")
+        filtered = client.get("/api/v1/dashboard/tasks?origin=prompt_tester")
+        detail = client.get(f"/api/v1/dashboard/tasks/{first['task_id']}")
+        usage = client.get("/api/v1/usage")
+        resources = client.get("/api/v1/dashboard/resources")
+
+    assert summary.status_code == 200
+    assert summary.json()["queued"] == 1
+    assert summary.json()["completed"] == 1
+    assert summary.json()["invocations"] == 1
+    assert page.status_code == 200
+    assert page.json()["total"] == 2
+    assert page.json()["page_size"] == 1
+    assert page.json()["total_pages"] == 2
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["items"][0]["origin"] == "prompt_tester"
+    assert detail.status_code == 200
+    assert detail.json()["request"]["content"]["prompt"] == "Primera tarea"
+    assert len(detail.json()["invocations"]) == 1
+    assert detail.json()["events"]
+    assert usage.status_code == 200
+    assert usage.json()["providers"]["ollama"]["invocations"] == 1.0
+    assert resources.status_code == 200
+    assert resources.json()["provider"] == "bootstrap"
+    assert resources.json()["used_vram_bytes"] == 0
+
+
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={"idempotency_key": "test:single", "content": {"prompt": "Resume esto"}}).json()

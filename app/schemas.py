@@ -309,6 +309,102 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     task_timeout: bool
 
 
+class DashboardSummaryResponse(StrictBaseModel):
+    checked_at: datetime
+    window_hours: int
+    queued: int
+    active: int
+    completed: int
+    failed: int
+    cancelled: int
+    success_rate: float | None
+    invocations: int
+    latency_p50_ms: float | None
+    latency_p95_ms: float | None
+    tokens_input: int
+    tokens_output: int
+    cost_actual_usd: float
+    oldest_queued_seconds: float | None
+
+
+class DashboardTaskItem(StrictBaseModel):
+    task_id: str
+    request_id: str | None
+    status: TaskStatus
+    priority: int
+    queue_position: int | None
+    origin: str | None
+    execution_strategy: ExecutionStrategy
+    execution_preset: ExecutionPreset
+    requested_model: ModelReference | None
+    effective_model: ModelReference | None
+    fallback_used: bool | None
+    invocations: int
+    tokens_input: int
+    tokens_output: int
+    cost_actual_usd: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class DashboardTaskPage(StrictBaseModel):
+    items: list[DashboardTaskItem]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class DashboardInvocationItem(StrictBaseModel):
+    invocation_id: str
+    role: str
+    provider: str
+    deployment: str
+    model: str
+    status: str
+    tokens_input: int
+    tokens_output: int
+    cost_usd: float
+    latency_ms: float | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DashboardEventItem(StrictBaseModel):
+    event_id: int
+    event_type: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+class DashboardTaskDetail(StrictBaseModel):
+    task: DashboardTaskItem
+    request: dict[str, Any]
+    progress: dict[str, Any]
+    result: dict[str, Any] | None
+    error: dict[str, Any] | None
+    invocations: list[DashboardInvocationItem]
+    events: list[DashboardEventItem]
+
+
+class DashboardLoadedModel(StrictBaseModel):
+    model: str
+    size_vram_bytes: int
+    context_length: int | None = None
+    lease_count: int = 0
+
+
+class DashboardResourcesResponse(StrictBaseModel):
+    checked_at: datetime
+    provider: str
+    vram_budget_bytes: int
+    vram_safety_margin_bytes: int
+    used_vram_bytes: int
+    reserved_vram_bytes: int
+    max_parallel_invocations: int
+    loaded_models: list[DashboardLoadedModel]
+
+
 class HealthDependency(StrictBaseModel):
     status: Literal["healthy", "degraded", "unavailable"]
     checked_at: datetime

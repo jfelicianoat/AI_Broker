@@ -91,6 +91,8 @@ Las rutas HTMX deben depender de servicios de consulta, nunca de SQL dentro de l
 - salud actual e historial de cambios;
 - uso agregado por periodo y proveedor.
 
+La base de estas proyecciones está implementada en `app/dashboard.py` y documentada en [`Phase_5_Read_Models.md`](Phase_5_Read_Models.md). Permanecen pendientes el historial proactivo de salud y los timestamps de inicio/fin necesarios para medir concurrencia observada.
+
 Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecciones del dashboard pueden exponerse bajo `/api/v1/dashboard/*` y alimentar fragmentos `/dashboard/fragments/*` mediante una misma capa de aplicación.
 
 ## Seguridad

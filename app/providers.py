@@ -155,6 +155,27 @@ class OllamaLifecycleManager:
         except httpx.HTTPError as error:
             raise ProviderError("MODEL_UNLOAD_FAILED", str(error), retryable=True) from error
 
+    async def resource_snapshot(self) -> dict[str, Any]:
+        running = await self.running()
+        async with self._lock:
+            leases = dict(self._leases)
+            reservations = dict(self._reserved_sizes)
+        loaded = [
+            {
+                "model": str(item.get("name") or item.get("model") or "unknown"),
+                "size_vram_bytes": int(item.get("size_vram") or 0),
+                "context_length": int(item["context_length"]) if item.get("context_length") is not None else None,
+                "lease_count": leases.get(str(item.get("name") or item.get("model") or ""), 0),
+            }
+            for item in running
+        ]
+        return {
+            "provider": "ollama",
+            "used_vram_bytes": sum(item["size_vram_bytes"] for item in loaded),
+            "reserved_vram_bytes": sum(reservations.values()),
+            "loaded_models": loaded,
+        }
+
 
 class OllamaProvider:
     def __init__(self, config: BrokerConfig, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -397,6 +418,16 @@ class RoutedModelProvider:
             checks["deepseek"] = await self._provider_health(self.deepseek)
         return checks
 
+    async def resource_snapshot(self) -> dict[str, Any]:
+        if not self.config.providers.ollama.enabled:
+            return {
+                "provider": "ollama",
+                "used_vram_bytes": 0,
+                "reserved_vram_bytes": 0,
+                "loaded_models": [],
+            }
+        return await self.ollama.lifecycle.resource_snapshot()
+
     @staticmethod
     async def _provider_health(provider: Any) -> dict[str, Any]:
         started = asyncio.get_running_loop().time()
@@ -584,6 +615,13 @@ class BootstrapModelProvider:
     async def close(self) -> None: return None
     async def health(self) -> dict[str, dict[str, Any]]:
         return {"bootstrap": {"status": "healthy", "detail": "Proveedor determinista de pruebas", "latency_ms": 0.0}}
+    async def resource_snapshot(self) -> dict[str, Any]:
+        return {
+            "provider": "bootstrap",
+            "used_vram_bytes": 0,
+            "reserved_vram_bytes": 0,
+            "loaded_models": [],
+        }
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         if request.inference_kind == InferenceKind.embedding:
             return ModelOutput(None, max(1, len(request.content.prompt)//4), 0, 0.0, 1.0, (0.25, 0.5, 0.75))
