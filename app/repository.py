@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from app.artifacts import ArtifactRecord
 from app.db import Database, dumps_json, loads_json
-from app.providers import ModelOutput
+from app.providers import ModelOutput, ProviderError
 from app.schemas import (
     ExecutionStrategy,
     ModelReference,
@@ -198,7 +198,7 @@ class TaskRepository:
                 model.provider,
                 model.deployment,
                 model.model,
-                dumps_json({"content": output.content}),
+                dumps_json(output.technical_output()),
                 output.tokens_input,
                 output.tokens_output,
                 output.cost_usd,
@@ -213,6 +213,49 @@ class TaskRepository:
             "model_invocation.completed",
             {"invocation_id": invocation_id, "role": role, "model": model.model},
         )
+        return invocation_id
+
+    def complete_single_task(
+        self,
+        task_id: str,
+        model: ModelReference,
+        output: ModelOutput,
+        *,
+        progress: dict[str, Any],
+        result: dict[str, Any],
+    ) -> str:
+        """Persiste invocación y resultado terminal en la misma transacción."""
+        invocation_id = f"inv_{uuid4().hex}"
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None or row["status"] == TaskStatus.cancelled.value:
+                raise ProviderError("TASK_CANCELLED", "La tarea fue cancelada antes de persistir el resultado")
+            connection.execute(
+                "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
+                "output_json, tokens_input, tokens_output, cost_usd, latency_ms, status, created_at, updated_at) "
+                "VALUES (?, ?, NULL, 'single', ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+                (
+                    invocation_id, task_id, model.provider, model.deployment, model.model,
+                    dumps_json(output.technical_output()), output.tokens_input, output.tokens_output,
+                    output.cost_usd, output.latency_ms, now, now,
+                ),
+            )
+            connection.execute(
+                "UPDATE tasks SET status = ?, progress_json = ?, result_json = ?, queue_position = NULL, updated_at = ? "
+                "WHERE id = ?",
+                (TaskStatus.completed.value, dumps_json(progress), dumps_json(result), now, task_id),
+            )
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "model_invocation.completed", dumps_json({
+                    "invocation_id": invocation_id, "role": "single", "model": model.model,
+                }), now),
+            )
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.status_changed", dumps_json({"status": TaskStatus.completed.value}), now),
+            )
         return invocation_id
 
     def record_artifact(

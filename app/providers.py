@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -10,7 +12,7 @@ from typing import Any
 import httpx
 
 from app.config import BrokerConfig, DeepSeekConfig, OllamaConfig
-from app.schemas import ModelReference, TaskCreateRequest
+from app.schemas import InferenceKind, ModelReference, OutputFormat, TaskCreateRequest
 
 
 class ProviderError(RuntimeError):
@@ -22,11 +24,40 @@ class ProviderError(RuntimeError):
 
 @dataclass(frozen=True)
 class ModelOutput:
-    content: str
+    content: str | None
     tokens_input: int
     tokens_output: int
     cost_usd: float
     latency_ms: float
+    embedding: tuple[float, ...] | None = None
+
+    def technical_output(self) -> dict[str, Any]:
+        if self.embedding is not None:
+            return {"embedding": list(self.embedding)}
+        return {"assistant_content": self.content}
+
+
+def estimate_required_context(request: TaskCreateRequest, prompt: str | None = None) -> int:
+    value = request.content.prompt if prompt is None else prompt
+    input_upper_bound = max(1, len(value.encode("utf-8")))
+    if request.inference_kind == InferenceKind.chat and request.output.format == OutputFormat.json \
+            and request.output.json_schema is not None:
+        input_upper_bound += len(json.dumps(
+            request.output.json_schema, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8"))
+    output_reserve = request.generation.max_output_tokens + 512 if request.inference_kind == InferenceKind.chat else 0
+    return input_upper_bound + output_reserve
+
+
+def enforce_context_limit(request: TaskCreateRequest, context_window: int | None, prompt: str | None = None) -> None:
+    if context_window is None:
+        raise ProviderError("CONTEXT_WINDOW_UNKNOWN", "El proveedor no declara la ventana de contexto")
+    required = estimate_required_context(request, prompt)
+    if required > context_window:
+        raise ProviderError(
+            "CONTEXT_LIMIT_EXCEEDED",
+            f"La inferencia requiere como máximo conservador {required} tokens y el modelo admite {context_window}",
+        )
 
 
 class CredentialResolver:
@@ -172,10 +203,11 @@ class OllamaProvider:
         entry = next((item for item in catalog if item["name"] == model), None)
         if entry is None:
             raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model}")
+        enforce_context_limit(request, entry.get("context_window"), prompt)
         started = datetime.now(timezone.utc)
         try:
             async with self.lifecycle.lease(model, int(entry.get("size_bytes") or 0)):
-                response = await self.client.post("/api/chat", json={
+                payload_request: dict[str, Any] = {
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
@@ -184,7 +216,10 @@ class OllamaProvider:
                         "temperature": request.generation.temperature,
                         "num_predict": request.generation.max_output_tokens,
                     },
-                })
+                }
+                if request.output.format == OutputFormat.json:
+                    payload_request["format"] = request.output.json_schema
+                response = await self.client.post("/api/chat", json=payload_request)
                 response.raise_for_status()
                 payload = response.json()
         except ProviderError:
@@ -200,6 +235,45 @@ class OllamaProvider:
             content=content, tokens_input=int(payload.get("prompt_eval_count") or 0),
             tokens_output=int(payload.get("eval_count") or 0), cost_usd=0.0,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+        )
+
+    async def embed(self, request: TaskCreateRequest, model: str, input_text: str) -> ModelOutput:
+        catalog = await self.models()
+        entry = next((item for item in catalog if item["name"] == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model}")
+        if "embedding" not in set(entry.get("capabilities") or []):
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad embedding")
+        enforce_context_limit(request, entry.get("context_window"), input_text)
+        started = datetime.now(timezone.utc)
+        try:
+            async with self.lifecycle.lease(model, int(entry.get("size_bytes") or 0)):
+                response = await self.client.post(
+                    "/api/embed",
+                    json={"model": model, "input": input_text, "truncate": False, "keep_alive": -1},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise ProviderError("MODEL_ERROR", str(error), retryable=error.response.status_code >= 500) from error
+        embeddings = payload.get("embeddings") or []
+        vector = embeddings[0] if len(embeddings) == 1 else None
+        if not isinstance(vector, list) or not vector or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
+            for value in vector
+        ):
+            raise ProviderError("INVALID_PROVIDER_RESPONSE", "Ollama no devolvió un embedding numérico único")
+        return ModelOutput(
+            content=None,
+            tokens_input=int(payload.get("prompt_eval_count") or 0),
+            tokens_output=0,
+            cost_usd=0.0,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            embedding=tuple(float(value) for value in vector),
         )
 
 
@@ -223,7 +297,8 @@ class DeepSeekProvider:
         try:
             response = await self.client.get("/models", headers=self._headers())
             response.raise_for_status()
-            return [{"name": item["id"], "provider": "deepseek", "deployment": "api", "status": "online"}
+            return [{"name": item["id"], "provider": "deepseek", "deployment": "api", "status": "online",
+                     "context_window": self.config.context_window, "capabilities": ["completion"]}
                     for item in response.json().get("data") or []]
         except ProviderError:
             raise
@@ -231,6 +306,7 @@ class DeepSeekProvider:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
 
     async def generate(self, request: TaskCreateRequest, model: str, prompt: str) -> ModelOutput:
+        enforce_context_limit(request, self.config.context_window, prompt)
         if request.model_requirements.max_cost_usd is not None:
             # UTF-8 bytes are a conservative upper bound for normal tokenizer input.
             estimated_input = max(1, len(prompt.encode("utf-8")))
@@ -245,12 +321,15 @@ class DeepSeekProvider:
                 )
         started = datetime.now(timezone.utc)
         try:
-            response = await self.client.post("/chat/completions", headers=self._headers(), json={
+            request_payload: dict[str, Any] = {
                 "model": model, "messages": [{"role": "user", "content": prompt}],
                 "temperature": request.generation.temperature,
                 "max_tokens": request.generation.max_output_tokens,
                 "stream": False,
-            })
+            }
+            if request.output.format == OutputFormat.json:
+                request_payload["response_format"] = {"type": "json_object"}
+            response = await self.client.post("/chat/completions", headers=self._headers(), json=request_payload)
             response.raise_for_status()
             payload = response.json()
         except ProviderError:
@@ -323,17 +402,53 @@ class RoutedModelProvider:
         catalog = [item for item in await self.models() if item["provider"].lower() in allowed]
         if not request.model_requirements.cloud_allowed:
             catalog = [item for item in catalog if item.get("deployment") != "cloud"]
+        required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
+        capability_catalog = [
+            item for item in catalog
+            if required_capability in set(item.get("capabilities") or (["completion"] if required_capability == "completion" else []))
+        ]
+        required_context = estimate_required_context(request)
+        context_catalog = [
+            item for item in capability_catalog
+            if item.get("context_window") is not None and int(item["context_window"]) >= required_context
+        ]
         preferred = request.model_requirements.preferred_model
         if preferred:
-            preferred_items = [item for item in catalog if item["name"] == preferred]
+            preferred_available = [item for item in catalog if item["name"] == preferred]
+            preferred_capable = [item for item in capability_catalog if item["name"] == preferred]
+            preferred_items = [item for item in context_catalog if item["name"] == preferred]
             if preferred_items:
-                catalog = preferred_items + [item for item in catalog if item["name"] != preferred]
+                context_catalog = preferred_items + [item for item in context_catalog if item["name"] != preferred]
+            elif preferred_capable and preferred_capable[0].get("context_window") is None \
+                    and not request.model_requirements.fallback_allowed:
+                raise ProviderError("CONTEXT_WINDOW_UNKNOWN", "El modelo preferido no declara su contexto")
+            elif preferred_capable and not request.model_requirements.fallback_allowed:
+                window = preferred_capable[0].get("context_window")
+                raise ProviderError(
+                    "CONTEXT_LIMIT_EXCEEDED",
+                    f"El modelo preferido admite {window} tokens y la inferencia requiere {required_context}",
+                )
+            elif preferred_available and not request.model_requirements.fallback_allowed:
+                raise ProviderError(
+                    "MODEL_CAPABILITY_MISMATCH",
+                    f"El modelo preferido no declara capacidad {required_capability}",
+                )
             elif not request.model_requirements.fallback_allowed:
                 raise ProviderError("MODEL_UNAVAILABLE", f"Modelo preferido no disponible: {preferred}")
-        if not catalog:
+        if not context_catalog and any(item.get("context_window") is None for item in capability_catalog):
+            raise ProviderError("CONTEXT_WINDOW_UNKNOWN", "Ningún modelo permitido declara contexto utilizable")
+        if not context_catalog and capability_catalog:
+            raise ProviderError("CONTEXT_LIMIT_EXCEEDED", "Ningún modelo permitido admite el contexto requerido")
+        if not context_catalog and catalog:
+            raise ProviderError(
+                "MODEL_CAPABILITY_MISMATCH",
+                f"Ningún modelo permitido declara capacidad {required_capability}",
+            )
+        if not context_catalog:
             raise ProviderError("MODEL_UNAVAILABLE", "No hay modelos permitidos disponibles", retryable=True)
-        return [ModelReference(provider=catalog[i % len(catalog)]["provider"], deployment=catalog[i % len(catalog)]["deployment"],
-                               model=catalog[i % len(catalog)]["name"], role=roles[i]) for i in range(count)]
+        return [ModelReference(provider=context_catalog[i % len(context_catalog)]["provider"],
+                               deployment=context_catalog[i % len(context_catalog)]["deployment"],
+                               model=context_catalog[i % len(context_catalog)]["name"], role=roles[i]) for i in range(count)]
 
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         return await self._generate(request, model, request.content.prompt)
@@ -357,8 +472,12 @@ class RoutedModelProvider:
                     raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model.model}")
                 if entry.get("deployment") == "cloud" and not request.model_requirements.cloud_allowed:
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"El modelo {model.model} requiere cloud")
+                if request.inference_kind == InferenceKind.embedding:
+                    return await self.ollama.embed(request, model.model, prompt)
                 return await self.ollama.generate(request, model.model, prompt)
             if model.provider == "deepseek":
+                if request.inference_kind == InferenceKind.embedding:
+                    raise ProviderError("PROVIDER_CAPABILITY_MISMATCH", "DeepSeek no admite embeddings en este adapter")
                 if not self.config.providers.deepseek.enabled:
                     raise ProviderError("PROVIDER_UNAVAILABLE", "DeepSeek está deshabilitado")
                 if not request.model_requirements.cloud_allowed:
@@ -371,7 +490,8 @@ class RoutedModelProvider:
 
 class BootstrapModelProvider:
     async def models(self) -> list[dict[str, Any]]:
-        return [{"name": "bootstrap-single", "provider": "ollama", "deployment": "bootstrap", "status": "available"}]
+        return [{"name": "bootstrap-single", "provider": "ollama", "deployment": "bootstrap", "status": "available",
+                 "context_window": 1_000_000, "capabilities": ["completion", "embedding"]}]
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         return [ModelReference(provider=request.model_requirements.allowed_providers[0], deployment="bootstrap",
@@ -382,6 +502,8 @@ class BootstrapModelProvider:
     async def health(self) -> dict[str, dict[str, Any]]:
         return {"bootstrap": {"status": "healthy", "detail": "Proveedor determinista de pruebas", "latency_ms": 0.0}}
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
+        if request.inference_kind == InferenceKind.embedding:
+            return ModelOutput(None, max(1, len(request.content.prompt)//4), 0, 0.0, 1.0, (0.25, 0.5, 0.75))
         text = f"## Propuesta {ordinal}: {model.role or 'proposer'}\n\n{request.content.prompt}\n\nProveedor bootstrap."
         return self._output(text, request.content.prompt)
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:

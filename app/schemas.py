@@ -62,6 +62,11 @@ class OutputFormat(str, Enum):
     text = "text"
 
 
+class InferenceKind(str, Enum):
+    chat = "chat"
+    embedding = "embedding"
+
+
 class DataClassification(str, Enum):
     public = "public"
     internal = "internal"
@@ -196,6 +201,7 @@ class RiskConfig(StrictBaseModel):
 class TaskCreateRequest(StrictBaseModel):
     idempotency_key: str = Field(min_length=1, max_length=240, pattern=r"^[A-Za-z0-9._:-]+$")
     request_id: str | None = Field(default=None, max_length=240)
+    inference_kind: InferenceKind = InferenceKind.chat
     content: TaskContent
     output: TaskOutput = Field(default_factory=TaskOutput)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
@@ -213,6 +219,13 @@ class TaskCreateRequest(StrictBaseModel):
                 for provider in self.model_requirements.allowed_providers
                 if provider.lower() == "ollama"
             ] or ["ollama"]
+        if self.content.attachments:
+            raise ValueError("attachments are not supported until a lossless provider mapping exists")
+        if self.inference_kind == InferenceKind.embedding:
+            if self.execution.strategy != ExecutionStrategy.single:
+                raise ValueError("embedding only supports single strategy")
+            if self.output.format != OutputFormat.json:
+                raise ValueError("embedding requires output.format=json")
         return self
 
 

@@ -2,7 +2,7 @@
 
 Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
 
-Estado actual: fases 1–3 operativas. El Broker usa proveedores reales por defecto, descubre el catálogo de Ollama dinámicamente y mantiene una única llamada LLM activa global. El proveedor `bootstrap` queda reservado para pruebas.
+Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings y mantiene una única llamada LLM activa global. El proveedor `bootstrap` queda reservado para pruebas.
 
 ## Stack
 
@@ -75,6 +75,15 @@ Estado actual: fases 1–3 operativas. El Broker usa proveedores reales por defe
 - Latencia medida en ms por dependencia
 - SQLite y proveedores configurados; Ollama caído degrada el servicio sin bloquear la cola
 
+### 8. Inferencia transparente
+
+- `inference_kind`: `chat` por defecto o `embedding` local con estrategia `single`
+- Preflight conservador de contexto; nunca trunca, divide o sintetiza silenciosamente
+- Traducción lossless del prompt/input a Ollama o DeepSeek
+- JSON y Markdown permanecen opacos para el Broker
+- Resultado con contenido/vector, uso, modelo y fallback
+- Invocación y resultado terminal `single` confirmados en una transacción SQLite
+
 ## API
 
 | Endpoint | Método | Descripción |
@@ -97,6 +106,7 @@ Estado actual: fases 1–3 operativas. El Broker usa proveedores reales por defe
 {
   "idempotency_key": "orchestrator:capture-001:1:single",
   "request_id": "cli-001",
+  "inference_kind": "chat",
   "content": {
     "prompt": "Analiza el impacto...",
     "attachments": [],
@@ -222,7 +232,8 @@ python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_ap
 ├── tests/
 │   ├── test_api.py         # Tests de integración de API
 │   ├── test_contract.py    # Tests de validación de contrato
-│   └── test_providers.py   # Tests de proveedores, routing, VRAM y presupuesto
+│   ├── test_providers.py   # Tests de proveedores, routing, VRAM y presupuesto
+│   └── test_phase_four_inference.py  # Contexto, embeddings y resultados opacos
 ├── broker_config.yaml      # Configuración del broker
 ├── pyproject.toml          # Proyecto Python + dependencias
 └── state/tasks/            # Artefactos de ejecución (gitignored)

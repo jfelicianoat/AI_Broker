@@ -84,7 +84,7 @@ class OllamaProviderTests(unittest.IsolatedAsyncioTestCase):
             if request.url.path == "/api/tags":
                 return httpx.Response(200, json={"models": [{"name": "small", "size": 1}]})
             if request.url.path == "/api/show":
-                return httpx.Response(200, json={})
+                return httpx.Response(200, json={"model_info": {"small.context_length": 8192}})
             if request.url.path == "/api/ps":
                 return httpx.Response(
                     200,
@@ -185,8 +185,8 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
 
         ollama = StubProvider(
             [
-                {"name": "fallback", "provider": "ollama", "deployment": "local"},
-                {"name": "preferred", "provider": "ollama", "deployment": "local"},
+                {"name": "fallback", "provider": "ollama", "deployment": "local", "context_window": 100000},
+                {"name": "preferred", "provider": "ollama", "deployment": "local", "context_window": 100000},
             ]
         )
         router = RoutedModelProvider(BrokerConfig(), ollama=ollama, deepseek=StubProvider([]))
@@ -217,7 +217,7 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
                 self.peak = 0
 
             async def models(self):
-                return [{"name": "model", "provider": "ollama", "deployment": "local"}]
+                return [{"name": "model", "provider": "ollama", "deployment": "local", "context_window": 100000}]
 
             async def generate(self, request, model, prompt):
                 from app.providers import ModelOutput
@@ -246,8 +246,8 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         class StubProvider:
             async def models(self):
                 return [
-                    {"name": "remote:cloud", "provider": "ollama", "deployment": "cloud"},
-                    {"name": "local", "provider": "ollama", "deployment": "local"},
+                    {"name": "remote:cloud", "provider": "ollama", "deployment": "cloud", "context_window": 100000},
+                    {"name": "local", "provider": "ollama", "deployment": "local", "context_window": 100000},
                 ]
 
             async def close(self):

@@ -172,6 +172,9 @@ async def _dispatcher_loop(
             try:
                 await coordinator.process_task(repository, task_id)
             except Exception as error:
+                current = repository.get_task(task_id)
+                if current.status in {TaskStatus.completed, TaskStatus.cancelled}:
+                    continue
                 repository.update_task(
                     task_id,
                     TaskStatus.failed,

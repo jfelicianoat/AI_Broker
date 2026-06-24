@@ -70,6 +70,7 @@ class DeepSeekConfig(BaseModel):
     keyring_service: str = "ai-broker"
     keyring_username: str = "deepseek_api_key"
     default_model: str = "deepseek-chat"
+    context_window: int = Field(default=64_000, gt=0)
     input_cost_per_million: float = Field(default=0.0, ge=0)
     output_cost_per_million: float = Field(default=0.0, ge=0)
 

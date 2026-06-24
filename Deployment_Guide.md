@@ -644,6 +644,7 @@ providers:
     keyring_service: "ai-broker"
     keyring_username: "deepseek_api_key"
     default_model: "deepseek-chat"
+    context_window: 64000
     input_cost_per_million: 0.0
     output_cost_per_million: 0.0
 

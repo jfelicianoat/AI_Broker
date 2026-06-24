@@ -556,11 +556,15 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 
 ### Enrutamiento y contexto
 
+**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt`, rechaza attachments sin mapeo lossless, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio.
+
 1. Respetar `preferred_model` cuando esté disponible y soporte la ventana necesaria.
 2. Si no está disponible y `fallback_allowed` es falso, terminar con `MODEL_UNAVAILABLE`.
 3. Si se permite fallback, elegir primero un modelo Ollama compatible; después un proveedor externo dentro de `max_cost_usd` y del presupuesto mensual.
 4. Los precios se leen de configuración y el coste estimado se reserva transaccionalmente antes de lanzar una petición externa.
 5. Si la inferencia excede el contexto del modelo, rechazarla antes de ejecutar con `CONTEXT_LIMIT_EXCEEDED` y límites calculados. El Broker no trunca ni divide; el Orchestrator decide cómo reconstruir el workflow.
+
+La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de plantilla. Ollama embedding se ejecuta con `truncate: false`. Chat entrega `assistant_content`; embedding entrega un único vector numérico. Invocación y resultado terminal `single` se persisten atómicamente antes de que otro workflow pueda ocupar el slot.
 
 El progreso del Broker se limita a `queued`, `routing`, `generating` y `completed`. Fases como extracción, chunking, comparación o síntesis pertenecen al Orchestrator.
 

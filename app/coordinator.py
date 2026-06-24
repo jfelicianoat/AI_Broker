@@ -10,7 +10,7 @@ from app.db import Database, dumps_json
 from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.repository import _utc_now_iso
 from app.resource_scheduler import ResourceScheduler
-from app.schemas import ExecutionStrategy, ModelReference, TaskCreateRequest, TaskStatus
+from app.schemas import ExecutionStrategy, InferenceKind, ModelReference, TaskCreateRequest, TaskStatus
 
 
 class ConsensusCoordinator:
@@ -130,19 +130,27 @@ class ConsensusCoordinator:
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
-        invocation_id = repository.record_invocation(task_id, None, "single", model, output)
-        artifact = self.artifacts.write_markdown(task_id, "single/final.md", output.content)
-        repository.record_artifact(task_id, None, invocation_id, "single_output", artifact)
-        repository.update_task(
-            task_id,
-            TaskStatus.completed,
-            progress={"phase": TaskStatus.completed.value, "invocations_completed": 1, "invocations_total": 1},
-            result={
-                "result_markdown": output.content,
-                "usage": self._usage([output]),
-                "models_used": [model.model_dump(mode="json")],
-            },
+        progress = {"phase": TaskStatus.completed.value, "invocations_completed": 1, "invocations_total": 1}
+        result = self._technical_result(request, model, output)
+        invocation_id = repository.complete_single_task(
+            task_id, model, output, progress=progress, result=result,
         )
+        try:
+            if output.embedding is not None:
+                artifact = self.artifacts.write_text(task_id, "single/embedding.json", dumps_json({
+                    "embedding": list(output.embedding),
+                }))
+                artifact_type = "embedding_output"
+            else:
+                suffix = "json" if request.output.format.value == "json" else "md"
+                artifact = self.artifacts.write_text(task_id, f"single/final.{suffix}", output.content or "")
+                artifact_type = "single_output"
+            repository.record_artifact(task_id, None, invocation_id, artifact_type, artifact)
+        except Exception as error:
+            try:
+                repository.add_event(task_id, "artifact.failed", {"message": str(error)})
+            except Exception:
+                pass
 
     async def _process_fast_consensus(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         run_id = repository.get_consensus_run_id(task_id) or self.initialize_run(task_id, request)
@@ -268,6 +276,9 @@ class ConsensusCoordinator:
         all_outputs = [output for _, output in proposals] + [synthesis]
         result = {
             "result_markdown": synthesis.content,
+            "assistant_content": synthesis.content,
+            "inference_kind": "chat",
+            "output_format": request.output.format.value,
             "consensus": {
                 "level": "fast",
                 "confidence": None,
@@ -285,6 +296,8 @@ class ConsensusCoordinator:
             "usage": self._usage(all_outputs),
             "models_used": [model.model_dump(mode="json") for model, _ in proposals]
             + [arbiter.model_dump(mode="json")],
+            "model_used": arbiter.model_dump(mode="json"),
+            "fallback_used": self._fallback_used(request, arbiter),
             "artifacts_root": str(self.artifacts.root / task_id),
         }
         repository.update_task(
@@ -389,6 +402,32 @@ class ConsensusCoordinator:
             "cost_usd": round(sum(output.cost_usd for output in outputs), 8),
         }
 
+    def _technical_result(
+        self,
+        request: TaskCreateRequest,
+        model: ModelReference,
+        output: ModelOutput,
+    ) -> dict:
+        result = {
+            "inference_kind": request.inference_kind.value,
+            "output_format": request.output.format.value,
+            "usage": self._usage([output]),
+            "model_used": model.model_dump(mode="json"),
+            "models_used": [model.model_dump(mode="json")],
+            "fallback_used": self._fallback_used(request, model),
+        }
+        if request.inference_kind == InferenceKind.embedding:
+            result["embedding"] = list(output.embedding or ())
+        else:
+            result["assistant_content"] = output.content
+            result["result_markdown"] = output.content
+        return result
+
+    @staticmethod
+    def _fallback_used(request: TaskCreateRequest, model: ModelReference) -> bool:
+        preferred = request.model_requirements.preferred_model
+        return preferred is not None and preferred != model.model
+
     def _model_markdown(
         self,
         task_id: str,
@@ -407,7 +446,7 @@ class ConsensusCoordinator:
             f"- Output tokens: {output.tokens_output}\n"
             f"- Cost USD: {output.cost_usd:.8f}\n\n"
             "## Respuesta\n\n"
-            f"{output.content}\n"
+            f"{output.content or ''}\n"
         )
 
     def _safe_name(self, value: str) -> str:
