@@ -130,7 +130,7 @@ $$\\text{Presupuesto Restante} < (\\text{Coste Estimado} \\times 1.5)$$
 
 ┌─────────────────────────────────────────────────────────────┐
 
-│  🧠 Neural Gateway Broker    [Modelos][Config][Logs]        │
+│  🧠 Neural Gateway Broker [Modelos][Probador][Config][Logs] │
 
 │  🟢 Sistema Online │ 5 req/día │ DeepSeek: 0.12€/5€        │
 
@@ -215,6 +215,23 @@ $$\\text{Presupuesto Restante} < (\\text{Coste Estimado} \\times 1.5)$$
 </div>
 
 ```
+
+### Probador de Prompts — fase 5
+
+El dashboard incluirá una vista `Probador` con dos entradas mutuamente exclusivas:
+
+- **Prompt libre:** el texto se conserva exactamente en `content.prompt`.
+- **JSON:** se valida únicamente la sintaxis y se conserva el texto original; el JSON es contenido para el LLM, no un contrato administrativo ni datos que el Broker deba interpretar.
+
+La ejecución ofrece:
+
+- `single` contra una referencia exacta `provider/deployment/model`;
+- `mixture_of_agents/fast` manual, con uno a cinco proponentes, roles y árbitro seleccionados explícitamente;
+- controles de generación, formato/schema, privacidad, cloud, fallback, timeout y coste.
+
+El probador debe construir un `TaskCreateRequest` v2 y usar `POST /api/v1/tasks`. Queda prohibido que una ruta HTMX o componente del dashboard invoque directamente Ollama o DeepSeek. Sus tareas comparten cola, slot serial, persistencia, cancelación, contexto, VRAM y presupuesto con el resto del sistema.
+
+El resultado se muestra raw y escapado, junto con uso, modelo efectivo, fallback y metadata de consenso. El historial procede de SQLite y sobrevive a recargas o reinicios. La especificación operativa está en `docs/Prompt_Tester.md`.
 
 
 
@@ -596,6 +613,7 @@ Por decisión del hilo, no hay autenticación entre las dos máquinas. En consec
 - CORS desactivado salvo orígenes exactos configurados para el dashboard.
 - Las API keys se guardan mediante `keyring` en Windows Credential Manager y nunca en SQLite, YAML o logs. `.env` solo puede aportar una clave inicial para migrarla al almacén seguro.
 - El dashboard permite sustituir una clave, pero solo muestra si está configurada y sus últimos cuatro caracteres.
+- El Probador de Prompts escapa siempre input y output, no renderiza HTML generado por modelos y nunca muestra secretos o cabeceras. Validar JSON no autoriza a interpretarlo ni transformarlo.
 
 ### Recuperación y pruebas
 

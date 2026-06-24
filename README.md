@@ -84,6 +84,18 @@ Estado actual: fases 1–4 operativas. El Broker usa proveedores reales, descubr
 - Resultado con contenido/vector, uso, modelo y fallback
 - Invocación y resultado terminal `single` confirmados en una transacción SQLite
 
+### 9. Probador de Prompts — planificado para fase 5
+
+- Entrada como prompt libre o JSON con validación sintáctica
+- Ejecución contra un modelo exacto o un `mixture_of_agents/fast` determinado manualmente
+- Selección explícita de proponentes, roles y árbitro desde el catálogo real
+- Controles de temperatura, tokens, formato/schema, privacidad, cloud, fallback, timeout y coste
+- Uso obligatorio de la misma API y cola durable; la UI no llama directamente a providers
+- Resultado raw, métricas, modelo efectivo, fallback y metadata de consenso
+- Historial persistente, cancelación y repetición segura; prompts y respuestas siempre escapados
+
+Especificación: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md).
+
 ## API
 
 | Endpoint | Método | Descripción |

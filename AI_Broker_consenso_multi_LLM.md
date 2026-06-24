@@ -742,6 +742,10 @@ Controles mínimos:
 
 ## 14. Dashboard
 
+El dashboard de consenso incluirá en fase 5 un **Probador de Prompts**. Permitirá elegir `single` con un modelo exacto o `mixture_of_agents/fast` con selección `manual` de proponentes, roles y árbitro. Solo se ofrecerán referencias presentes en el catálogo y cada una conservará proveedor, deployment y modelo.
+
+El probador aceptará prompt libre o JSON sintácticamente válido como contenido opaco, conservará exactamente el texto introducido y enviará una tarea normal a la cola durable. No podrá invocar providers directamente, alterar el quórum, relajar privacidad/presupuesto ni habilitar presets todavía no implementados. Mostrará respuesta raw, uso, coste, modelos, fallback, scheduling, consenso y advertencias con escape HTML obligatorio. Véase `docs/Prompt_Tester.md`.
+
 La tarea activa debería mostrar:
 
 - modo de ejecución y etapa;
