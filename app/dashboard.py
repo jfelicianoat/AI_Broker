@@ -224,6 +224,19 @@ class DashboardQueryRepository:
             ],
         )
 
+    def active_task_detail(self) -> DashboardTaskDetail | None:
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        row = self.db.query_one(
+            f"""
+            SELECT id FROM tasks
+            WHERE status IN ({placeholders})
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            ACTIVE_STATUSES,
+        )
+        return self.task_detail(row["id"]) if row is not None else None
+
     def usage(self, month: str) -> UsageResponse:
         start = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
         if start.month == 12:

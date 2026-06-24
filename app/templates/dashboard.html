@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Broker — Panel operativo</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegación principal">
+      <a class="brand" href="/dashboard">AI Broker</a>
+      <nav class="nav-list">
+        <a class="nav-item active" href="#resumen">Resumen</a>
+        <a class="nav-item" href="#cola">Cola</a>
+        <span class="nav-item disabled" aria-disabled="true">Probador <small>Fase 5.3</small></span>
+        <a class="nav-item" href="#recursos">Modelos</a>
+        <a class="nav-item" href="#salud">Salud</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span>Contrato 2.1</span>
+        <span>1 workflow activo</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="service-state">
+          <span class="status-dot status-{{ health.status }}"></span>
+          <div>
+            <strong>Servicio {{ 'operativo' if health.status == 'healthy' else health.status }}</strong>
+            <small>Comprobado a las {{ health.checked_at|short_time }}</small>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span class="endpoint">127.0.0.1:8080</span>
+          <button class="button secondary" type="button" data-refresh-dashboard>Actualizar</button>
+        </div>
+      </header>
+
+      <main class="content" id="resumen">
+        <section id="summary-panel"
+                 hx-get="/dashboard/fragments/summary"
+                 hx-trigger="every 10s"
+                 hx-swap="innerHTML">
+          {% include 'fragments/summary.html' %}
+        </section>
+
+        <section class="main-grid">
+          <div id="queue-panel"
+               class="panel queue-panel"
+               hx-get="/dashboard/fragments/queue"
+               hx-trigger="every 5s"
+               hx-swap="outerHTML">
+            {% include 'fragments/queue.html' %}
+          </div>
+
+          <div id="active-panel"
+               class="panel active-panel"
+               hx-get="/dashboard/fragments/active"
+               hx-trigger="every 3s"
+               hx-swap="outerHTML">
+            {% include 'fragments/active.html' %}
+          </div>
+
+          <div id="health-panel"
+               class="panel health-panel"
+               hx-get="/dashboard/fragments/health"
+               hx-trigger="every 30s"
+               hx-swap="outerHTML">
+            {% include 'fragments/health.html' %}
+          </div>
+
+          <div id="resources-panel"
+               class="panel resources-panel"
+               hx-get="/dashboard/fragments/resources"
+               hx-trigger="every 10s"
+               hx-swap="outerHTML">
+            {% include 'fragments/resources.html' %}
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

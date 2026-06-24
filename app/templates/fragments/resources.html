@@ -1,0 +1,38 @@
+<div id="resources-panel"
+     class="panel resources-panel"
+     hx-get="/dashboard/fragments/resources"
+     hx-trigger="every 10s"
+     hx-swap="outerHTML">
+  <div class="panel-heading" id="recursos">
+    <div>
+      <h2>Recursos locales</h2>
+      <p>{{ resources.provider }} · comprobado {{ resources.checked_at|short_time }}</p>
+    </div>
+    <span class="badge badge-{{ resources.status }}">{{ 'máx. ' ~ resources.max_parallel_invocations ~ ' invocaciones slow' if resources.status == 'healthy' else 'No disponible' }}</span>
+  </div>
+  {% if resources.status == 'unavailable' %}
+    <div class="resource-warning">{{ resources.detail }}</div>
+  {% endif %}
+  {% set usable = resources.vram_budget_bytes - resources.vram_safety_margin_bytes %}
+  {% set percent = ((resources.used_vram_bytes / usable) * 100) if usable > 0 else 0 %}
+  <div class="resource-summary">
+    <div>
+      <span>VRAM observada</span>
+      <strong>{{ (resources.used_vram_bytes|gb) ~ ' / ' ~ (usable|gb) if resources.status == 'healthy' else 'N/D' }}</strong>
+    </div>
+    <div class="meter" aria-label="Uso de VRAM"><span style="width: {{ [percent, 100]|min }}%"></span></div>
+    <small>Margen de seguridad: {{ resources.vram_safety_margin_bytes|gb }} · Reservada: {{ resources.reserved_vram_bytes|gb }}</small>
+  </div>
+  {% if resources.loaded_models %}
+  <div class="model-list">
+    {% for model in resources.loaded_models %}
+    <div>
+      <span><strong>{{ model.model }}</strong><small>{{ model.context_length or 'contexto N/D' }}</small></span>
+      <span>{{ model.size_vram_bytes|gb }} · {{ model.lease_count }} leases</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+    <div class="empty-inline">No hay modelos cargados en este momento.</div>
+  {% endif %}
+</div>

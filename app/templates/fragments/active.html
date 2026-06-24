@@ -1,0 +1,39 @@
+<div id="active-panel"
+     class="panel active-panel"
+     hx-get="/dashboard/fragments/active"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML">
+  <div class="panel-heading">
+    <div>
+      <h2>Tarea activa</h2>
+      <p>Solo un workflow puede estar activo</p>
+    </div>
+    {% if active %}<span class="badge badge-active">{{ active.task.status|status_label }}</span>{% endif %}
+  </div>
+  {% if active %}
+    <dl class="detail-list">
+      <div><dt>ID de tarea</dt><dd>{{ active.task.task_id }}</dd></div>
+      <div><dt>Estrategia</dt><dd>{{ active.task.execution_strategy.value }}/{{ active.task.execution_preset.value }}</dd></div>
+      <div><dt>Fase</dt><dd>{{ active.progress.get('phase', active.task.status.value)|status_label }}</dd></div>
+      <div><dt>Invocaciones</dt><dd>{{ active.progress.get('invocations_completed', 0) }} / {{ active.progress.get('invocations_total', '—') }}</dd></div>
+      <div><dt>Coste real</dt><dd>${{ '%.4f'|format(active.task.cost_actual_usd) }}</dd></div>
+      <div><dt>Actualizada</dt><dd>{{ active.task.updated_at|short_date }}</dd></div>
+    </dl>
+    <div class="phase-track" aria-label="Procesamiento en curso"><span></span></div>
+    <details class="prompt-preview">
+      <summary>Vista del prompt</summary>
+      <pre>{{ active.request.content.prompt }}</pre>
+    </details>
+    <div class="panel-actions">
+      <a class="button secondary" href="/api/v1/dashboard/tasks/{{ active.task.task_id }}">Ver detalle JSON</a>
+      <button class="button danger" type="button"
+              hx-post="/dashboard/actions/tasks/{{ active.task.task_id }}/cancel"
+              hx-confirm="¿Cancelar la tarea activa?">Cancelar tarea</button>
+    </div>
+  {% else %}
+    <div class="empty-state tall">
+      <strong>Sin tarea activa</strong>
+      <p>El dispatcher tomará la siguiente tarea pendiente automáticamente.</p>
+    </div>
+  {% endif %}
+</div>

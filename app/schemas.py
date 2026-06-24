@@ -397,6 +397,8 @@ class DashboardLoadedModel(StrictBaseModel):
 class DashboardResourcesResponse(StrictBaseModel):
     checked_at: datetime
     provider: str
+    status: Literal["healthy", "unavailable"] = "healthy"
+    detail: str | None = None
     vram_budget_bytes: int
     vram_safety_margin_bytes: int
     used_vram_bytes: int

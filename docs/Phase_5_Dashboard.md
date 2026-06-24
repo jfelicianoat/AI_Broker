@@ -2,7 +2,7 @@
 
 ## Estado
 
-Documento de diseño lógico previo a la implementación. Las tres propuestas visuales son referencias de composición; este documento determina qué datos y acciones pueden mostrarse como funcionales.
+Contrato lógico y estado de implementación del dashboard. La pantalla de Operación está implementada en la fase 5.2; Probador y Comparación permanecen planificados para las fases 5.3 y 5.4.
 
 ## Frontera de responsabilidad
 
@@ -91,9 +91,19 @@ Las rutas HTMX deben depender de servicios de consulta, nunca de SQL dentro de l
 - salud actual e historial de cambios;
 - uso agregado por periodo y proveedor.
 
-La base de estas proyecciones está implementada en `app/dashboard.py` y documentada en [`Phase_5_Read_Models.md`](Phase_5_Read_Models.md). Permanecen pendientes el historial proactivo de salud y los timestamps de inicio/fin necesarios para medir concurrencia observada.
+La base de estas proyecciones está implementada en `app/dashboard.py` y documentada en [`Phase_5_Read_Models.md`](Phase_5_Read_Models.md). La pantalla de Operación usa `app/dashboard_web.py`, plantillas Jinja2 y fragmentos hipermedia servidos localmente. Permanecen pendientes el historial proactivo de salud y los timestamps de inicio/fin necesarios para medir concurrencia observada.
 
-Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecciones del dashboard pueden exponerse bajo `/api/v1/dashboard/*` y alimentar fragmentos `/dashboard/fragments/*` mediante una misma capa de aplicación.
+Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecciones se exponen bajo `/api/v1/dashboard/*` y alimentan `/dashboard` y los fragmentos `/dashboard/fragments/*` mediante una misma capa de aplicación.
+
+## Estado de la fase 5.2
+
+- Implementados resumen operativo, cola, tarea activa, salud y recursos/VRAM.
+- Implementados polling independiente, actualización manual, reordenación subir/bajar y cancelación.
+- Las acciones reutilizan `TaskRepository`; no llaman a providers ni crean rutas de ejecución alternativas.
+- La UI muestra únicamente datos persistidos o snapshots actuales con timestamp y usa `N/D` cuando no existe una medición.
+- Si Ollama no permite obtener `/api/ps`, el panel sigue cargando y marca recursos como `unavailable`/`N/D`.
+- Los recursos CSS y JavaScript son locales. El runtime actual implementa solo el subconjunto de atributos hipermedia utilizado por la pantalla, sin dependencia de CDN.
+- Prueba de integración disponible para renderizado, fragmento de cola, reordenación, cancelación y recursos estáticos.
 
 ## Seguridad
 
@@ -109,8 +119,8 @@ Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecc
 1. **Base completada:** admisión con capacidad uno para `single/fast` y capacidad acotada para proponentes `slow`, manteniendo un solo workflow activo.
 2. **Completado:** selección exacta `provider/deployment/model`, incluida la comprobación previa a cada invocación manual.
 3. **Completado:** `execution.timeout_seconds` aplicado a la tarea completa con error tipado y cancelación.
-4. Crear las proyecciones paginadas y agregaciones descritas, sin cargar todo el historial en memoria.
-5. Exponer snapshot real de VRAM/leases y persistir cambios de salud.
+4. **Base completada:** crear las proyecciones paginadas y agregaciones de resumen, tareas, detalle, recursos y uso, sin cargar todo el historial en memoria.
+5. **Parcial:** exponer snapshot real de VRAM/leases. Sigue pendiente persistir cambios de salud.
 6. **Completado en contrato/progreso:** diferenciar coste real, presupuesto máximo y estimación; `max_cost_usd` ya no se presenta como coste reservado.
 7. Convertir los leases de modelo en contadores por invocación para impedir que una llamada descargue un modelo todavía usado por otra.
 8. Reservar VRAM y peor coste de toda una wave antes de lanzarla; una reserva parcial no inicia ninguna invocación de la wave.

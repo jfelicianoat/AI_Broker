@@ -5,8 +5,10 @@ import time
 from fastapi.testclient import TestClient
 
 from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
+from app.dashboard_web import load_dashboard_resources
 from app.main import create_app
-from app.providers import BootstrapModelProvider
+from app.providers import BootstrapModelProvider, ProviderError
+from app.resource_scheduler import ResourceScheduler
 
 
 class ConcurrencyProbeProvider(BootstrapModelProvider):
@@ -35,6 +37,11 @@ class TimeoutProbeProvider(BootstrapModelProvider):
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
+
+class UnavailableResourceProvider(BootstrapModelProvider):
+    async def resource_snapshot(self):
+        raise ProviderError("PROVIDER_UNAVAILABLE", "offline", retryable=True)
 
 
 def make_client(tmp_path: Path) -> TestClient:
@@ -170,6 +177,52 @@ def test_dashboard_read_models_are_paged_filterable_and_source_backed(tmp_path: 
     assert resources.status_code == 200
     assert resources.json()["provider"] == "bootstrap"
     assert resources.json()["used_vram_bytes"] == 0
+
+
+def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        first = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "ui:first", "content": {"prompt": "Primera"}},
+        ).json()
+        second = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "ui:second", "content": {"prompt": "Segunda"}},
+        ).json()
+
+        page = client.get("/dashboard")
+        fragment = client.get("/dashboard/fragments/queue")
+        moved = client.post(f"/dashboard/actions/queue/{second['task_id']}/up")
+        reordered = client.get("/api/v1/queue").json()["pending"]
+        cancelled = client.post(f"/dashboard/actions/tasks/{first['task_id']}/cancel")
+        css = client.get("/static/dashboard.css")
+        script = client.get("/static/dashboard.js")
+
+    assert page.status_code == 200
+    assert "Panel operativo" in page.text
+    assert "Cola de tareas" in page.text
+    assert "Coste real" in page.text
+    assert fragment.status_code == 200
+    assert first["task_id"] in fragment.text
+    assert moved.status_code == 204
+    assert moved.headers["hx-trigger"] == "dashboard-refresh"
+    assert reordered[0]["task_id"] == second["task_id"]
+    assert cancelled.status_code == 204
+    assert css.status_code == 200
+    assert "--teal" in css.text
+    assert script.status_code == 200
+    assert "refreshDashboard" in script.text
+
+
+def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
+    config = BrokerConfig(processing=ProcessingConfig(provider_mode="bootstrap", auto_dispatch=False))
+    resources = asyncio.run(
+        load_dashboard_resources(UnavailableResourceProvider(), ResourceScheduler(config), config)
+    )
+
+    assert resources.status == "unavailable"
+    assert resources.used_vram_bytes == 0
+    assert resources.detail == "PROVIDER_UNAVAILABLE: snapshot de recursos no disponible"
 
 
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:

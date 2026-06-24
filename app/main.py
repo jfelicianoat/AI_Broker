@@ -9,11 +9,13 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.db import Database
 from app.dashboard import DashboardQueryRepository
+from app.dashboard_web import create_dashboard_router, load_dashboard_resources
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
@@ -76,6 +78,17 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
     app.state.scheduler = scheduler
     app.state.coordinator = coordinator
     app.state.provider = provider
+    app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+    app.include_router(
+        create_dashboard_router(
+            queries=dashboard_queries,
+            repository=repository,
+            provider=provider,
+            scheduler=scheduler,
+            config=broker_config,
+            health_loader=lambda: _health_response(db, provider),
+        )
+    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -202,17 +215,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
 
     @app.get("/api/v1/dashboard/resources", response_model=DashboardResourcesResponse)
     async def dashboard_resources() -> DashboardResourcesResponse:
-        snapshot = await provider.resource_snapshot()
-        return DashboardResourcesResponse(
-            checked_at=datetime.now(timezone.utc),
-            provider=snapshot["provider"],
-            vram_budget_bytes=int(broker_config.resources.local_vram_budget_gb * 1024**3),
-            vram_safety_margin_bytes=int(broker_config.resources.vram_safety_margin_gb * 1024**3),
-            used_vram_bytes=int(snapshot["used_vram_bytes"]),
-            reserved_vram_bytes=int(snapshot["reserved_vram_bytes"]),
-            max_parallel_invocations=scheduler.max_parallel_invocations(),
-            loaded_models=snapshot["loaded_models"],
-        )
+        return await load_dashboard_resources(provider, scheduler, broker_config)
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

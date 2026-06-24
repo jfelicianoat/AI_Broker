@@ -2,7 +2,7 @@
 
 Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
 
-Estado actual: fases 1–4 operativas y base 5.0 completada. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings, admite destino exacto y aplica timeout global. `fast` es serial; `slow` puede lanzar proponentes concurrentes dentro de un solo workflow. El proveedor `bootstrap` queda reservado para pruebas.
+Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2 disponible sobre los read models de 5.1. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings, admite destino exacto y aplica timeout global. `fast` es serial; `slow` puede lanzar proponentes concurrentes dentro de un solo workflow. El proveedor `bootstrap` queda reservado para pruebas.
 
 ## Stack
 
@@ -14,6 +14,7 @@ Estado actual: fases 1–4 operativas y base 5.0 completada. El Broker usa prove
 | Serialización | JSON canónico con `separators=(',',':')` |
 | Scheduling | Un workflow activo; `fast` serial y `slow` con paralelismo interno acotado |
 | LLMs | Ollama (local), DeepSeek (cloud), extensible |
+| Panel | Jinja2 + fragmentos hipermedia y recursos locales |
 
 ## Funcionalidades
 
@@ -100,6 +101,16 @@ Estado actual: fases 1–4 operativas y base 5.0 completada. El Broker usa prove
 
 Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) y [`docs/Mixture_Slow_Concurrency.md`](docs/Mixture_Slow_Concurrency.md).
 
+### 10. Panel operativo — fase 5.2
+
+- Disponible en `GET /dashboard`, sin CDN ni métricas simuladas.
+- Resume cola, tarea activa, latencia, coste real, éxito, salud y VRAM observada.
+- Refresca cada bloque de forma independiente mientras una inferencia está esperando al LLM.
+- Permite subir, bajar y cancelar tareas mediante las mismas operaciones durables del Broker.
+- Las cifras proceden de SQLite, del health check actual o del snapshot de recursos con timestamp.
+- Un fallo del snapshot de Ollama degrada el bloque de recursos a `N/D` sin inutilizar el panel.
+- El historial proactivo de salud y la medición temporal de solapamiento de `slow` siguen pendientes.
+
 ## API
 
 | Endpoint | Método | Descripción |
@@ -117,6 +128,10 @@ Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase
 | `/api/v1/dashboard/tasks` | GET | Tareas paginadas y filtrables |
 | `/api/v1/dashboard/tasks/{id}` | GET | Request, resultado, invocaciones y eventos de una tarea |
 | `/api/v1/dashboard/resources` | GET | Snapshot de VRAM, reservas, leases y modelos cargados |
+| `/dashboard` | GET | Panel operativo local |
+| `/dashboard/fragments/*` | GET | Fragmentos de resumen, cola, tarea activa, salud y recursos |
+| `/dashboard/actions/queue/{id}/{direction}` | POST | Subir o bajar una tarea pendiente |
+| `/dashboard/actions/tasks/{id}/cancel` | POST | Solicitar cancelación desde el panel |
 | `/health` | GET | Estado detallado de dependencias |
 | `/health/live` | GET | Liveness del proceso |
 | `/health/ready` | GET | Readiness de SQLite y dispatcher |
@@ -236,6 +251,12 @@ pip install -e .[dev]
 uvicorn app.main:app --reload --port 8080 --workers 1
 ```
 
+Abre `http://127.0.0.1:8080/dashboard` para usar el panel operativo. Para una previsualización aislada con SQLite temporal y provider de prueba:
+
+```powershell
+python scripts/preview_dashboard.py --port 8765 --database "$env:TEMP\ai-broker-preview.db"
+```
+
 Para activar DeepSeek, configura sus precios en `broker_config.yaml`, cambia `providers.deepseek.enabled` a `true` y guarda la clave sin mostrarla en consola:
 
 ```powershell
@@ -251,11 +272,16 @@ python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_ap
 │   ├── coordinator.py      # Orquestador de consenso multi-LLM
 │   ├── db.py               # SQLite con WAL, schema y event sourcing
 │   ├── dashboard.py        # Read models paginados y métricas operativas
+│   ├── dashboard_web.py    # Rutas HTML, fragmentos y acciones del panel
 │   ├── main.py             # FastAPI app + endpoints
 │   ├── providers.py        # Ollama, DeepSeek, routing, secretos y ciclo de VRAM
 │   ├── repository.py       # Capa de acceso a datos
 │   ├── resource_scheduler.py  # Planificador adaptativo de recursos
-│   └── schemas.py          # Modelos Pydantic (contrato completo)
+│   ├── schemas.py          # Modelos Pydantic (contrato completo)
+│   ├── static/             # CSS y runtime hipermedia locales
+│   └── templates/          # Plantillas Jinja2 del panel
+├── scripts/
+│   └── preview_dashboard.py # Servidor de previsualización local
 ├── tests/
 │   ├── test_api.py         # Tests de integración de API
 │   ├── test_contract.py    # Tests de validación de contrato

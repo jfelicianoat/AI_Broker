@@ -1,0 +1,67 @@
+<div id="queue-panel"
+     class="panel queue-panel"
+     hx-get="/dashboard/fragments/queue"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML">
+  <div class="panel-heading" id="cola">
+    <div>
+      <h2>Cola de tareas</h2>
+      <p>{{ queue.total }} pendientes · se muestran hasta {{ queue.page_size }}</p>
+    </div>
+    <button class="button secondary compact" type="button" data-refresh-target="#queue-panel">Actualizar</button>
+  </div>
+  {% if queue.items %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Pos.</th>
+          <th>ID de tarea</th>
+          <th>Destino solicitado</th>
+          <th>Creada</th>
+          <th>Estado</th>
+          <th class="align-right">Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for task in queue.items %}
+        <tr>
+          <td class="position">{{ task.queue_position or '—' }}</td>
+          <td>
+            <a class="task-link" href="/api/v1/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+            <small>{{ task.origin or 'api' }}</small>
+          </td>
+          <td>
+            {% if task.requested_model %}
+              <span>{{ task.requested_model.model }}</span>
+              <small>{{ task.requested_model.provider }}/{{ task.requested_model.deployment }}</small>
+            {% else %}
+              <span>Enrutamiento automático</span>
+              <small>{{ task.execution_strategy.value }}/{{ task.execution_preset.value }}</small>
+            {% endif %}
+          </td>
+          <td>{{ task.created_at|short_date }}</td>
+          <td><span class="badge badge-queued">{{ task.status|status_label }}</span></td>
+          <td class="align-right actions">
+            <button class="link-button" type="button"
+                    hx-post="/dashboard/actions/queue/{{ task.task_id }}/up"
+                    aria-label="Subir tarea">Subir</button>
+            <button class="link-button" type="button"
+                    hx-post="/dashboard/actions/queue/{{ task.task_id }}/down"
+                    aria-label="Bajar tarea">Bajar</button>
+            <button class="link-button danger" type="button"
+                    hx-post="/dashboard/actions/tasks/{{ task.task_id }}/cancel"
+                    hx-confirm="¿Cancelar esta tarea?">Cancelar</button>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="empty-state">
+      <strong>La cola está vacía</strong>
+      <p>Las nuevas tareas aparecerán aquí al ser aceptadas.</p>
+    </div>
+  {% endif %}
+</div>
