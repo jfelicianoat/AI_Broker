@@ -264,6 +264,31 @@ class DashboardQueryRepository:
             total_pages=1 if rows else 0,
         )
 
+    def list_terminal_tasks(self, *, page_size: int = 25) -> DashboardTaskPage:
+        rows = self.db.query_all(
+            """
+            SELECT t.*,
+                   COUNT(mi.id) AS invocation_count,
+                   COALESCE(SUM(mi.tokens_input), 0) AS invocation_tokens_input,
+                   COALESCE(SUM(mi.tokens_output), 0) AS invocation_tokens_output,
+                   COALESCE(SUM(mi.cost_usd), 0) AS invocation_cost_usd
+            FROM tasks t
+            LEFT JOIN model_invocations mi ON mi.task_id = t.id
+            WHERE t.status IN ('completed', 'failed', 'cancelled')
+            GROUP BY t.id
+            ORDER BY t.updated_at DESC
+            LIMIT ?
+            """,
+            (page_size,),
+        )
+        return DashboardTaskPage(
+            items=[self._task_item(row) for row in rows],
+            page=1,
+            page_size=page_size,
+            total=len(rows),
+            total_pages=1 if rows else 0,
+        )
+
     def usage(self, month: str) -> UsageResponse:
         start = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)
         if start.month == 12:

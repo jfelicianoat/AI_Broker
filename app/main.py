@@ -40,8 +40,8 @@ from app.schemas import (
 )
 
 
-def create_app(config: BrokerConfig | None = None) -> FastAPI:
-    broker_config = config or load_config()
+def create_app(config: BrokerConfig | None = None, config_path: str | Path = "broker_config.yaml") -> FastAPI:
+    broker_config = config or load_config(config_path)
     configure_logging(broker_config.logging)
     logger = logging.getLogger("ai_broker.http")
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
@@ -130,6 +130,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
             provider=provider,
             scheduler=scheduler,
             config=broker_config,
+            config_path=Path(config_path),
             health_loader=lambda: _health_response(db, provider),
         )
     )

@@ -120,6 +120,8 @@ class ConsensusCoordinator:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return
+            current = repository.get_task(task_id)
+            context = self._error_context(error, current.progress)
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
@@ -128,6 +130,7 @@ class ConsensusCoordinator:
                     "code": error.code,
                     "message": str(error),
                     "retryable": error.retryable,
+                    **context,
                 },
                 clear_queue_position=True,
             )
@@ -138,6 +141,7 @@ class ConsensusCoordinator:
                     "task_id": task_id,
                     "code": error.code,
                     "retryable": error.retryable,
+                    **context,
                 },
             )
 
@@ -182,11 +186,15 @@ class ConsensusCoordinator:
             },
             clear_queue_position=True,
         )
-        output = await self._run_cancellable(
-            repository,
-            task_id,
-            self.provider.propose(request, model, 1),
-        )
+        try:
+            output = await self._run_cancellable(
+                repository,
+                task_id,
+                self.provider.propose(request, model, 1),
+            )
+        except ProviderError as error:
+            self._attach_error_context(error, "generating", model)
+            raise
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
@@ -260,6 +268,20 @@ class ConsensusCoordinator:
                 max_parallel_launched,
                 len(active_models) if request.execution.preset == ExecutionPreset.slow else min(1, len(active_models)),
             )
+            launch_models = active_models if request.execution.preset == ExecutionPreset.slow else active_models[:1]
+            repository.update_task(
+                task_id,
+                TaskStatus.proposing,
+                progress={
+                    **progress,
+                    "phase": TaskStatus.proposing.value,
+                    "invocations_completed": completed,
+                    "wave_current": wave_index,
+                    "active_invocations": [item.model_dump(mode="json") for item in launch_models],
+                    "max_parallel_invocations_launched": max_parallel_launched,
+                    "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
+                },
+            )
             wave_outputs = await self._run_proposer_wave(
                 repository,
                 task_id,
@@ -293,7 +315,7 @@ class ConsensusCoordinator:
                         "phase": TaskStatus.proposing.value,
                         "invocations_completed": completed,
                         "wave_current": wave_index,
-                        "active_invocations": [item.model_dump(mode="json") for item in active_models],
+                        "active_invocations": [],
                         "max_parallel_invocations_launched": max_parallel_launched,
                         "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
                     },
@@ -327,11 +349,15 @@ class ConsensusCoordinator:
             },
         )
         synthesis_request = self._with_remaining_budget(request, [output for _, output in proposals])
-        synthesis = await self._run_cancellable(
-            repository,
-            task_id,
-            self.provider.synthesize(synthesis_request, arbiter, [output for _, output in proposals]),
-        )
+        try:
+            synthesis = await self._run_cancellable(
+                repository,
+                task_id,
+                self.provider.synthesize(synthesis_request, arbiter, [output for _, output in proposals]),
+            )
+        except ProviderError as error:
+            self._attach_error_context(error, "synthesizing", arbiter, role="arbiter")
+            raise
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
@@ -409,6 +435,7 @@ class ConsensusCoordinator:
                 )
                 return model, output, None
             except ProviderError as error:
+                self._attach_error_context(error, "proposing", model)
                 return model, None, error
 
         if request.execution.preset == ExecutionPreset.slow and len(active_models) > 1:
@@ -596,6 +623,39 @@ class ConsensusCoordinator:
 
     def _safe_name(self, value: str) -> str:
         return "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in value).strip("-") or "item"
+
+    def _attach_error_context(
+        self,
+        error: ProviderError,
+        stage: str,
+        model: ModelReference,
+        role: str | None = None,
+    ) -> None:
+        setattr(error, "stage", stage)
+        setattr(error, "role", role or model.role)
+        setattr(error, "provider", model.provider)
+        setattr(error, "deployment", model.deployment)
+        setattr(error, "model", model.model)
+
+    def _error_context(self, error: ProviderError, progress: dict[str, Any]) -> dict[str, Any]:
+        context = {
+            key: getattr(error, key)
+            for key in ("stage", "role", "provider", "deployment", "model")
+            if getattr(error, key, None) is not None
+        }
+        if context:
+            return context
+        active = progress.get("active_invocations") if isinstance(progress, dict) else None
+        if isinstance(active, list) and len(active) == 1 and isinstance(active[0], dict):
+            model = active[0]
+            return {
+                "stage": progress.get("phase"),
+                "role": model.get("role"),
+                "provider": model.get("provider"),
+                "deployment": model.get("deployment"),
+                "model": model.get("model"),
+            }
+        return {"stage": progress.get("phase")} if isinstance(progress, dict) and progress.get("phase") else {}
 
     def _create_stage(self, task_id: str, run_id: str, ordinal: int, stage_type: str) -> None:
         now = _utc_now_iso()

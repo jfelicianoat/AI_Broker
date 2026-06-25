@@ -1,59 +1,52 @@
 server:
-  host: "127.0.0.1"
+  host: 127.0.0.1
   port: 8080
   workers: 1
   cors_enabled: false
-
 persistence:
-  database: "state/broker.db"
-  journal_mode: "WAL"
-
+  database: state/broker.db
+  journal_mode: WAL
 processing:
   max_active_workflows: 1
-  max_parallel_invocations: "auto"
+  max_parallel_invocations: auto
   queue_max_size: 1000
-  task_timeout_seconds: 300
+  task_timeout_seconds: 3000
   unload_after_task: true
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
-  provider_mode: "real"
-
+  provider_mode: real
 resources:
-  local_vram_budget_gb: 64
-  vram_safety_margin_gb: 6
-  max_loaded_local_models: "auto"
-  scheduling_policy: "adaptive"
+  local_vram_budget_gb: 64.0
+  vram_safety_margin_gb: 2.0
+  max_loaded_local_models: auto
+  scheduling_policy: adaptive
   allow_execution_waves: true
-
 health:
   sqlite_interval_seconds: 10
   local_dependencies_interval_seconds: 30
   external_providers_interval_seconds: 300
   disk_free_alert_gb: 10
-
 logging:
-  level: "INFO"
-  directory: "logs"
-  filename: "ai-broker.log"
+  level: INFO
+  directory: logs
+  filename: ai-broker.log
   max_bytes: 10485760
   backup_count: 5
   console_enabled: true
-
 providers:
   ollama:
     enabled: true
-    base_url: "http://127.0.0.1:11434"
-    timeout_seconds: 300
-    unload_timeout_seconds: 10
+    base_url: http://127.0.0.1:11434
+    timeout_seconds: 300.0
+    unload_timeout_seconds: 10.0
   deepseek:
     enabled: false
-    base_url: "https://api.deepseek.com"
-    timeout_seconds: 300
-    api_key_env: "DEEPSEEK_API_KEY"
-    keyring_service: "ai-broker"
-    keyring_username: "deepseek_api_key"
-    default_model: "deepseek-chat"
+    base_url: https://api.deepseek.com
+    timeout_seconds: 300.0
+    api_key_env: DEEPSEEK_API_KEY
+    keyring_service: ai-broker
+    keyring_username: deepseek_api_key
+    default_model: deepseek-chat
     context_window: 64000
     input_cost_per_million: 0.0
     output_cost_per_million: 0.0
-

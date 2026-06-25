@@ -35,6 +35,11 @@ class JsonLineFormatter(logging.Formatter):
             "task_id",
             "code",
             "retryable",
+            "stage",
+            "role",
+            "provider",
+            "deployment",
+            "model",
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)

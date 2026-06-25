@@ -15,7 +15,21 @@
       <div><dt>ID de tarea</dt><dd>{{ active.task.task_id }}</dd></div>
       <div><dt>Estrategia</dt><dd>{{ active.task.execution_strategy.value }}/{{ active.task.execution_preset.value }}</dd></div>
       <div><dt>Fase</dt><dd>{{ active.progress.get('phase', active.task.status.value)|status_label }}</dd></div>
-      <div><dt>Invocaciones</dt><dd>{{ active.progress.get('invocations_completed', 0) }} / {{ active.progress.get('invocations_total', '—') }}</dd></div>
+      <div><dt>Invocaciones</dt><dd>{{ active.progress.get('invocations_completed', 0) }} / {{ active.progress.get('invocations_total', '-') }}</dd></div>
+      <div>
+        <dt>Modelo en curso</dt>
+        <dd>
+          {% set active_models = active.progress.get('active_invocations', []) %}
+          {% if active_models %}
+            {% for model in active_models %}
+              <span>{{ model.role or 'modelo' }}: {{ model.provider }}/{{ model.deployment }}/{{ model.model }}</span>{% if not loop.last %}<br>{% endif %}
+            {% endfor %}
+          {% else %}
+            N/D
+          {% endif %}
+        </dd>
+      </div>
+      <div><dt>Plan</dt><dd>{{ active.progress.get('scheduling_mode', active.progress.get('scheduling_requested', 'N/D')) }}</dd></div>
       <div><dt>Coste real</dt><dd>${{ '%.4f'|format(active.task.cost_actual_usd) }}</dd></div>
       <div><dt>Actualizada</dt><dd>{{ active.task.updated_at|short_date }}</dd></div>
     </dl>
@@ -25,15 +39,15 @@
       <pre>{{ active.request.content.prompt }}</pre>
     </details>
     <div class="panel-actions">
-      <a class="button secondary" href="/api/v1/dashboard/tasks/{{ active.task.task_id }}">Ver detalle JSON</a>
+      <a class="button secondary" href="/dashboard/tasks/{{ active.task.task_id }}">Ver resultado</a>
       <button class="button danger" type="button"
               hx-post="/dashboard/actions/tasks/{{ active.task.task_id }}/cancel"
-              hx-confirm="¿Cancelar la tarea activa?">Cancelar tarea</button>
+              hx-confirm="Cancelar la tarea activa?">Cancelar tarea</button>
     </div>
   {% else %}
     <div class="empty-state tall">
       <strong>Sin tarea activa</strong>
-      <p>El dispatcher tomará la siguiente tarea pendiente automáticamente.</p>
+      <p>El dispatcher tomara la siguiente tarea pendiente automaticamente.</p>
     </div>
   {% endif %}
 </div>

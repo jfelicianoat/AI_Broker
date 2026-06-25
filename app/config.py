@@ -121,3 +121,16 @@ def load_config(path: str | Path = "broker_config.yaml") -> BrokerConfig:
     defaults = BrokerConfig().model_dump()
     return BrokerConfig.model_validate(_deep_merge(defaults, raw))
 
+
+def save_config(config: BrokerConfig, path: str | Path = "broker_config.yaml") -> None:
+    config_path = Path(path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        yaml.safe_dump(
+            config.model_dump(mode="json"),
+            sort_keys=False,
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+

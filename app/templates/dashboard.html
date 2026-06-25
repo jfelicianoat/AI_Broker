@@ -20,6 +20,8 @@
         <a class="nav-item" href="/dashboard/comparison">Comparación <small>Fase 5.4</small></a>
         <a class="nav-item" href="#resources-panel">Modelos</a>
         <a class="nav-item" href="#health-panel">Salud</a>
+        <a class="nav-item" href="#history-panel">Historial</a>
+        <a class="nav-item" href="#config-panel">Configuración</a>
       </nav>
       <div class="sidebar-foot">
         <span>Contrato 2.1</span>
@@ -82,6 +84,12 @@
                hx-swap="outerHTML">
             {% include 'fragments/resources.html' %}
           </div>
+
+          <div id="config-panel" class="panel config-panel">
+            {% include 'fragments/config.html' %}
+          </div>
+
+          {% include 'fragments/history.html' %}
         </section>
       </main>
     </div>
