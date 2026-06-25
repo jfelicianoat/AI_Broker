@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -11,6 +12,9 @@ from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.repository import _utc_now_iso
 from app.resource_scheduler import ResourcePlanningError, ResourceScheduler
 from app.schemas import ExecutionPreset, ExecutionStrategy, InferenceKind, ModelReference, TaskCreateRequest, TaskStatus
+
+
+logger = logging.getLogger("ai_broker.coordinator")
 
 
 class ConsensusCoordinator:
@@ -103,6 +107,15 @@ class ConsensusCoordinator:
                 },
                 clear_queue_position=True,
             )
+            logger.warning(
+                "task.failed",
+                extra={
+                    "event": "task.failed",
+                    "task_id": task_id,
+                    "code": "TASK_TIMEOUT",
+                    "retryable": True,
+                },
+            )
         except ProviderError as error:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
@@ -117,6 +130,15 @@ class ConsensusCoordinator:
                     "retryable": error.retryable,
                 },
                 clear_queue_position=True,
+            )
+            logger.warning(
+                "task.failed",
+                extra={
+                    "event": "task.failed",
+                    "task_id": task_id,
+                    "code": error.code,
+                    "retryable": error.retryable,
+                },
             )
 
     async def _process_task_request(

@@ -25,7 +25,17 @@ class JsonLineFormatter(logging.Formatter):
             "logger": record.name,
             "message": _redact(record.getMessage()),
         }
-        for key in ("method", "path", "status_code", "duration_ms", "client", "event"):
+        for key in (
+            "method",
+            "path",
+            "status_code",
+            "duration_ms",
+            "client",
+            "event",
+            "task_id",
+            "code",
+            "retryable",
+        ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)
         if record.exc_info:
