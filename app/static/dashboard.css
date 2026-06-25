@@ -61,6 +61,8 @@ a { color: inherit; }
 .active-panel { grid-column: 2; grid-row: 1; }
 .health-panel { grid-column: 1; grid-row: 2; }
 .resources-panel { grid-column: 2; grid-row: 2; }
+.config-panel { grid-column: 1 / -1; grid-row: 3; }
+.history-panel { grid-column: 1 / -1; grid-row: 4; }
 .panel { overflow: hidden; }
 .panel-heading { min-height: 58px; padding: 13px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); }
 .panel-heading h2 { margin: 0; font-size: 16px; font-weight: 680; }
@@ -93,6 +95,9 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .badge { display: inline-flex; align-items: center; min-height: 23px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--border); color: #b7c6d3; background: #122131; font-size: 10px; font-weight: 650; white-space: nowrap; }
 .badge-queued { border-color: #6b511f; background: #281f0c; color: #ffc34f; }
 .badge-active, .badge-healthy { border-color: #25623d; background: #10291c; color: #72dc8c; }
+.badge-completed { border-color: #25623d; background: #10291c; color: #72dc8c; }
+.badge-failed { border-color: #6d343b; background: #2a171e; color: #ff8993; }
+.badge-cancelled { border-color: #596b7d; background: #172232; color: #b9c7d4; }
 .badge-degraded { border-color: #6b511f; color: #ffc34f; }
 .badge-unavailable { border-color: #6d343b; color: #ff8993; }
 .badge-neutral { color: #91bfe8; }
@@ -173,6 +178,10 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .check-row { display: flex; flex-wrap: wrap; gap: 14px; color: #cbd8e3; font-size: 12px; }
 .check-row label { display: inline-flex; align-items: center; gap: 7px; }
 .code-preview { margin: 0; padding: 16px; max-height: 420px; overflow: auto; color: #b8c7d4; background: #081522; border-bottom: 1px solid var(--border); font: 11px/1.55 ui-monospace, "Cascadia Code", monospace; white-space: pre-wrap; }
+.config-grid { grid-template-columns: repeat(3, minmax(180px, 1fr)); }
+.config-alert { margin: 14px 16px 0; }
+.config-checks { grid-column: 1 / -1; }
+.config-actions { border-top: 1px solid var(--border-soft); padding-top: 16px; }
 
 .comparison-grid { display: grid; grid-template-columns: minmax(280px, .35fr) minmax(680px, 1fr); gap: 14px; align-items: start; }
 .task-stack { display: grid; }
@@ -201,14 +210,19 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .raw-result { margin: 16px; border: 1px solid var(--border); border-radius: 4px; background: #081522; }
 .raw-result summary { padding: 12px 14px; cursor: pointer; color: #cbd8e3; font-size: 12px; }
 .raw-result pre { margin: 0; padding: 14px; max-height: 380px; overflow: auto; border-top: 1px solid var(--border); white-space: pre-wrap; color: #b8c7d4; font: 11px/1.55 ui-monospace, "Cascadia Code", monospace; }
+.task-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
+.task-result-panel { min-height: 360px; }
+.result-output { margin: 0; padding: 18px; white-space: pre-wrap; color: #dce6ef; font: 13px/1.6 "Segoe UI", system-ui, sans-serif; }
+.invocation-panel { margin-top: 14px; }
 
 @media (max-width: 1150px) {
   .metric-grid { grid-template-columns: repeat(3, 1fr); }
   .main-grid { grid-template-columns: 1fr; }
-  .queue-panel, .active-panel, .health-panel, .resources-panel { grid-column: 1; grid-row: auto; }
+  .queue-panel, .active-panel, .health-panel, .resources-panel, .config-panel, .history-panel { grid-column: 1; grid-row: auto; }
   .tester-grid { grid-template-columns: 1fr; }
   .tester-input, .tester-config, .tester-limits, .tester-preview { grid-column: 1; grid-row: auto; }
   .comparison-grid { grid-template-columns: 1fr; }
+  .task-detail-grid { grid-template-columns: 1fr; }
   .comparison-summary { grid-template-columns: repeat(2, 1fr); }
 }
 
@@ -228,6 +242,7 @@ td small { display: block; margin-top: 3px; color: #718599; }
   .health-row { grid-template-columns: 1fr auto; }
   .health-detail { grid-column: 1 / -1; white-space: normal; }
   .field-pair, .proposer-row { grid-template-columns: 1fr; }
+  .config-grid { grid-template-columns: 1fr; }
   .timeline-row { grid-template-columns: 1fr; gap: 8px; padding: 12px 0; }
   .lane-metrics { justify-items: start; }
   .comparison-summary { grid-template-columns: 1fr; }

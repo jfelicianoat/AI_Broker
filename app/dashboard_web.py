@@ -10,11 +10,11 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from app.config import BrokerConfig
+from app.config import BrokerConfig, save_config
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository
 from app.providers import ProviderError
@@ -64,6 +64,7 @@ def create_dashboard_router(
     provider,
     scheduler: ResourceScheduler,
     config: BrokerConfig,
+    config_path: Path,
     health_loader: Callable[[], Awaitable[HealthResponse]],
 ) -> APIRouter:
     router = APIRouter()
@@ -78,13 +79,17 @@ def create_dashboard_router(
             return [], f"{error.code}: catalogo no disponible"
 
     @router.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard(request: Request):
+    async def dashboard(request: Request, config_saved: bool = False):
         context = {
             "summary": queries.summary(window_hours=24),
             "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
             "active": queries.active_task_detail(),
             "health": await health_loader(),
             "resources": await resources(),
+            "history": queries.list_terminal_tasks(page_size=20),
+            "config": config,
+            "config_saved": config_saved,
+            "config_errors": [],
         }
         return _template_response(request, "dashboard.html", context)
 
@@ -127,6 +132,21 @@ def create_dashboard_router(
                 "tasks": tasks,
                 "selected": selected,
                 "comparison": comparison_view,
+            },
+        )
+
+    @router.get("/dashboard/tasks/{task_id}", response_class=HTMLResponse)
+    async def task_view(request: Request, task_id: str):
+        try:
+            detail = queries.task_detail(task_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
+        return _template_response(
+            request,
+            "task_detail.html",
+            {
+                "detail": detail,
+                "task_result": _task_result_view(detail),
             },
         )
 
@@ -176,6 +196,55 @@ def create_dashboard_router(
             name="fragments/resources.html",
             context={"resources": await resources()},
         )
+
+    @router.get("/dashboard/fragments/history", response_class=HTMLResponse)
+    async def history_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/history.html",
+            context={"history": queries.list_terminal_tasks(page_size=20)},
+        )
+
+    @router.get("/dashboard/fragments/config", response_class=HTMLResponse)
+    async def config_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/config.html",
+            context={
+                "config": config,
+                "csrf_token": _csrf_token(request),
+                "config_saved": False,
+                "config_errors": [],
+            },
+        )
+
+    @router.post("/dashboard/actions/config", response_class=HTMLResponse)
+    async def update_config(request: Request):
+        form = await _read_urlencoded_form(request)
+        _verify_dashboard_mutation(request, form)
+        errors: list[str] = []
+        try:
+            updated = _build_dashboard_config(config, form)
+            save_config(updated, config_path)
+            _apply_config_update(config, updated)
+        except PromptTesterError as error:
+            errors.append(str(error))
+        except ValidationError as error:
+            errors.extend(_validation_messages(error))
+        if errors:
+            context = {
+                "summary": queries.summary(window_hours=24),
+                "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
+                "active": queries.active_task_detail(),
+                "health": await health_loader(),
+                "resources": await resources(),
+                "history": queries.list_terminal_tasks(page_size=20),
+                "config": config,
+                "config_saved": False,
+                "config_errors": errors,
+            }
+            return _template_response(request, "dashboard.html", context)
+        return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
 
     @router.post("/dashboard/actions/prompt-tester", response_class=HTMLResponse)
     async def submit_prompt_tester(request: Request):
@@ -340,6 +409,42 @@ def _prompt_tester_defaults() -> dict[str, str]:
     }
 
 
+def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> BrokerConfig:
+    payload = current.model_dump(mode="json")
+    processing = dict(payload["processing"])
+    resources = dict(payload["resources"])
+    processing["task_timeout_seconds"] = _int_range_field(
+        form, "task_timeout_seconds", minimum=30, maximum=86400
+    )
+    processing["queue_max_size"] = _int_range_field(
+        form, "queue_max_size", minimum=1, maximum=100000
+    )
+    processing["max_parallel_invocations"] = _auto_or_int_field(
+        form, "max_parallel_invocations", minimum=1, maximum=64
+    )
+    resources["local_vram_budget_gb"] = _float_range_field(
+        form, "local_vram_budget_gb", minimum=1.0, maximum=1024.0
+    )
+    resources["vram_safety_margin_gb"] = _float_range_field(
+        form, "vram_safety_margin_gb", minimum=0.0, maximum=512.0
+    )
+    resources["max_loaded_local_models"] = _auto_or_int_field(
+        form, "max_loaded_local_models", minimum=1, maximum=64
+    )
+    resources["allow_execution_waves"] = _checked(form, "allow_execution_waves")
+    if resources["vram_safety_margin_gb"] >= resources["local_vram_budget_gb"]:
+        raise PromptTesterError("El margen de VRAM debe ser menor que el presupuesto total de VRAM.")
+    payload["processing"] = processing
+    payload["resources"] = resources
+    return BrokerConfig.model_validate(payload)
+
+
+def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
+    target.processing = updated.processing
+    target.resources = updated.resources
+
+
+
 def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
     prompt = form.get("prompt", "")
     if not prompt.strip():
@@ -501,6 +606,13 @@ def _int_field(form: dict[str, str], key: str, default: int) -> int:
         raise PromptTesterError(f"{key} debe ser un numero entero.") from error
 
 
+def _int_range_field(form: dict[str, str], key: str, *, minimum: int, maximum: int) -> int:
+    value = _int_field(form, key, minimum)
+    if value < minimum or value > maximum:
+        raise PromptTesterError(f"{key} debe estar entre {minimum} y {maximum}.")
+    return value
+
+
 def _float_field(form: dict[str, str], key: str, default: float) -> float:
     raw = form.get(key, "").strip()
     if not raw:
@@ -509,6 +621,26 @@ def _float_field(form: dict[str, str], key: str, default: float) -> float:
         return float(raw)
     except ValueError as error:
         raise PromptTesterError(f"{key} debe ser numerico.") from error
+
+
+def _float_range_field(form: dict[str, str], key: str, *, minimum: float, maximum: float) -> float:
+    value = _float_field(form, key, minimum)
+    if value < minimum or value > maximum:
+        raise PromptTesterError(f"{key} debe estar entre {minimum:g} y {maximum:g}.")
+    return value
+
+
+def _auto_or_int_field(form: dict[str, str], key: str, *, minimum: int, maximum: int) -> int | str:
+    raw = form.get(key, "").strip().lower()
+    if not raw or raw == "auto":
+        return "auto"
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise PromptTesterError(f"{key} debe ser 'auto' o un numero entero.") from error
+    if value < minimum or value > maximum:
+        raise PromptTesterError(f"{key} debe ser 'auto' o estar entre {minimum} y {maximum}.")
+    return value
 
 
 def _optional_float(form: dict[str, str], key: str) -> float | None:
@@ -609,6 +741,44 @@ def _comparison_warnings(
     if detail.result is None:
         warnings.append("La tarea aun no tiene resultado terminal; solo se muestra estado persistido.")
     return warnings
+
+
+def _task_result_view(detail: DashboardTaskDetail) -> dict[str, Any]:
+    result = detail.result or {}
+    error = detail.error or {}
+    assistant_content = result.get("assistant_content") or result.get("result_markdown")
+    if assistant_content is None and error:
+        assistant_content = error.get("message")
+    active = detail.progress.get("active_invocations")
+    if not isinstance(active, list):
+        active = []
+    expected_total = detail.progress.get("invocations_total")
+    if not isinstance(expected_total, int):
+        expected_total = _expected_invocations(detail)
+    return {
+        "assistant_content": assistant_content,
+        "error_code": error.get("code") if isinstance(error, dict) else None,
+        "error_message": error.get("message") if isinstance(error, dict) else None,
+        "error_stage": error.get("stage") if isinstance(error, dict) else None,
+        "error_role": error.get("role") if isinstance(error, dict) else None,
+        "error_provider": error.get("provider") if isinstance(error, dict) else None,
+        "error_deployment": error.get("deployment") if isinstance(error, dict) else None,
+        "error_model": error.get("model") if isinstance(error, dict) else None,
+        "active_invocations": active,
+        "expected_invocations": expected_total,
+    }
+
+
+def _expected_invocations(detail: DashboardTaskDetail) -> int:
+    execution = detail.request.get("execution") if isinstance(detail.request, dict) else {}
+    if not isinstance(execution, dict):
+        return 1
+    if execution.get("strategy") == "mixture_of_agents":
+        selection = execution.get("selection") if isinstance(execution.get("selection"), dict) else {}
+        proposers = selection.get("proposers") if isinstance(selection.get("proposers"), list) else []
+        judges = int(execution.get("max_judges") or 1)
+        return len(proposers) + judges if proposers else int(execution.get("max_proposers") or 0) + judges
+    return 1
 
 
 async def load_dashboard_resources(

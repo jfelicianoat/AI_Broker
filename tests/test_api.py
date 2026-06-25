@@ -5,7 +5,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from app.config import BrokerConfig, LoggingConfig, PersistenceConfig, ProcessingConfig
+from app.config import BrokerConfig, LoggingConfig, PersistenceConfig, ProcessingConfig, load_config
 from app.dashboard_web import load_dashboard_resources
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.main import create_app
@@ -61,6 +61,11 @@ class TimelineProbeProvider(BootstrapModelProvider):
             cost_usd=0.0,
             latency_ms=10.0,
         )
+
+
+class FailingSynthesisProvider(TimelineProbeProvider):
+    async def synthesize(self, request, model, proposals):
+        raise ProviderError("MODEL_ERROR", "fallo controlado", retryable=True)
 
 
 class UnavailableResourceProvider(BootstrapModelProvider):
@@ -240,6 +245,7 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
     assert page.status_code == 200
     assert "Panel operativo" in page.text
     assert "Cola de tareas" in page.text
+    assert "Historial" in page.text
     assert "Coste real" in page.text
     assert fragment.status_code == 200
     assert first["task_id"] in fragment.text
@@ -276,6 +282,109 @@ def test_dashboard_actions_require_csrf_and_same_origin(tmp_path: Path) -> None:
     assert bad_origin.status_code == 403
     assert bad_origin.json()["detail"] == "ORIGIN_VALIDATION_FAILED"
     assert ok.status_code == 204
+
+
+def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard")
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert page.status_code == 200
+    assert "Configuracion" in page.text
+    assert response.status_code == 200
+    assert "Configuracion guardada" in response.text
+    assert config.processing.task_timeout_seconds == 900
+    assert config.processing.max_parallel_invocations == 3
+    assert config.processing.queue_max_size == 250
+    assert config.resources.local_vram_budget_gb == 48
+    assert config.resources.vram_safety_margin_gb == 4
+    assert config.resources.max_loaded_local_models == "auto"
+    assert saved.processing.task_timeout_seconds == 900
+    assert saved.resources.allow_execution_waves is True
+
+
+def test_dashboard_task_detail_renders_results_and_errors(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-detail.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config)) as client:
+        completed = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "detail:ok", "content": {"prompt": "Resume"}},
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+        completed_page = client.get(f"/dashboard/tasks/{completed['task_id']}")
+
+        failed = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "detail:fail",
+                "content": {"prompt": "No valido"},
+                "execution": {"strategy": "mixture_of_agents", "preset": "standard"},
+            },
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+        failed_page = client.get(f"/dashboard/tasks/{failed['task_id']}")
+
+    assert completed_page.status_code == 200
+    assert "Resultado final" in completed_page.text
+    assert "Proveedor bootstrap" in completed_page.text
+    assert failed_page.status_code == 200
+    assert "CONSENSUS_PRESET_NOT_IMPLEMENTED" in failed_page.text
+
+
+def test_dashboard_task_detail_identifies_failed_model(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-model-error.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.provider = FailingSynthesisProvider()
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "detail:model-error",
+                "content": {"prompt": "Compara alternativas"},
+                "execution": {
+                    "strategy": "mixture_of_agents",
+                    "preset": "slow",
+                    "scheduling": "parallel",
+                    "max_proposers": 2,
+                    "selection": {"mode": "auto", "proposer_count": 2},
+                },
+            },
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{created['task_id']}").json()
+        page = client.get(f"/dashboard/tasks/{created['task_id']}")
+
+    assert detail["task"]["status"] == "failed"
+    assert detail["error"]["stage"] == "synthesizing"
+    assert detail["error"]["role"] == "arbiter"
+    assert detail["error"]["model"] == "bootstrap-1"
+    assert page.status_code == 200
+    assert "Modelo fallido" in page.text
+    assert "bootstrap/bootstrap-1" in page.text
 
 
 def test_dashboard_serves_security_headers(tmp_path: Path) -> None:
@@ -437,6 +546,7 @@ def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "Tarea encolada" in response.text
+    assert f"/dashboard/tasks/{queue['pending'][0]['task_id']}" in response.text
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in response.text
     assert "<script>alert('x')</script>" not in response.text
     assert detail["request"]["content"]["metadata"]["origin"] == "prompt_tester"

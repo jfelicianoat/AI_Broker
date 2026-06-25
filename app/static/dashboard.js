@@ -5,7 +5,8 @@
     "#queue-panel": "/dashboard/fragments/queue",
     "#active-panel": "/dashboard/fragments/active",
     "#health-panel": "/dashboard/fragments/health",
-    "#resources-panel": "/dashboard/fragments/resources"
+    "#resources-panel": "/dashboard/fragments/resources",
+    "#history-panel": "/dashboard/fragments/history"
   };
 
   function toast(message) {

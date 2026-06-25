@@ -19,6 +19,7 @@
         <a class="nav-item" href="/dashboard/comparison">Comparación <small>Fase 5.4</small></a>
         <a class="nav-item" href="/dashboard#resources-panel">Modelos</a>
         <a class="nav-item" href="/dashboard#health-panel">Salud</a>
+        <a class="nav-item" href="/dashboard#config-panel">Configuracion</a>
       </nav>
       <div class="sidebar-foot">
         <span>Contrato 2.1</span>
@@ -57,7 +58,7 @@
         {% if accepted %}
           <div class="alert success">
             <strong>Tarea encolada</strong>
-            <p><a class="task-link" href="{{ accepted.status_url }}">{{ accepted.task_id }}</a></p>
+            <p><a class="task-link" href="/dashboard/tasks/{{ accepted.task_id }}">{{ accepted.task_id }}</a></p>
           </div>
         {% endif %}
 

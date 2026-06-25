@@ -1,0 +1,54 @@
+<div id="history-panel"
+     class="panel history-panel"
+     hx-get="/dashboard/fragments/history"
+     hx-trigger="every 15s"
+     hx-swap="outerHTML">
+  <div class="panel-heading" id="historial">
+    <div>
+      <h2>Historial</h2>
+      <p>{{ history.total }} tareas finalizadas recientes</p>
+    </div>
+    <button class="button secondary compact" type="button" data-refresh-target="#history-panel">Actualizar</button>
+  </div>
+  {% if history.items %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Tarea</th>
+            <th>Estado</th>
+            <th>Ejecucion</th>
+            <th>Invoc.</th>
+            <th>Actualizada</th>
+            <th class="align-right">Detalle</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for task in history.items %}
+          <tr>
+            <td>
+              <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+              <small>{{ task.origin or 'api' }}</small>
+            </td>
+            <td><span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span></td>
+            <td>
+              <span>{{ task.execution_strategy.value }}/{{ task.execution_preset.value }}</span>
+              {% if task.effective_model %}
+                <small>{{ task.effective_model.model }}</small>
+              {% endif %}
+            </td>
+            <td>{{ task.invocations }}</td>
+            <td>{{ task.updated_at|short_date }}</td>
+            <td class="align-right"><a class="button secondary compact" href="/dashboard/tasks/{{ task.task_id }}">Abrir</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <strong>Sin tareas finalizadas</strong>
+      <p>Los resultados y errores apareceran aqui.</p>
+    </div>
+  {% endif %}
+</div>

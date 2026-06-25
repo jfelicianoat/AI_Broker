@@ -1,0 +1,63 @@
+<div class="panel-heading" id="configuracion">
+  <div>
+    <h2>Configuracion</h2>
+    <p>Limites aplicados a las siguientes tareas.</p>
+  </div>
+  <span class="badge badge-neutral">broker_config.yaml</span>
+</div>
+
+{% if config_saved %}
+  <div class="alert success config-alert">
+    <strong>Configuracion guardada</strong>
+    <p>Los cambios operativos ya estan aplicados en memoria.</p>
+  </div>
+{% endif %}
+{% if config_errors %}
+  <div class="alert danger config-alert">
+    <strong>No se ha guardado la configuracion</strong>
+    <ul>
+      {% for error in config_errors %}
+        <li>{{ error }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+<form class="config-form" method="post" action="/dashboard/actions/config">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="form-body config-grid">
+    <label class="field">
+      <span>Timeout global por tarea (segundos)</span>
+      <input name="task_timeout_seconds" value="{{ config.processing.task_timeout_seconds }}" inputmode="numeric">
+    </label>
+    <label class="field">
+      <span>Max. invocaciones paralelas slow</span>
+      <input name="max_parallel_invocations" value="{{ config.processing.max_parallel_invocations }}" placeholder="auto">
+    </label>
+    <label class="field">
+      <span>Tamano maximo de cola</span>
+      <input name="queue_max_size" value="{{ config.processing.queue_max_size }}" inputmode="numeric">
+    </label>
+    <label class="field">
+      <span>Presupuesto VRAM local (GB)</span>
+      <input name="local_vram_budget_gb" value="{{ config.resources.local_vram_budget_gb }}" inputmode="decimal">
+    </label>
+    <label class="field">
+      <span>Margen seguridad VRAM (GB)</span>
+      <input name="vram_safety_margin_gb" value="{{ config.resources.vram_safety_margin_gb }}" inputmode="decimal">
+    </label>
+    <label class="field">
+      <span>Max. modelos locales cargados</span>
+      <input name="max_loaded_local_models" value="{{ config.resources.max_loaded_local_models }}" placeholder="auto">
+    </label>
+    <div class="check-row config-checks">
+      <label>
+        <input type="checkbox" name="allow_execution_waves" {% if config.resources.allow_execution_waves %}checked{% endif %}>
+        Permitir waves si no cabe todo en paralelo
+      </label>
+    </div>
+  </div>
+  <div class="panel-actions config-actions">
+    <button class="button" type="submit">Guardar configuracion</button>
+  </div>
+</form>
