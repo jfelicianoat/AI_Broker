@@ -28,6 +28,12 @@ La base del Comparador esta implementada en `GET /dashboard/comparison`. Lista t
 
 Pendiente del comparador: filtros/paginacion completos, detalles por candidato, comparacion entre varias tareas, visual QA en navegador y endurecimiento de seguridad 5.5.
 
+## Estado de fase 5.5
+
+La base de seguridad del dashboard esta implementada: las acciones mutables bajo `/dashboard/actions/*` validan token CSRF de doble envio y `Origin`/`Referer` frente a `Host`. Las paginas HTML sirven token en meta/formulario y el runtime local lo envia como `X-CSRF-Token`. La app añade cabeceras `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` y `Referrer-Policy`.
+
+Pendiente de 5.5: autenticacion administrativa real, CSP sin `unsafe-inline` cuando los carriles no dependan de estilos inline, QA visual automatizada y auditoria persistente de acciones administrativas.
+
 ## Funcionalidades
 
 ### 1. Consenso multi-LLM (*mixture of agents*)

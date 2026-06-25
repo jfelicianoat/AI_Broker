@@ -75,6 +75,14 @@ def make_client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(config))
 
 
+def dashboard_csrf(client: TestClient, path: str = "/dashboard") -> str:
+    response = client.get(path)
+    assert response.status_code == 200
+    token = client.cookies.get("ai_broker_dashboard_csrf")
+    assert token
+    return token
+
+
 def test_create_and_read_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         response = client.post("/api/v1/tasks", json={"idempotency_key": "test:create", "content": {"prompt": "Hola"}})
@@ -213,11 +221,18 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
             json={"idempotency_key": "ui:second", "content": {"prompt": "Segunda"}},
         ).json()
 
+        token = dashboard_csrf(client)
         page = client.get("/dashboard")
         fragment = client.get("/dashboard/fragments/queue")
-        moved = client.post(f"/dashboard/actions/queue/{second['task_id']}/up")
+        moved = client.post(
+            f"/dashboard/actions/queue/{second['task_id']}/up",
+            headers={"X-CSRF-Token": token},
+        )
         reordered = client.get("/api/v1/queue").json()["pending"]
-        cancelled = client.post(f"/dashboard/actions/tasks/{first['task_id']}/cancel")
+        cancelled = client.post(
+            f"/dashboard/actions/tasks/{first['task_id']}/cancel",
+            headers={"X-CSRF-Token": token},
+        )
         css = client.get("/static/dashboard.css")
         script = client.get("/static/dashboard.js")
 
@@ -237,6 +252,44 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
     assert "refreshDashboard" in script.text
 
 
+def test_dashboard_actions_require_csrf_and_same_origin(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "ui:csrf", "content": {"prompt": "Protegida"}},
+        ).json()
+        token = dashboard_csrf(client)
+
+        missing = client.post(f"/dashboard/actions/tasks/{created['task_id']}/cancel")
+        bad_origin = client.post(
+            f"/dashboard/actions/tasks/{created['task_id']}/cancel",
+            headers={"X-CSRF-Token": token, "Origin": "http://evil.example"},
+        )
+        ok = client.post(
+            f"/dashboard/actions/tasks/{created['task_id']}/cancel",
+            headers={"X-CSRF-Token": token, "Origin": "http://testserver"},
+        )
+
+    assert missing.status_code == 403
+    assert missing.json()["detail"] == "CSRF_VALIDATION_FAILED"
+    assert bad_origin.status_code == 403
+    assert bad_origin.json()["detail"] == "ORIGIN_VALIDATION_FAILED"
+    assert ok.status_code == 204
+
+
+def test_dashboard_serves_security_headers(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "same-origin"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
 def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
     config = BrokerConfig(processing=ProcessingConfig(provider_mode="bootstrap", auto_dispatch=False))
     resources = asyncio.run(
@@ -251,11 +304,13 @@ def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
 def test_prompt_tester_validates_json_without_creating_task(tmp_path: Path) -> None:
     model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
     with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
         page = client.get("/dashboard/prompt-tester")
         invalid = client.post(
             "/dashboard/actions/prompt-tester",
             data={
                 "action": "enqueue",
+                "csrf_token": token,
                 "input_mode": "json",
                 "prompt": "{\"broken\":",
                 "strategy": "single",
@@ -274,10 +329,12 @@ def test_prompt_tester_validates_json_without_creating_task(tmp_path: Path) -> N
 def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
     model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
     with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
         response = client.post(
             "/dashboard/actions/prompt-tester",
             data={
                 "action": "enqueue",
+                "csrf_token": token,
                 "input_mode": "prompt",
                 "prompt": "<script>alert('x')</script>",
                 "strategy": "single",
@@ -306,10 +363,12 @@ def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
 def test_prompt_tester_enqueues_manual_mixture(tmp_path: Path) -> None:
     model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
     with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
         response = client.post(
             "/dashboard/actions/prompt-tester",
             data={
                 "action": "enqueue",
+                "csrf_token": token,
                 "input_mode": "prompt",
                 "prompt": "Compara opciones",
                 "strategy": "mixture_of_agents",

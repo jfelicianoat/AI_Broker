@@ -136,6 +136,14 @@ Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecc
 - No se muestran headers, claves ni cadenas privadas de razonamiento.
 - La gestión de claves queda fuera de la primera entrega del dashboard. Se mantiene Windows Credential Manager mediante CLI hasta disponer de autenticación administrativa y auditoría específicas.
 
+## Estado de la fase 5.5
+
+- Implementado token CSRF de doble envio para `/dashboard/actions/*`.
+- Implementada validacion `Origin`/`Referer` contra `Host` en acciones mutables del dashboard.
+- Las paginas HTML sirven token en meta/formulario y el runtime local envia `X-CSRF-Token`.
+- Implementadas cabeceras `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` y `Referrer-Policy`.
+- Pendiente: autenticacion administrativa, auditoria persistente, CSP sin `unsafe-inline`, QA visual automatizada y revision final de XSS en todas las superficies.
+
 ## Prerrequisitos bloqueantes
 
 1. **Base completada:** admisión con capacidad uno para `single/fast` y capacidad acotada para proponentes `slow`, manteniendo un solo workflow activo.

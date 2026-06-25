@@ -16,6 +16,11 @@
     window.setTimeout(() => node.classList.remove("visible"), 2600);
   }
 
+  function csrfToken() {
+    const meta = document.querySelector("meta[name='csrf-token']");
+    return meta ? meta.getAttribute("content") : "";
+  }
+
   async function requestAndSwap(element, method, url) {
     const confirmMessage = element.getAttribute("hx-confirm");
     if (confirmMessage && !window.confirm(confirmMessage)) return;
@@ -23,7 +28,11 @@
     try {
       const response = await fetch(url, {
         method,
-        headers: {"HX-Request": "true", "Accept": "text/html"}
+        headers: {
+          "HX-Request": "true",
+          "Accept": "text/html",
+          "X-CSRF-Token": csrfToken()
+        }
       });
       if (!response.ok) throw new Error(`Error ${response.status}`);
       const targetSelector = element.getAttribute("hx-target");

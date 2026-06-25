@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -31,6 +32,7 @@ from app.schemas import (
 
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
+CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
 templates = Jinja2Templates(directory=TEMPLATES_ROOT)
 templates.env.filters["gb"] = lambda value: f"{float(value or 0) / 1024**3:.1f} GB"
 templates.env.filters["short_time"] = lambda value: value.astimezone().strftime("%H:%M:%S") if value else "—"
@@ -78,22 +80,21 @@ def create_dashboard_router(
     @router.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request):
         context = {
-            "request": request,
             "summary": queries.summary(window_hours=24),
             "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
             "active": queries.active_task_detail(),
             "health": await health_loader(),
             "resources": await resources(),
         }
-        return templates.TemplateResponse(request=request, name="dashboard.html", context=context)
+        return _template_response(request, "dashboard.html", context)
 
     @router.get("/dashboard/prompt-tester", response_class=HTMLResponse)
     async def prompt_tester(request: Request):
         catalog, catalog_error = await models()
-        return templates.TemplateResponse(
-            request=request,
-            name="prompt_tester.html",
-            context={
+        return _template_response(
+            request,
+            "prompt_tester.html",
+            {
                 "models": catalog,
                 "catalog_error": catalog_error,
                 "form": _prompt_tester_defaults(),
@@ -119,10 +120,10 @@ def create_dashboard_router(
         elif tasks.items:
             selected = queries.task_detail(tasks.items[0].task_id)
             comparison_view = _comparison_view(selected)
-        return templates.TemplateResponse(
-            request=request,
-            name="comparison.html",
-            context={
+        return _template_response(
+            request,
+            "comparison.html",
+            {
                 "tasks": tasks,
                 "selected": selected,
                 "comparison": comparison_view,
@@ -179,6 +180,7 @@ def create_dashboard_router(
     @router.post("/dashboard/actions/prompt-tester", response_class=HTMLResponse)
     async def submit_prompt_tester(request: Request):
         form = await _read_urlencoded_form(request)
+        _verify_dashboard_mutation(request, form)
         action = form.get("action", "validate")
         errors: list[str] = []
         accepted = None
@@ -208,10 +210,10 @@ def create_dashboard_router(
             errors.append("La cola esta llena; no se ha creado la prueba.")
 
         catalog, catalog_error = await models()
-        return templates.TemplateResponse(
-            request=request,
-            name="prompt_tester.html",
-            context={
+        return _template_response(
+            request,
+            "prompt_tester.html",
+            {
                 "models": catalog,
                 "catalog_error": catalog_error,
                 "form": {**_prompt_tester_defaults(), **form},
@@ -222,7 +224,8 @@ def create_dashboard_router(
         )
 
     @router.post("/dashboard/actions/tasks/{task_id}/cancel", status_code=204)
-    async def cancel_task(task_id: str) -> Response:
+    async def cancel_task(request: Request, task_id: str) -> Response:
+        _verify_dashboard_mutation(request)
         try:
             repository.request_cancel(task_id)
         except KeyError as error:
@@ -230,7 +233,8 @@ def create_dashboard_router(
         return Response(status_code=204, headers={"HX-Trigger": "dashboard-refresh"})
 
     @router.post("/dashboard/actions/queue/{task_id}/{direction}", status_code=204)
-    async def move_task(task_id: str, direction: str) -> Response:
+    async def move_task(request: Request, task_id: str, direction: str) -> Response:
+        _verify_dashboard_mutation(request)
         if direction not in {"up", "down"}:
             raise HTTPException(status_code=422, detail="INVALID_DIRECTION")
         ids = [item.task_id for item in repository.list_queue().pending]
@@ -248,6 +252,54 @@ def create_dashboard_router(
 
 class PromptTesterError(ValueError):
     pass
+
+
+def _template_response(request: Request, name: str, context: dict[str, Any]):
+    token = _csrf_token(request)
+    response = templates.TemplateResponse(
+        request=request,
+        name=name,
+        context={"request": request, "csrf_token": token, **context},
+    )
+    if request.cookies.get(CSRF_COOKIE_NAME) != token:
+        response.set_cookie(
+            CSRF_COOKIE_NAME,
+            token,
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path="/dashboard",
+            max_age=60 * 60 * 8,
+        )
+    return response
+
+
+def _csrf_token(request: Request) -> str:
+    existing = request.cookies.get(CSRF_COOKIE_NAME)
+    if existing and 24 <= len(existing) <= 160:
+        return existing
+    return secrets.token_urlsafe(32)
+
+
+def _verify_dashboard_mutation(request: Request, form: dict[str, str] | None = None) -> None:
+    _verify_same_origin(request)
+    expected = request.cookies.get(CSRF_COOKIE_NAME)
+    supplied = request.headers.get("x-csrf-token") or (form or {}).get("csrf_token")
+    if not expected or not supplied or not secrets.compare_digest(expected, supplied):
+        raise HTTPException(status_code=403, detail="CSRF_VALIDATION_FAILED")
+
+
+def _verify_same_origin(request: Request) -> None:
+    host = request.headers.get("host")
+    if not host:
+        raise HTTPException(status_code=403, detail="HOST_HEADER_REQUIRED")
+    for header_name in ("origin", "referer"):
+        header_value = request.headers.get(header_name)
+        if not header_value:
+            continue
+        parsed = urlparse(header_value)
+        if parsed.netloc and parsed.netloc.lower() != host.lower():
+            raise HTTPException(status_code=403, detail="ORIGIN_VALIDATION_FAILED")
 
 
 async def _read_urlencoded_form(request: Request) -> dict[str, str]:
