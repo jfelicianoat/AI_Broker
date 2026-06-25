@@ -4,6 +4,8 @@
 
 Primer bloque implementado: backup, verificacion y restore del estado durable del Broker.
 
+Segundo bloque implementado: logging operativo con rotacion.
+
 El backup incluye:
 
 - snapshot consistente de SQLite mediante la API `sqlite3.backup`;
@@ -33,9 +35,33 @@ python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --da
 - No rota backups antiguos.
 - No coordina parada del servicio Windows; para restaurar en produccion se debe detener el servicio antes del restore.
 
+## Logging operativo
+
+La configuracion vive en `broker_config.yaml`:
+
+```yaml
+logging:
+  level: "INFO"
+  directory: "logs"
+  filename: "ai-broker.log"
+  max_bytes: 10485760
+  backup_count: 5
+  console_enabled: true
+```
+
+El formato es JSON Lines. El access log registra solo:
+
+- metodo HTTP;
+- ruta;
+- codigo de estado;
+- duracion en milisegundos;
+- cliente.
+
+No se registran cuerpos, prompts, respuestas, headers de autorizacion ni claves. Se silencian logs de access duplicados de `uvicorn.access` y ruido informativo de `httpx`.
+
 ## Pendiente de fase 6
 
-- Rotacion y retencion de backups/logs.
+- Retencion avanzada de backups.
 - Instalacion como servicio Windows con reinicio automatico.
 - Checklist de firewall LAN.
 - Pruebas de SQLite read-only, disco lleno, Ollama caido, Credential Manager no disponible y readiness de clientes.

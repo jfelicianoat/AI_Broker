@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,7 @@ from app.coordinator import ConsensusCoordinator
 from app.db import Database
 from app.dashboard import DashboardQueryRepository
 from app.dashboard_web import create_dashboard_router, load_dashboard_resources
+from app.logging_config import configure_logging
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
@@ -39,6 +42,8 @@ from app.schemas import (
 
 def create_app(config: BrokerConfig | None = None) -> FastAPI:
     broker_config = config or load_config()
+    configure_logging(broker_config.logging)
+    logger = logging.getLogger("ai_broker.http")
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
     repository = TaskRepository(db)
     dashboard_queries = DashboardQueryRepository(db)
@@ -95,6 +100,24 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
             "base-uri 'self'; "
             "form-action 'self'; "
             "frame-ancestors 'none'",
+        )
+        return response
+
+    @app.middleware("http")
+    async def access_log(request: Request, call_next):
+        started = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        logger.info(
+            "http.request",
+            extra={
+                "event": "http.request",
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+                "client": request.client.host if request.client else None,
+            },
         )
         return response
 

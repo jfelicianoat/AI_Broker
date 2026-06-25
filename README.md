@@ -38,6 +38,8 @@ Pendiente de 5.5: autenticacion administrativa real, CSP sin `unsafe-inline` cua
 
 Primer bloque operativo implementado: backup, verificacion y restore del estado durable. El backup genera un zip atomico con snapshot SQLite consistente, artefactos de tareas y manifest con SHA-256 por archivo. La restauracion verifica el backup antes de escribir y exige `--replace` si va a sobrescribir una base o artefactos existentes.
 
+Segundo bloque operativo implementado: logging JSON Lines con rotacion por tamaño. El access log registra metodo, ruta, estado, duracion y cliente; no registra cuerpos, prompts ni respuestas. La configuracion vive en `logging` dentro de `broker_config.yaml`.
+
 ## Funcionalidades
 
 ### 1. Consenso multi-LLM (*mixture of agents*)

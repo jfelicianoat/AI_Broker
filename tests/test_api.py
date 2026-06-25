@@ -5,7 +5,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
+from app.config import BrokerConfig, LoggingConfig, PersistenceConfig, ProcessingConfig
 from app.dashboard_web import load_dashboard_resources
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.main import create_app
@@ -328,6 +328,37 @@ def test_state_backup_verify_and_restore_roundtrip(tmp_path: Path) -> None:
     assert manifest["format"] == "ai-broker-backup-v1"
     assert restored_database.exists()
     assert restored_artifacts.joinpath(task_id, "manual.txt").read_text(encoding="utf-8") == "artifact"
+
+
+def test_operational_logging_rotates_and_does_not_log_prompt_body(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-log.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        logging=LoggingConfig(
+            directory=str(log_dir),
+            filename="broker.log",
+            max_bytes=1024,
+            backup_count=2,
+            console_enabled=False,
+        ),
+    )
+    secret_prompt = "NO_DEBE_APARECER_EN_LOGS"
+    with TestClient(create_app(config)) as client:
+        for index in range(40):
+            client.get("/health/live")
+        client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "logs:prompt", "content": {"prompt": secret_prompt}},
+        )
+
+    log_files = list(log_dir.glob("broker.log*"))
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in log_files)
+    assert (log_dir / "broker.log").exists()
+    assert any(path.name != "broker.log" for path in log_files)
+    assert "http.request" in combined
+    assert "/health/live" in combined
+    assert secret_prompt not in combined
 
 
 def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
