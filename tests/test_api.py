@@ -361,6 +361,25 @@ def test_operational_logging_rotates_and_does_not_log_prompt_body(tmp_path: Path
     assert secret_prompt not in combined
 
 
+def test_windows_service_and_readiness_scripts_are_present() -> None:
+    root = Path(__file__).parents[1]
+    install = root / "scripts" / "install_windows_service.ps1"
+    uninstall = root / "scripts" / "uninstall_windows_service.ps1"
+    firewall = root / "scripts" / "configure_firewall_lan.ps1"
+    readiness = root / "scripts" / "check_readiness.py"
+    runner = root / "scripts" / "run_broker.py"
+
+    assert install.exists()
+    assert uninstall.exists()
+    assert firewall.exists()
+    assert readiness.exists()
+    assert runner.exists()
+    assert "nssm" in install.read_text(encoding="utf-8").lower()
+    assert "SupportsShouldProcess" in firewall.read_text(encoding="utf-8")
+    assert "/health/ready" in readiness.read_text(encoding="utf-8")
+    assert "workers=1" in runner.read_text(encoding="utf-8")
+
+
 def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
     config = BrokerConfig(processing=ProcessingConfig(provider_mode="bootstrap", auto_dispatch=False))
     resources = asyncio.run(

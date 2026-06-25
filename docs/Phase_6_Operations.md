@@ -6,6 +6,8 @@ Primer bloque implementado: backup, verificacion y restore del estado durable de
 
 Segundo bloque implementado: logging operativo con rotacion.
 
+Tercer bloque implementado: artefactos de despliegue como servicio Windows y checklist LAN/readiness.
+
 El backup incluye:
 
 - snapshot consistente de SQLite mediante la API `sqlite3.backup`;
@@ -62,6 +64,51 @@ No se registran cuerpos, prompts, respuestas, headers de autorizacion ni claves.
 ## Pendiente de fase 6
 
 - Retencion avanzada de backups.
-- Instalacion como servicio Windows con reinicio automatico.
-- Checklist de firewall LAN.
 - Pruebas de SQLite read-only, disco lleno, Ollama caido, Credential Manager no disponible y readiness de clientes.
+
+## Servicio Windows
+
+Los scripts no instalan nada por si solos durante desarrollo; se ejecutan manualmente cuando se quiera desplegar.
+
+Prerequisito recomendado: NSSM disponible en PATH o pasando `-Nssm C:\ruta\nssm.exe`.
+
+```powershell
+.\scripts\install_windows_service.ps1 -ServiceName "AI-Broker" -ProjectRoot "D:\Desarrollo\Proyectos TFM\AI_Broker"
+Start-Service "AI-Broker"
+python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60
+```
+
+Para retirar el servicio:
+
+```powershell
+.\scripts\uninstall_windows_service.ps1 -ServiceName "AI-Broker"
+```
+
+El runner de produccion es:
+
+```powershell
+python scripts/run_broker.py --config broker_config.yaml
+```
+
+Fija `workers=1` para preservar el invariante de un unico workflow Broker activo.
+
+## Firewall LAN
+
+Regla sugerida solo para perfil privado y `LocalSubnet`:
+
+```powershell
+.\scripts\configure_firewall_lan.ps1 -Port 8080 -WhatIf
+.\scripts\configure_firewall_lan.ps1 -Port 8080
+```
+
+No exponer el Broker a Internet. Si se necesita acceso remoto, debe ir detras de VPN o tunel privado controlado.
+
+## Checklist antes de arrancar clientes
+
+1. `python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60`
+2. Confirmar que `dependencies.sqlite.status = healthy`.
+3. Confirmar que `/health/live` responde.
+4. Confirmar que el puerto publicado coincide con `broker_config.yaml`.
+5. Confirmar que el firewall esta limitado a LAN privada.
+6. Confirmar que `logs/ai-broker.log` se escribe y rota.
+7. Confirmar que existe un backup reciente verificado.

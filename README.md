@@ -40,6 +40,8 @@ Primer bloque operativo implementado: backup, verificacion y restore del estado 
 
 Segundo bloque operativo implementado: logging JSON Lines con rotacion por tamaño. El access log registra metodo, ruta, estado, duracion y cliente; no registra cuerpos, prompts ni respuestas. La configuracion vive en `logging` dentro de `broker_config.yaml`.
 
+Tercer bloque operativo implementado: runner de produccion, scripts de servicio Windows mediante NSSM, comprobador de readiness y script de firewall LAN privado. Los scripts no se ejecutan automaticamente; quedan preparados para despliegue manual.
+
 ## Funcionalidades
 
 ### 1. Consenso multi-LLM (*mixture of agents*)
@@ -296,6 +298,16 @@ Backup operativo:
 python scripts/backup_state.py backup --database state/broker.db --artifacts state/tasks --output backups/ai-broker-state.zip
 python scripts/backup_state.py verify --backup backups/ai-broker-state.zip
 python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --database state/broker.db --artifacts state/tasks --replace
+```
+
+Servicio Windows y readiness:
+
+```powershell
+python scripts/run_broker.py --config broker_config.yaml
+.\scripts\install_windows_service.ps1 -ServiceName "AI-Broker" -ProjectRoot "D:\Desarrollo\Proyectos TFM\AI_Broker"
+Start-Service "AI-Broker"
+python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60
+.\scripts\configure_firewall_lan.ps1 -Port 8080 -WhatIf
 ```
 
 ## Estructura del proyecto
