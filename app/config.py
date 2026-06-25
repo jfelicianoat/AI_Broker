@@ -55,6 +55,15 @@ class HealthConfig(BaseModel):
     disk_free_alert_gb: int = 10
 
 
+class LoggingConfig(BaseModel):
+    level: str = "INFO"
+    directory: str = "logs"
+    filename: str = "ai-broker.log"
+    max_bytes: int = Field(default=10_485_760, ge=1024)
+    backup_count: int = Field(default=5, ge=1, le=100)
+    console_enabled: bool = True
+
+
 class OllamaConfig(BaseModel):
     enabled: bool = True
     base_url: str = "http://127.0.0.1:11434"
@@ -86,6 +95,7 @@ class BrokerConfig(BaseModel):
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
 
 
