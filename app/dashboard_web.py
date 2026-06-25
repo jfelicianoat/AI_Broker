@@ -373,6 +373,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
     fallback_allowed = _checked(form, "fallback_allowed")
     if strategy == "single":
         target = _parse_model_reference(form.get("single_model", ""))
+        _ensure_cloud_allowed([target], cloud_allowed)
         execution = {
             "strategy": "single",
             "preset": "fast",
@@ -394,6 +395,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
         proposers = _parse_proposers(form)
         arbiter = _parse_model_reference(form.get("arbiter_model", ""))
         selected_models = proposers + [arbiter]
+        _ensure_cloud_allowed(selected_models, cloud_allowed)
         execution = {
             "strategy": "mixture_of_agents",
             "preset": preset,
@@ -469,6 +471,20 @@ def _parse_model_reference(raw: str) -> ModelReference:
         )
     except (KeyError, TypeError, json.JSONDecodeError, ValidationError) as error:
         raise PromptTesterError("Referencia de modelo invalida.") from error
+
+
+def _ensure_cloud_allowed(models: list[ModelReference], cloud_allowed: bool) -> None:
+    if cloud_allowed:
+        return
+    blocked = [
+        f"{item.provider}/{item.deployment}/{item.model}"
+        for item in models
+        if item.deployment.lower() == "cloud"
+    ]
+    if blocked:
+        raise PromptTesterError(
+            "Marca Permitir cloud o selecciona solo modelos locales: " + ", ".join(blocked)
+        )
 
 
 def _checked(form: dict[str, str], key: str) -> bool:

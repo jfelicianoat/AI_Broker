@@ -485,6 +485,35 @@ def test_prompt_tester_enqueues_manual_mixture(tmp_path: Path) -> None:
     assert request["execution"]["selection"]["arbiter"]["model"] == "bootstrap-single"
 
 
+def test_prompt_tester_rejects_cloud_models_when_cloud_is_not_allowed(tmp_path: Path) -> None:
+    local_model = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    cloud_model = json.dumps({"provider": "ollama", "deployment": "cloud", "model": "remote:cloud"})
+    with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
+        response = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "action": "enqueue",
+                "csrf_token": token,
+                "input_mode": "prompt",
+                "prompt": "Compara opciones",
+                "strategy": "mixture_of_agents",
+                "preset": "slow",
+                "scheduling": "parallel",
+                "proposer_model_1": local_model,
+                "proposer_role_1": "architect",
+                "proposer_model_2": cloud_model,
+                "proposer_role_2": "reviewer",
+                "arbiter_model": local_model,
+            },
+        )
+        queue = client.get("/api/v1/queue").json()
+
+    assert response.status_code == 200
+    assert "Marca Permitir cloud" in response.text
+    assert queue["pending"] == []
+
+
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={"idempotency_key": "test:single", "content": {"prompt": "Resume esto"}}).json()
