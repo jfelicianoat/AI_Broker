@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Broker — Probador de Prompts</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegación principal">
+      <a class="brand" href="/dashboard">AI Broker</a>
+      <nav class="nav-list">
+        <a class="nav-item" href="/dashboard">Resumen</a>
+        <a class="nav-item" href="/dashboard#cola">Cola</a>
+        <a class="nav-item active" href="/dashboard/prompt-tester">Probador <small>Fase 5.3</small></a>
+        <a class="nav-item" href="/dashboard/comparison">Comparación <small>Fase 5.4</small></a>
+        <a class="nav-item" href="/dashboard#recursos">Modelos</a>
+        <a class="nav-item" href="/dashboard#salud">Salud</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span>Contrato 2.1</span>
+        <span>Encola vía API normal</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="service-state">
+          <span class="status-dot status-healthy"></span>
+          <div>
+            <strong>Probador de Prompts</strong>
+            <small>No ejecuta providers directamente; crea tareas durables.</small>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <a class="button secondary" href="/dashboard">Volver al panel</a>
+        </div>
+      </header>
+
+      <main class="content">
+        {% if catalog_error %}
+          <div class="alert warning">{{ catalog_error }}</div>
+        {% endif %}
+        {% if errors %}
+          <div class="alert danger">
+            <strong>No se ha creado ninguna tarea</strong>
+            <ul>
+              {% for error in errors %}
+                <li>{{ error }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+        {% if accepted %}
+          <div class="alert success">
+            <strong>Tarea encolada</strong>
+            <p><a class="task-link" href="{{ accepted.status_url }}">{{ accepted.task_id }}</a></p>
+          </div>
+        {% endif %}
+
+        <form class="tester-grid" method="post" action="/dashboard/actions/prompt-tester">
+          <section class="panel tester-input">
+            <div class="panel-heading">
+              <div>
+                <h2>Entrada</h2>
+                <p>Prompt libre o JSON opaco para el LLM.</p>
+              </div>
+            </div>
+            <div class="form-body">
+              <label class="field">
+                <span>Tipo de entrada</span>
+                <select name="input_mode">
+                  <option value="prompt" {% if form.input_mode == 'prompt' %}selected{% endif %}>Prompt libre</option>
+                  <option value="json" {% if form.input_mode == 'json' %}selected{% endif %}>JSON</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Contenido</span>
+                <textarea name="prompt" rows="16" required>{{ form.prompt }}</textarea>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel tester-config">
+            <div class="panel-heading">
+              <div>
+                <h2>Ejecución</h2>
+                <p>Modelo exacto o mixture manual.</p>
+              </div>
+            </div>
+            <div class="form-body">
+              <label class="field">
+                <span>Estrategia</span>
+                <select name="strategy">
+                  <option value="single" {% if form.strategy == 'single' %}selected{% endif %}>Modelo único</option>
+                  <option value="mixture_of_agents" {% if form.strategy == 'mixture_of_agents' %}selected{% endif %}>Mixture of LLMs</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Modelo único exacto</span>
+                <select name="single_model">
+                  <option value="">Seleccionar…</option>
+                  {% for model in models %}
+                    {% set value = model|model_value %}
+                    <option value="{{ value }}" {% if form.single_model == value %}selected{% endif %}>{{ model.provider }}/{{ model.deployment }}/{{ model.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <div class="field-pair">
+                <label class="field">
+                  <span>Preset mixture</span>
+                  <select name="preset">
+                    <option value="fast" {% if form.preset == 'fast' %}selected{% endif %}>fast — serial</option>
+                    <option value="slow" {% if form.preset == 'slow' %}selected{% endif %}>slow — proponentes paralelos si hay recursos</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Scheduling slow</span>
+                  <select name="scheduling">
+                    <option value="adaptive" {% if form.scheduling == 'adaptive' %}selected{% endif %}>adaptive</option>
+                    <option value="parallel" {% if form.scheduling == 'parallel' %}selected{% endif %}>parallel</option>
+                    <option value="waves" {% if form.scheduling == 'waves' %}selected{% endif %}>waves</option>
+                    <option value="sequential" {% if form.scheduling == 'sequential' %}selected{% endif %}>sequential</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="proposer-list">
+                <span class="form-label">Proponentes manuales</span>
+                {% for index in range(1, 6) %}
+                  {% set model_key = 'proposer_model_' ~ index %}
+                  {% set role_key = 'proposer_role_' ~ index %}
+                  <div class="proposer-row">
+                    <input name="{{ role_key }}" value="{{ form[role_key] }}" aria-label="Rol proponente {{ index }}">
+                    <select name="{{ model_key }}" aria-label="Modelo proponente {{ index }}">
+                      <option value="">Sin usar</option>
+                      {% for model in models %}
+                        {% set value = model|model_value %}
+                        <option value="{{ value }}" {% if form[model_key] == value %}selected{% endif %}>{{ model.provider }}/{{ model.deployment }}/{{ model.name }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+                {% endfor %}
+              </div>
+              <label class="field">
+                <span>Árbitro exacto</span>
+                <select name="arbiter_model">
+                  <option value="">Seleccionar…</option>
+                  {% for model in models %}
+                    {% set value = model|model_value %}
+                    <option value="{{ value }}" {% if form.arbiter_model == value %}selected{% endif %}>{{ model.provider }}/{{ model.deployment }}/{{ model.name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel tester-limits">
+            <div class="panel-heading">
+              <div>
+                <h2>Límites y salida</h2>
+                <p>Se validan antes de encolar.</p>
+              </div>
+            </div>
+            <div class="form-body">
+              <div class="field-pair">
+                <label class="field"><span>Temperatura</span><input name="temperature" value="{{ form.temperature }}" inputmode="decimal"></label>
+                <label class="field"><span>Máx. tokens</span><input name="max_output_tokens" value="{{ form.max_output_tokens }}" inputmode="numeric"></label>
+              </div>
+              <div class="field-pair">
+                <label class="field"><span>Timeout segundos</span><input name="timeout_seconds" value="{{ form.timeout_seconds }}" inputmode="numeric"></label>
+                <label class="field"><span>Coste máx. USD</span><input name="max_cost_usd" value="{{ form.max_cost_usd }}" inputmode="decimal" placeholder="opcional"></label>
+              </div>
+              <div class="field-pair">
+                <label class="field">
+                  <span>Formato salida</span>
+                  <select name="output_format">
+                    <option value="markdown" {% if form.output_format == 'markdown' %}selected{% endif %}>Markdown</option>
+                    <option value="text" {% if form.output_format == 'text' %}selected{% endif %}>Texto</option>
+                    <option value="json" {% if form.output_format == 'json' %}selected{% endif %}>JSON</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Clasificación</span>
+                  <select name="data_classification">
+                    <option value="public" {% if form.data_classification == 'public' %}selected{% endif %}>public</option>
+                    <option value="internal" {% if form.data_classification == 'internal' %}selected{% endif %}>internal</option>
+                    <option value="confidential" {% if form.data_classification == 'confidential' %}selected{% endif %}>confidential</option>
+                    <option value="local_only" {% if form.data_classification == 'local_only' %}selected{% endif %}>local_only</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>JSON Schema de salida</span>
+                <textarea name="json_schema" rows="5" placeholder='{"type":"object"}'>{{ form.json_schema }}</textarea>
+              </label>
+              <div class="check-row">
+                <label><input type="checkbox" name="cloud_allowed" {% if form.cloud_allowed %}checked{% endif %}> Permitir cloud</label>
+                <label><input type="checkbox" name="fallback_allowed" {% if form.fallback_allowed %}checked{% endif %}> Permitir fallback</label>
+              </div>
+              <label class="field compact-field">
+                <span>Prioridad</span>
+                <input name="priority" value="{{ form.priority }}" inputmode="numeric">
+              </label>
+            </div>
+          </section>
+
+          <section class="panel tester-preview">
+            <div class="panel-heading">
+              <div>
+                <h2>Request validado</h2>
+                <p>Vista técnica antes de entrar en cola.</p>
+              </div>
+            </div>
+            {% if request_preview %}
+              <pre class="code-preview">{{ request_preview | tojson(indent=2) }}</pre>
+            {% else %}
+              <div class="empty-state">
+                <strong>Sin validación todavía</strong>
+                <p>Usa Validar para revisar el contrato o Encolar para crear la tarea.</p>
+              </div>
+            {% endif %}
+            <div class="panel-actions">
+              <button class="button secondary" name="action" value="validate" type="submit">Validar</button>
+              <button class="button" name="action" value="enqueue" type="submit">Encolar</button>
+            </div>
+          </section>
+        </form>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

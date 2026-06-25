@@ -2,7 +2,18 @@
 
 ## Estado y fase
 
-Funcionalidad planificada para la **fase 5 — Dashboard operativo**. Este documento define el alcance; todavía no existe implementación de UI ni endpoints específicos del probador. La lógica común de las tres pantallas y sus prerrequisitos están en [`Phase_5_Dashboard.md`](Phase_5_Dashboard.md).
+Funcionalidad de la **fase 5.3 del dashboard operativo**. La base del probador ya existe en `/dashboard/prompt-tester` y `/dashboard/actions/prompt-tester`; este documento mantiene el alcance completo y los pendientes. La lógica común de las tres pantallas y sus prerrequisitos están en [`Phase_5_Dashboard.md`](Phase_5_Dashboard.md).
+
+## Estado actual de implementacion
+
+La base de la fase 5.3 ya esta implementada en:
+
+- `GET /dashboard/prompt-tester`: formulario local del probador.
+- `POST /dashboard/actions/prompt-tester`: validacion y encolado.
+
+La ruta construye un `TaskCreateRequest` normal y usa la cola durable del Broker. No llama directamente a Ollama, DeepSeek ni a ningun provider. La base implementada cubre entrada `Prompt`/`JSON`, modelo `single` exacto, `mixture_of_agents/fast|slow` manual, roles de proponentes, arbitro exacto, limites de generacion, privacidad, cloud, fallback, timeout, coste, prioridad y preview del request validado.
+
+Quedan pendientes para completar la pantalla: historial HTML filtrado por `origin = prompt_tester`, cancelacion y repeticion desde la propia pantalla, visualizacion de resultado raw/uso/fallback/metadata de consenso, filtros avanzados del catalogo, CSRF/Origin y CSP estricta.
 
 ## Objetivo
 
@@ -105,3 +116,13 @@ La UI presenta códigos tipados como `CONTRACT_VALIDATION_FAILED`, `MODEL_UNAVAI
 - `execution.timeout_seconds` limita la tarea completa y cancela las operaciones provider pendientes con `TASK_TIMEOUT`.
 - El progreso separa `budget_limit_usd`, `cost_estimated_usd` y `cost_actual_usd`; un límite no se presenta como coste reservado.
 - `fast` conserva concurrencia uno y `slow` puede lanzar proponentes concurrentes dentro del único workflow activo.
+
+## Base UI completada
+
+- Formulario server-rendered sin CDN.
+- Validacion sintactica de JSON sin interpretar su semantica.
+- Encolado de `single` con `target_model.provider/deployment/model`.
+- Encolado de `mixture_of_agents/fast|slow` con `selection.mode = manual`.
+- `fallback_allowed` y `cloud_allowed` solo se activan cuando el usuario los marca.
+- El contenido del usuario y el preview se escapan como texto.
+- Pruebas de integracion para render, JSON invalido sin tarea, single exacto, mixture manual y XSS basico.

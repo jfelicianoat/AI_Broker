@@ -83,6 +83,7 @@ def create_app(config: BrokerConfig | None = None) -> FastAPI:
         create_dashboard_router(
             queries=dashboard_queries,
             repository=repository,
+            coordinator=coordinator,
             provider=provider,
             scheduler=scheduler,
             config=broker_config,

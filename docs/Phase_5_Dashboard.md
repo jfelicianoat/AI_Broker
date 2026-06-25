@@ -2,7 +2,7 @@
 
 ## Estado
 
-Contrato lógico y estado de implementación del dashboard. La pantalla de Operación está implementada en la fase 5.2; Probador y Comparación permanecen planificados para las fases 5.3 y 5.4.
+Contrato lógico y estado de implementación del dashboard. La pantalla de Operación está implementada en la fase 5.2; el Probador tiene base funcional en la fase 5.3; Comparación permanece planificada para la fase 5.4.
 
 ## Frontera de responsabilidad
 
@@ -104,6 +104,28 @@ Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecc
 - Si Ollama no permite obtener `/api/ps`, el panel sigue cargando y marca recursos como `unavailable`/`N/D`.
 - Los recursos CSS y JavaScript son locales. El runtime actual implementa solo el subconjunto de atributos hipermedia utilizado por la pantalla, sin dependencia de CDN.
 - Prueba de integración disponible para renderizado, fragmento de cola, reordenación, cancelación y recursos estáticos.
+
+## Estado de la fase 5.3
+
+- Implementada base de `/dashboard/prompt-tester`.
+- Implementado `POST /dashboard/actions/prompt-tester` para `Validar` y `Encolar`.
+- La accion construye `TaskCreateRequest` y usa `TaskRepository.create_task`; no llama a providers directamente.
+- Implementados modos `single` exacto y `mixture_of_agents/fast|slow` manual con proponentes, roles y arbitro.
+- JSON de entrada invalido no crea tarea; JSON valido se conserva como `content.prompt`.
+- `fallback_allowed` y `cloud_allowed` no se activan implicitamente.
+- El request validado se muestra escapado y las pruebas cubren XSS basico.
+- Pendiente: historial HTML del probador, cancelacion/repeticion desde la pantalla, resultado raw/uso/fallback/metadata de consenso y seguridad 5.5.
+
+## Estado de la fase 5.4
+
+- Implementada base de `/dashboard/comparison`.
+- Se listan tareas `mixture_of_agents` desde SQLite y se abre una comparacion por `task_id`.
+- `model_invocations` persiste `started_at` y `completed_at`; filas antiguas sin estos campos degradan a aviso de medicion insuficiente.
+- La pantalla separa proponentes y arbitro, muestra modelo, rol, latencia, tokens y coste real.
+- Los carriles se calculan desde timestamps persistidos. Solo se muestra solapamiento como `observado` cuando las ventanas temporales se cruzan.
+- En `fast` se avisa que la ejecucion es serial. En `slow`, si no hay solapamiento medido, se muestra como no observado.
+- No se muestran confianza, atribucion, cobertura ni paralelismo inventado.
+- Pendiente: filtros/paginacion completos, detalle por candidato, comparacion entre varias tareas, QA visual automatizada y seguridad 5.5.
 
 ## Seguridad
 

@@ -16,6 +16,18 @@ Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2
 | LLMs | Ollama (local), DeepSeek (cloud), extensible |
 | Panel | Jinja2 + fragmentos hipermedia y recursos locales |
 
+## Estado de fase 5.3
+
+La base del Probador de Prompts esta implementada en `GET /dashboard/prompt-tester` y `POST /dashboard/actions/prompt-tester`. Permite validar y encolar pruebas `single` con modelo exacto o `mixture_of_agents/fast|slow` con seleccion manual de proponentes, roles y arbitro. Usa `TaskCreateRequest`, `TaskRepository` y la cola durable normal; no llama directamente a providers.
+
+Pendiente del probador: historial HTML filtrado por `origin = prompt_tester`, cancelacion/repeticion desde la propia pantalla, resultado raw, metricas, fallback y metadata de consenso.
+
+## Estado de fase 5.4
+
+La base del Comparador esta implementada en `GET /dashboard/comparison`. Lista tareas `mixture_of_agents`, muestra proponentes y arbitro persistidos, uso/coste/latencia, plan solicitado/efectivo y carriles temporales basados en `model_invocations.started_at/completed_at`. Solo marca solapamiento cuando los timestamps persistidos lo demuestran; no muestra confianza, atribucion ni paralelismo simulado.
+
+Pendiente del comparador: filtros/paginacion completos, detalles por candidato, comparacion entre varias tareas, visual QA en navegador y endurecimiento de seguridad 5.5.
+
 ## Funcionalidades
 
 ### 1. Consenso multi-LLM (*mixture of agents*)
@@ -88,7 +100,7 @@ Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2
 - Resultado con contenido/vector, uso, modelo y fallback
 - Invocación y resultado terminal `single` confirmados en una transacción SQLite
 
-### 9. Probador de Prompts — planificado para fase 5
+### 9. Probador de Prompts — fase 5.3 base implementada
 
 - Entrada como prompt libre o JSON con validación sintáctica
 - Ejecución contra un modelo exacto o un `mixture_of_agents/fast|slow` determinado manualmente cuando cada preset esté operativo
@@ -129,7 +141,10 @@ Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase
 | `/api/v1/dashboard/tasks/{id}` | GET | Request, resultado, invocaciones y eventos de una tarea |
 | `/api/v1/dashboard/resources` | GET | Snapshot de VRAM, reservas, leases y modelos cargados |
 | `/dashboard` | GET | Panel operativo local |
+| `/dashboard/prompt-tester` | GET | Probador de Prompts |
+| `/dashboard/comparison` | GET | Comparador de tareas `mixture_of_agents` |
 | `/dashboard/fragments/*` | GET | Fragmentos de resumen, cola, tarea activa, salud y recursos |
+| `/dashboard/actions/prompt-tester` | POST | Validar o encolar una prueba de prompt |
 | `/dashboard/actions/queue/{id}/{direction}` | POST | Subir o bajar una tarea pendiente |
 | `/dashboard/actions/tasks/{id}/cancel` | POST | Solicitar cancelación desde el panel |
 | `/health` | GET | Estado detallado de dependencias |

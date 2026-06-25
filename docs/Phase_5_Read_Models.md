@@ -50,6 +50,6 @@ El provider `bootstrap` devuelve un snapshot vacío y solo se usa en pruebas. Si
 ## Límites pendientes
 
 - El historial proactivo de salud todavía no se persiste; `/health` proporciona el estado actual.
-- Las invocaciones se almacenan al terminar. Para dibujar solapamiento real de `slow` se necesitan `started_at/completed_at` persistidos antes y después de cada llamada.
+- Las invocaciones nuevas persisten `started_at/completed_at` calculados desde la latencia medida por el provider al finalizar la llamada. Filas antiguas sin esos campos no se usan para demostrar solapamiento real.
 - El panel HTML de la fase 5.2 consume estas proyecciones mediante `app/dashboard_web.py`; las plantillas no ejecutan SQL.
 - Los fragmentos de resumen, cola, tarea activa, salud y recursos se actualizan independientemente sin bloquearse por el workflow LLM activo.

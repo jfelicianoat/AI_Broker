@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Broker — Comparación de modelos</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegación principal">
+      <a class="brand" href="/dashboard">AI Broker</a>
+      <nav class="nav-list">
+        <a class="nav-item" href="/dashboard">Resumen</a>
+        <a class="nav-item" href="/dashboard#cola">Cola</a>
+        <a class="nav-item" href="/dashboard/prompt-tester">Probador <small>Fase 5.3</small></a>
+        <a class="nav-item active" href="/dashboard/comparison">Comparación <small>Fase 5.4</small></a>
+        <a class="nav-item" href="/dashboard#recursos">Modelos</a>
+        <a class="nav-item" href="/dashboard#salud">Salud</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span>Contrato 2.1</span>
+        <span>Sin métricas simuladas</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="service-state">
+          <span class="status-dot status-healthy"></span>
+          <div>
+            <strong>Comparación de modelos</strong>
+            <small>Representa tareas mixture persistidas; no lanza workflows nuevos.</small>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <a class="button secondary" href="/dashboard">Volver al panel</a>
+        </div>
+      </header>
+
+      <main class="content">
+        <section class="comparison-grid">
+          <aside class="panel comparison-list">
+            <div class="panel-heading">
+              <div>
+                <h2>Tareas mixture</h2>
+                <p>Últimas {{ tasks.total }} tareas comparables.</p>
+              </div>
+            </div>
+            {% if tasks.items %}
+              <div class="task-stack">
+                {% for task in tasks.items %}
+                  <a class="task-card {% if selected and selected.task.task_id == task.task_id %}selected{% endif %}" href="/dashboard/comparison?task_id={{ task.task_id }}">
+                    <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+                    <strong>{{ task.task_id }}</strong>
+                    <small>{{ task.execution_preset.value }} · {{ task.invocations }} invocaciones · {{ task.updated_at|short_date }}</small>
+                  </a>
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="empty-state">
+                <strong>Sin tareas mixture</strong>
+                <p>Encola una prueba `mixture_of_agents` desde el probador para compararla aquí.</p>
+              </div>
+            {% endif %}
+          </aside>
+
+          <section class="panel comparison-detail">
+            {% if selected and comparison %}
+              <div class="panel-heading">
+                <div>
+                  <h2>{{ selected.task.task_id }}</h2>
+                  <p>{{ selected.task.execution_preset.value }} · {{ selected.task.status|status_label }} · {{ selected.invocations|length }} invocaciones registradas</p>
+                </div>
+                <span class="badge badge-neutral">{{ selected.task.execution_strategy.value }}</span>
+              </div>
+
+              {% if comparison.warnings %}
+                <div class="warning-list">
+                  {% for warning in comparison.warnings %}
+                    <p>{{ warning }}</p>
+                  {% endfor %}
+                </div>
+              {% endif %}
+
+              <div class="comparison-summary">
+                <div><span>Plan solicitado</span><strong>{{ comparison.scheduling.requested|default('N/D') }}</strong></div>
+                <div><span>Plan efectivo</span><strong>{{ comparison.scheduling.mode_used|default('N/D') }}</strong></div>
+                <div><span>Waves</span><strong>{{ comparison.scheduling.waves|default('N/D') }}</strong></div>
+                <div><span>Solapamiento</span><strong>{{ 'observado' if comparison.overlap_detected else 'no observado' }}</strong></div>
+              </div>
+
+              <div class="timeline-block">
+                <h3>Proponentes</h3>
+                {% if comparison.proposers %}
+                  {% for lane in comparison.proposers %}
+                    {% set inv = lane.invocation %}
+                    <div class="timeline-row">
+                      <div class="lane-label">
+                        <strong>{{ inv.role }}</strong>
+                        <small>{{ inv.provider }}/{{ inv.deployment }}/{{ inv.model }}</small>
+                      </div>
+                      <div class="lane-track">
+                        <span class="lane-bar {% if not lane.timed %}untimed{% endif %}" style="left: {{ lane.left }}%; width: {{ lane.width }}%;"></span>
+                      </div>
+                      <div class="lane-metrics">
+                        <span>{{ inv.latency_ms|ms }}</span>
+                        <small>{{ inv.tokens_input }} in · {{ inv.tokens_output }} out · ${{ '%.6f'|format(inv.cost_usd) }}</small>
+                      </div>
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <div class="empty-inline">No hay proponentes persistidos todavía.</div>
+                {% endif %}
+              </div>
+
+              <div class="timeline-block">
+                <h3>Árbitro</h3>
+                {% if comparison.arbiter %}
+                  {% for lane in comparison.arbiter %}
+                    {% set inv = lane.invocation %}
+                    <div class="timeline-row arbiter-row">
+                      <div class="lane-label">
+                        <strong>{{ inv.role }}</strong>
+                        <small>{{ inv.provider }}/{{ inv.deployment }}/{{ inv.model }}</small>
+                      </div>
+                      <div class="lane-track">
+                        <span class="lane-bar arbiter {% if not lane.timed %}untimed{% endif %}" style="left: {{ lane.left }}%; width: {{ lane.width }}%;"></span>
+                      </div>
+                      <div class="lane-metrics">
+                        <span>{{ inv.latency_ms|ms }}</span>
+                        <small>{{ inv.tokens_input }} in · {{ inv.tokens_output }} out · ${{ '%.6f'|format(inv.cost_usd) }}</small>
+                      </div>
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <div class="empty-inline">No hay síntesis de árbitro persistida todavía.</div>
+                {% endif %}
+              </div>
+
+              <details class="raw-result">
+                <summary>Respuesta final raw</summary>
+                <pre>{{ selected.result.result_markdown if selected.result and selected.result.result_markdown else 'N/D' }}</pre>
+              </details>
+            {% else %}
+              <div class="empty-state tall">
+                <strong>No hay comparación seleccionada</strong>
+                <p>Selecciona una tarea mixture terminada o en curso.</p>
+              </div>
+            {% endif %}
+          </section>
+        </section>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

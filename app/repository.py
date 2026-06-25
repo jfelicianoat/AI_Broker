@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any
@@ -181,14 +181,15 @@ class TaskRepository:
     ) -> str:
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
+        started_at, completed_at = _invocation_window(now, output.latency_ms)
         self.db.execute(
             """
             INSERT INTO model_invocations (
                 id, task_id, run_id, role, provider, deployment, model,
                 output_json, tokens_input, tokens_output, cost_usd, latency_ms,
-                status, created_at, updated_at
+                started_at, completed_at, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 invocation_id,
@@ -203,6 +204,8 @@ class TaskRepository:
                 output.tokens_output,
                 output.cost_usd,
                 output.latency_ms,
+                started_at,
+                completed_at,
                 status,
                 now,
                 now,
@@ -227,18 +230,20 @@ class TaskRepository:
         """Persiste invocación y resultado terminal en la misma transacción."""
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
+        started_at, completed_at = _invocation_window(now, output.latency_ms)
         with self.db.transaction() as connection:
             row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None or row["status"] == TaskStatus.cancelled.value:
                 raise ProviderError("TASK_CANCELLED", "La tarea fue cancelada antes de persistir el resultado")
             connection.execute(
                 "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
-                "output_json, tokens_input, tokens_output, cost_usd, latency_ms, status, created_at, updated_at) "
-                "VALUES (?, ?, NULL, 'single', ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+                "output_json, tokens_input, tokens_output, cost_usd, latency_ms, started_at, completed_at, "
+                "status, created_at, updated_at) "
+                "VALUES (?, ?, NULL, 'single', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
                 (
                     invocation_id, task_id, model.provider, model.deployment, model.model,
                     dumps_json(output.technical_output()), output.tokens_input, output.tokens_output,
-                    output.cost_usd, output.latency_ms, now, now,
+                    output.cost_usd, output.latency_ms, started_at, completed_at, now, now,
                 ),
             )
             connection.execute(
@@ -430,3 +435,11 @@ class TaskRepository:
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
         )
+
+
+def _invocation_window(completed_iso: str, latency_ms: float | None) -> tuple[str | None, str]:
+    completed = _parse_dt(completed_iso)
+    if latency_ms is None:
+        return None, completed_iso
+    started = completed - timedelta(milliseconds=max(0.0, float(latency_ms)))
+    return started.isoformat(), completed_iso

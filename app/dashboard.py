@@ -208,6 +208,8 @@ class DashboardQueryRepository:
                     tokens_output=int(item["tokens_output"] or 0),
                     cost_usd=float(item["cost_usd"] or 0),
                     latency_ms=float(item["latency_ms"]) if item["latency_ms"] is not None else None,
+                    started_at=_parse_dt(item["started_at"]) if item["started_at"] else None,
+                    completed_at=_parse_dt(item["completed_at"]) if item["completed_at"] else None,
                     created_at=_parse_dt(item["created_at"]),
                     updated_at=_parse_dt(item["updated_at"]),
                 )
@@ -236,6 +238,31 @@ class DashboardQueryRepository:
             ACTIVE_STATUSES,
         )
         return self.task_detail(row["id"]) if row is not None else None
+
+    def list_comparison_tasks(self, *, page_size: int = 25) -> DashboardTaskPage:
+        rows = self.db.query_all(
+            """
+            SELECT t.*,
+                   COUNT(mi.id) AS invocation_count,
+                   COALESCE(SUM(mi.tokens_input), 0) AS invocation_tokens_input,
+                   COALESCE(SUM(mi.tokens_output), 0) AS invocation_tokens_output,
+                   COALESCE(SUM(mi.cost_usd), 0) AS invocation_cost_usd
+            FROM tasks t
+            LEFT JOIN model_invocations mi ON mi.task_id = t.id
+            WHERE json_extract(t.request_json, '$.execution.strategy') = 'mixture_of_agents'
+            GROUP BY t.id
+            ORDER BY t.updated_at DESC
+            LIMIT ?
+            """,
+            (page_size,),
+        )
+        return DashboardTaskPage(
+            items=[self._task_item(row) for row in rows],
+            page=1,
+            page_size=page_size,
+            total=len(rows),
+            total_pages=1 if rows else 0,
+        )
 
     def usage(self, month: str) -> UsageResponse:
         start = datetime.strptime(month, "%Y-%m").replace(tzinfo=timezone.utc)

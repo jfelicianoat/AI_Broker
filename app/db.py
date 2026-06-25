@@ -90,6 +90,8 @@ class Database:
                 tokens_output INTEGER DEFAULT 0,
                 cost_usd REAL DEFAULT 0,
                 latency_ms REAL,
+                started_at TEXT,
+                completed_at TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -146,6 +148,13 @@ class Database:
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN idempotency_key TEXT")
             if "request_hash" not in task_columns:
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN request_hash TEXT")
+            invocation_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(model_invocations)").fetchall()
+            }
+            if "started_at" not in invocation_columns:
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN started_at TEXT")
+            if "completed_at" not in invocation_columns:
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN completed_at TEXT")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"

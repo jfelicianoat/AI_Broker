@@ -366,6 +366,8 @@ class DashboardInvocationItem(StrictBaseModel):
     tokens_output: int
     cost_usd: float
     latency_ms: float | None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

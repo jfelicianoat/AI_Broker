@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 import time
 
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
 from app.dashboard_web import load_dashboard_resources
 from app.main import create_app
-from app.providers import BootstrapModelProvider, ProviderError
+from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.resource_scheduler import ResourceScheduler
 
 
@@ -37,6 +38,28 @@ class TimeoutProbeProvider(BootstrapModelProvider):
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
+
+class TimelineProbeProvider(BootstrapModelProvider):
+    async def propose(self, request, model, ordinal):
+        await asyncio.sleep(0.05)
+        return ModelOutput(
+            content=f"Propuesta {ordinal}",
+            tokens_input=10,
+            tokens_output=20,
+            cost_usd=0.0,
+            latency_ms=50.0,
+        )
+
+    async def synthesize(self, request, model, proposals):
+        await asyncio.sleep(0.01)
+        return ModelOutput(
+            content="Sintesis final",
+            tokens_input=15,
+            tokens_output=25,
+            cost_usd=0.0,
+            latency_ms=10.0,
+        )
 
 
 class UnavailableResourceProvider(BootstrapModelProvider):
@@ -225,6 +248,94 @@ def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
     assert resources.detail == "PROVIDER_UNAVAILABLE: snapshot de recursos no disponible"
 
 
+def test_prompt_tester_validates_json_without_creating_task(tmp_path: Path) -> None:
+    model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    with make_client(tmp_path) as client:
+        page = client.get("/dashboard/prompt-tester")
+        invalid = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "action": "enqueue",
+                "input_mode": "json",
+                "prompt": "{\"broken\":",
+                "strategy": "single",
+                "single_model": model_value,
+            },
+        )
+        queue = client.get("/api/v1/queue").json()
+
+    assert page.status_code == 200
+    assert "Probador de Prompts" in page.text
+    assert invalid.status_code == 200
+    assert "JSON de entrada invalido" in invalid.text
+    assert queue["pending"] == []
+
+
+def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
+    model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "action": "enqueue",
+                "input_mode": "prompt",
+                "prompt": "<script>alert('x')</script>",
+                "strategy": "single",
+                "single_model": model_value,
+                "fallback_allowed": "",
+            },
+        )
+        queue = client.get("/api/v1/queue").json()
+        detail = client.get(f"/api/v1/dashboard/tasks/{queue['pending'][0]['task_id']}").json()
+
+    assert response.status_code == 200
+    assert "Tarea encolada" in response.text
+    assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in response.text
+    assert "<script>alert('x')</script>" not in response.text
+    assert detail["request"]["content"]["metadata"]["origin"] == "prompt_tester"
+    assert detail["request"]["model_requirements"]["target_model"] == {
+        "provider": "ollama",
+        "deployment": "bootstrap",
+        "model": "bootstrap-single",
+        "role": None,
+        "required": False,
+    }
+    assert detail["request"]["model_requirements"]["fallback_allowed"] is False
+
+
+def test_prompt_tester_enqueues_manual_mixture(tmp_path: Path) -> None:
+    model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "action": "enqueue",
+                "input_mode": "prompt",
+                "prompt": "Compara opciones",
+                "strategy": "mixture_of_agents",
+                "preset": "slow",
+                "scheduling": "parallel",
+                "proposer_model_1": model_value,
+                "proposer_role_1": "architect",
+                "proposer_model_2": model_value,
+                "proposer_role_2": "reviewer",
+                "arbiter_model": model_value,
+            },
+        )
+        queue = client.get("/api/v1/queue").json()
+        detail = client.get(f"/api/v1/dashboard/tasks/{queue['pending'][0]['task_id']}").json()
+
+    assert response.status_code == 200
+    request = detail["request"]
+    assert request["execution"]["strategy"] == "mixture_of_agents"
+    assert request["execution"]["preset"] == "slow"
+    assert request["execution"]["scheduling"] == "parallel"
+    assert request["execution"]["selection"]["mode"] == "manual"
+    assert request["execution"]["selection"]["allow_substitution"] is False
+    assert [item["role"] for item in request["execution"]["selection"]["proposers"]] == ["architect", "reviewer"]
+    assert request["execution"]["selection"]["arbiter"]["model"] == "bootstrap-single"
+
+
 def test_dispatcher_processes_single_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={"idempotency_key": "test:single", "content": {"prompt": "Resume esto"}}).json()
@@ -344,6 +455,45 @@ def test_slow_parallel_fails_before_launch_when_capacity_is_insufficient(tmp_pat
     assert task["status"] == "failed"
     assert task["error"]["code"] == "PARALLEL_CAPACITY_INSUFFICIENT"
     assert probe.max_active == 0
+
+
+def test_comparison_dashboard_renders_measured_slow_overlap(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-comparison.db")),
+        processing=ProcessingConfig(
+            auto_dispatch=False,
+            provider_mode="bootstrap",
+            max_parallel_invocations=3,
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.provider = TimelineProbeProvider()
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "comparison:slow",
+                "content": {"prompt": "Compara alternativas"},
+                "execution": {
+                    "strategy": "mixture_of_agents",
+                    "preset": "slow",
+                    "scheduling": "parallel",
+                    "max_proposers": 3,
+                    "selection": {"mode": "auto", "proposer_count": 3},
+                },
+            },
+        ).json()
+
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{created['task_id']}").json()
+        page = client.get(f"/dashboard/comparison?task_id={created['task_id']}")
+
+    assert detail["invocations"][0]["started_at"] is not None
+    assert detail["invocations"][0]["completed_at"] is not None
+    assert page.status_code == 200
+    assert "Comparaci" in page.text
+    assert created["task_id"] in page.text
+    assert "observado" in page.text
+    assert "Propuesta" not in page.text
 
 
 def test_single_rejects_slow_preset(tmp_path: Path) -> None:
