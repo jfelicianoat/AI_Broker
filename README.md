@@ -34,6 +34,10 @@ La base de seguridad del dashboard esta implementada: las acciones mutables bajo
 
 Pendiente de 5.5: autenticacion administrativa real, CSP sin `unsafe-inline` cuando los carriles no dependan de estilos inline, QA visual automatizada y auditoria persistente de acciones administrativas.
 
+## Estado de fase 6
+
+Primer bloque operativo implementado: backup, verificacion y restore del estado durable. El backup genera un zip atomico con snapshot SQLite consistente, artefactos de tareas y manifest con SHA-256 por archivo. La restauracion verifica el backup antes de escribir y exige `--replace` si va a sobrescribir una base o artefactos existentes.
+
 ## Funcionalidades
 
 ### 1. Consenso multi-LLM (*mixture of agents*)
@@ -282,6 +286,14 @@ Para activar DeepSeek, configura sus precios en `broker_config.yaml`, cambia `pr
 
 ```powershell
 python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_api_key',getpass.getpass('DeepSeek API key: '))"
+```
+
+Backup operativo:
+
+```powershell
+python scripts/backup_state.py backup --database state/broker.db --artifacts state/tasks --output backups/ai-broker-state.zip
+python scripts/backup_state.py verify --backup backups/ai-broker-state.zip
+python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --database state/broker.db --artifacts state/tasks --replace
 ```
 
 ## Estructura del proyecto

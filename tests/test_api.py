@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
 from app.dashboard_web import load_dashboard_resources
+from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.main import create_app
 from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.resource_scheduler import ResourceScheduler
@@ -288,6 +289,45 @@ def test_dashboard_serves_security_headers(tmp_path: Path) -> None:
     csp = response.headers["content-security-policy"]
     assert "default-src 'self'" in csp
     assert "frame-ancestors 'none'" in csp
+
+
+def test_state_backup_verify_and_restore_roundtrip(tmp_path: Path) -> None:
+    database = tmp_path / "broker.db"
+    artifacts = tmp_path / "tasks"
+    backup = tmp_path / "backup.zip"
+    restored_database = tmp_path / "restored" / "broker.db"
+    restored_artifacts = tmp_path / "restored" / "tasks"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(database)),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config)) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "backup:task", "content": {"prompt": "Persistir"}},
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+        task_id = created["task_id"]
+
+    artifacts.joinpath(task_id, "manual.txt").parent.mkdir(parents=True, exist_ok=True)
+    artifacts.joinpath(task_id, "manual.txt").write_text("artifact", encoding="utf-8")
+
+    result = create_state_backup(
+        database_path=database,
+        artifacts_root=artifacts,
+        output_path=backup,
+    )
+    manifest = verify_state_backup(backup)
+    restore_state_backup(
+        backup_path=backup,
+        database_path=restored_database,
+        artifacts_root=restored_artifacts,
+    )
+
+    assert result.files >= 2
+    assert manifest["format"] == "ai-broker-backup-v1"
+    assert restored_database.exists()
+    assert restored_artifacts.joinpath(task_id, "manual.txt").read_text(encoding="utf-8") == "artifact"
 
 
 def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
