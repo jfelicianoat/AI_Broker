@@ -5,6 +5,7 @@ import time
 
 from fastapi.testclient import TestClient
 
+import app.dashboard_web as dashboard_web
 from app.config import BrokerConfig, LoggingConfig, PersistenceConfig, ProcessingConfig, load_config
 from app.dashboard_web import load_dashboard_resources
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
@@ -320,6 +321,117 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     assert config.resources.max_loaded_local_models == "auto"
     assert saved.processing.task_timeout_seconds == 900
     assert saved.resources.allow_execution_waves is True
+
+
+def test_dashboard_configuration_adds_custom_api_provider(tmp_path: Path) -> None:
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-custom-provider.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "auto",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+                "custom_provider_1_enabled": "on",
+                "custom_provider_1_id": "nvidia",
+                "custom_provider_1_display_name": "NVIDIA NIM",
+                "custom_provider_1_base_url": "https://integrate.api.nvidia.com/v1",
+                "custom_provider_1_api_key_env": "NVIDIA_API_KEY",
+                "custom_provider_1_deployment": "cloud",
+                "custom_provider_1_timeout_seconds": "300",
+                "custom_provider_1_default_context_window": "128000",
+                "custom_provider_1_input_cost_per_million": "0",
+                "custom_provider_1_output_cost_per_million": "0",
+                "custom_provider_1_models": "meta/llama-3.1-70b-instruct|128000|0|0",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert response.status_code == 200
+    assert config.providers.custom[0].id == "nvidia"
+    assert config.providers.custom[0].enabled is True
+    assert saved.providers.custom[0].base_url == "https://integrate.api.nvidia.com/v1"
+    assert saved.providers.custom[0].models[0].name == "meta/llama-3.1-70b-instruct"
+
+
+def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, monkeypatch) -> None:
+    class FakeProbeProvider:
+        def __init__(self, config):
+            self.config = config
+
+        async def probe_all_models(self):
+            return [
+                {
+                    "name": "chat-ok",
+                    "compatibility": "compatible",
+                    "compatibility_checked_at": "2026-06-26T20:00:00+00:00",
+                    "compatibility_error": None,
+                },
+                {
+                    "name": "vision-only",
+                    "compatibility": "incompatible",
+                    "compatibility_checked_at": "2026-06-26T20:00:01+00:00",
+                    "compatibility_error": "HTTP 400: unsupported endpoint",
+                },
+            ]
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(dashboard_web, "OpenAICompatibleProvider", FakeProbeProvider)
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-probe-provider.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        response = client.post(
+            "/dashboard/actions/providers/nvidia/probe",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "auto",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+                "custom_provider_1_enabled": "on",
+                "custom_provider_1_id": "nvidia",
+                "custom_provider_1_display_name": "NVIDIA NIM",
+                "custom_provider_1_base_url": "https://integrate.api.nvidia.com/v1",
+                "custom_provider_1_api_key_env": "NVIDIA_API_KEY",
+                "custom_provider_1_deployment": "api",
+                "custom_provider_1_timeout_seconds": "300",
+                "custom_provider_1_default_context_window": "128000",
+                "custom_provider_1_probe_max_output_tokens": "1",
+                "custom_provider_1_probe_delay_seconds": "0",
+                "custom_provider_1_probe_max_models": "50",
+                "custom_provider_1_probe_skip_compatible": "on",
+                "custom_provider_1_input_cost_per_million": "0",
+                "custom_provider_1_output_cost_per_million": "0",
+                "custom_provider_1_sync_models": "on",
+            },
+        )
+
+    saved = load_config(config_path)
+    by_name = {item.name: item for item in saved.providers.custom[0].models}
+    assert response.status_code == 200
+    assert by_name["chat-ok"].compatibility == "compatible"
+    assert by_name["vision-only"].compatibility == "incompatible"
+    assert saved.providers.custom[0].probe_skip_compatible is True
+    assert "No compatible mixture" in response.text
 
 
 def test_dashboard_task_detail_renders_results_and_errors(tmp_path: Path) -> None:

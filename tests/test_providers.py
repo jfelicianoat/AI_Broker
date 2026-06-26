@@ -10,10 +10,12 @@ from app.config import (
     BrokerConfig,
     DeepSeekConfig,
     OllamaConfig,
+    OpenAICompatibleModelConfig,
+    OpenAICompatibleProviderConfig,
     ProcessingConfig,
     ProvidersConfig,
 )
-from app.providers import DeepSeekProvider, OllamaProvider, ProviderError, RoutedModelProvider
+from app.providers import DeepSeekProvider, OllamaProvider, OpenAICompatibleProvider, ProviderError, RoutedModelProvider
 from app.schemas import ModelReference, TaskCreateRequest
 
 
@@ -171,6 +173,134 @@ class DeepSeekProviderTests(unittest.IsolatedAsyncioTestCase):
         await provider.close()
 
 
+class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uses_environment_credential_and_configured_models(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers["authorization"], "Bearer nvidia-secret")
+            self.assertEqual(request.url.path, "/v1/chat/completions")
+            body = json.loads(request.content)
+            self.assertEqual(body["model"], "meta/llama-3.1-70b-instruct")
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "nvidia"}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                },
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            display_name="NVIDIA NIM",
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key_env="NVIDIA_API_KEY",
+            models=[
+                OpenAICompatibleModelConfig(
+                    name="meta/llama-3.1-70b-instruct",
+                    context_window=128000,
+                    input_cost_per_million=1,
+                    output_cost_per_million=2,
+                )
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(
+            idempotency_key="nvidia:test",
+            content={"prompt": "hola"},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        )
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            models = await provider.models()
+            output = await provider.generate(request, "meta/llama-3.1-70b-instruct", "hola")
+        await provider.close()
+
+        self.assertEqual(models[0]["provider"], "nvidia")
+        self.assertEqual(models[0]["deployment"], "cloud")
+        self.assertEqual(output.content, "nvidia")
+        self.assertEqual(output.cost_usd, 0.00002)
+
+    async def test_includes_provider_error_body_on_http_errors(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "max_tokens is too large for this model"}},
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[OpenAICompatibleModelConfig(name="microsoft/phi-4-multimodal-instruct")],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(
+            idempotency_key="nvidia:error-body",
+            content={"prompt": "hola"},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        )
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            with self.assertRaises(ProviderError) as raised:
+                await provider.generate(request, "microsoft/phi-4-multimodal-instruct", "hola")
+        await provider.close()
+
+        self.assertEqual(raised.exception.code, "MODEL_ERROR")
+        self.assertIn("HTTP 400", str(raised.exception))
+        self.assertIn("max_tokens is too large", str(raised.exception))
+
+    async def test_probe_all_models_marks_chat_compatibility(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v1/models":
+                return httpx.Response(200, json={"data": [{"id": "ok"}, {"id": "bad"}]})
+            body = json.loads(request.content)
+            if body["model"] == "ok":
+                return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+            return httpx.Response(400, json={"error": {"message": "unsupported endpoint"}})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            sync_models=True,
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        by_name = {item["name"]: item for item in results}
+        self.assertEqual(by_name["ok"]["compatibility"], "compatible")
+        self.assertEqual(by_name["bad"]["compatibility"], "incompatible")
+        self.assertIn("unsupported endpoint", by_name["bad"]["compatibility_error"])
+
+    async def test_probe_all_models_can_skip_already_compatible(self) -> None:
+        called_models = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v1/chat/completions":
+                body = json.loads(request.content)
+                called_models.append(body["model"])
+                return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+            return httpx.Response(500)
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(name="already-ok", compatibility="compatible"),
+                OpenAICompatibleModelConfig(name="pending", compatibility="unknown"),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(called_models, ["pending"])
+        self.assertEqual([item["name"] for item in results], ["pending"])
+
+
 class RouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_honours_preferred_model_and_fallback_policy(self) -> None:
         class StubProvider:
@@ -310,6 +440,86 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         selected = await router.select(request, 1, ["single"])
         self.assertEqual(selected[0].model, "local")
         await router.close()
+
+    async def test_routes_custom_openai_compatible_provider(self) -> None:
+        class CustomStub:
+            async def models(self):
+                return [
+                    {
+                        "name": "nim",
+                        "provider": "nvidia",
+                        "deployment": "cloud",
+                        "context_window": 100000,
+                        "capabilities": ["completion"],
+                    }
+                ]
+
+            async def generate(self, request, model, prompt):
+                from app.providers import ModelOutput
+
+                return ModelOutput("custom", 1, 1, 0.0, 1.0)
+
+            async def close(self):
+                return None
+
+        router = RoutedModelProvider(
+            BrokerConfig(providers=ProvidersConfig(ollama=OllamaConfig(enabled=False))),
+            ollama=CustomStub(),
+            deepseek=CustomStub(),
+            custom={"nvidia": CustomStub()},
+        )
+        request = TaskCreateRequest(
+            idempotency_key="route:custom",
+            content={"prompt": "hola"},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        )
+        selected = await router.select(request, 1, ["single"])
+        output = await router.propose(request, selected[0], 1)
+        await router.close()
+
+        self.assertEqual(selected[0].provider, "nvidia")
+        self.assertEqual(output.content, "custom")
+
+    async def test_auto_selection_excludes_incompatible_custom_models(self) -> None:
+        class CustomStub:
+            async def models(self):
+                return [
+                    {
+                        "name": "bad",
+                        "provider": "nvidia",
+                        "deployment": "api",
+                        "context_window": 100000,
+                        "capabilities": ["completion"],
+                        "compatibility": "incompatible",
+                    },
+                    {
+                        "name": "ok",
+                        "provider": "nvidia",
+                        "deployment": "api",
+                        "context_window": 100000,
+                        "capabilities": ["completion"],
+                        "compatibility": "compatible",
+                    },
+                ]
+
+            async def close(self):
+                return None
+
+        router = RoutedModelProvider(
+            BrokerConfig(providers=ProvidersConfig(ollama=OllamaConfig(enabled=False))),
+            ollama=CustomStub(),
+            deepseek=CustomStub(),
+            custom={"nvidia": CustomStub()},
+        )
+        request = TaskCreateRequest(
+            idempotency_key="route:compatible-only",
+            content={"prompt": "hola"},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        )
+        selected = await router.select(request, 1, ["single"])
+        await router.close()
+
+        self.assertEqual(selected[0].model, "ok")
 
 
 if __name__ == "__main__":

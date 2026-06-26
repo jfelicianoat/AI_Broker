@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app.config import BrokerConfig, DeepSeekConfig, OllamaConfig
+from app.config import BrokerConfig, DeepSeekConfig, OllamaConfig, OpenAICompatibleProviderConfig
 from app.schemas import (
     ExecutionPreset,
     ExecutionStrategy,
@@ -67,9 +67,22 @@ def enforce_context_limit(request: TaskCreateRequest, context_window: int | None
         )
 
 
+def provider_http_error_message(error: httpx.HTTPStatusError) -> str:
+    response = error.response
+    body = response.text.strip()
+    if body:
+        try:
+            parsed = response.json()
+            body = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        except ValueError:
+            body = body[:1000]
+        return f"HTTP {response.status_code} en {response.url}: {body}"
+    return f"HTTP {response.status_code} en {response.url}"
+
+
 class CredentialResolver:
     @staticmethod
-    def get(config: DeepSeekConfig) -> str | None:
+    def get(config: Any) -> str | None:
         value = os.environ.get(config.api_key_env)
         if value:
             return value
@@ -207,6 +220,9 @@ class OllamaProvider:
                     "context_window": context_window, "capabilities": capabilities,
                     "family": details.get("family"),
                     "parameter_size": details.get("parameter_size"), "quantization": details.get("quantization_level"),
+                    "compatibility": "compatible",
+                    "compatibility_checked_at": None,
+                    "compatibility_error": None,
                 })
             return result
         except httpx.HTTPError as error:
@@ -255,7 +271,11 @@ class OllamaProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError("MODEL_ERROR", str(error), retryable=error.response.status_code >= 500) from error
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
         content = (payload.get("message") or {}).get("content")
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("INVALID_PROVIDER_RESPONSE", "Ollama no devolvió message.content")
@@ -287,7 +307,11 @@ class OllamaProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError("MODEL_ERROR", str(error), retryable=error.response.status_code >= 500) from error
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
         embeddings = payload.get("embeddings") or []
         vector = embeddings[0] if len(embeddings) == 1 else None
         if not isinstance(vector, list) or not vector or any(
@@ -326,7 +350,8 @@ class DeepSeekProvider:
             response = await self.client.get("/models", headers=self._headers())
             response.raise_for_status()
             return [{"name": item["id"], "provider": "deepseek", "deployment": "api", "status": "online",
-                     "context_window": self.config.context_window, "capabilities": ["completion"]}
+                     "context_window": self.config.context_window, "capabilities": ["completion"],
+                     "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None}
                     for item in response.json().get("data") or []]
         except ProviderError:
             raise
@@ -365,7 +390,11 @@ class DeepSeekProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError("MODEL_ERROR", str(error), retryable=error.response.status_code >= 500) from error
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
         choices = payload.get("choices") or []
         content = ((choices[0].get("message") or {}).get("content") if choices else None)
         if not isinstance(content, str) or not content.strip():
@@ -378,12 +407,224 @@ class DeepSeekProvider:
                            (datetime.now(timezone.utc) - started).total_seconds() * 1000)
 
 
+class OpenAICompatibleProvider:
+    def __init__(
+        self,
+        config: OpenAICompatibleProviderConfig,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.config = config
+        self.client = httpx.AsyncClient(
+            base_url=config.base_url,
+            timeout=config.timeout_seconds,
+            transport=transport,
+        )
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    def _headers(self) -> dict[str, str]:
+        key = CredentialResolver.get(self.config)
+        if not key:
+            label = self.config.display_name or self.config.id
+            raise ProviderError("CREDENTIALS_UNAVAILABLE", f"Falta credencial para {label}: {self.config.api_key_env}")
+        return {"Authorization": f"Bearer {key}"}
+
+    async def models(self) -> list[dict[str, Any]]:
+        if not self.config.enabled:
+            return []
+        configured = {item.name: item for item in self.config.models}
+        names = list(configured)
+        if self.config.sync_models:
+            try:
+                response = await self.client.get("/models", headers=self._headers())
+                response.raise_for_status()
+                names = [
+                    str(item["id"])
+                    for item in response.json().get("data") or []
+                    if isinstance(item, dict) and item.get("id")
+                ]
+            except ProviderError:
+                raise
+            except httpx.HTTPError as error:
+                raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        return [self._catalog_entry(name, configured.get(name)) for name in names]
+
+    def _catalog_entry(self, name: str, model_config: Any | None = None) -> dict[str, Any]:
+        return {
+            "name": name,
+            "provider": self.config.id,
+            "deployment": self.config.deployment,
+            "status": "online",
+            "context_window": (
+                model_config.context_window if model_config is not None else self.config.default_context_window
+            ),
+            "capabilities": (
+                list(model_config.capabilities) if model_config is not None else ["completion"]
+            ),
+            "family": self.config.display_name or self.config.id,
+            "compatibility": (
+                model_config.compatibility if model_config is not None else "unknown"
+            ),
+            "compatibility_checked_at": (
+                model_config.compatibility_checked_at if model_config is not None else None
+            ),
+            "compatibility_error": (
+                model_config.compatibility_error if model_config is not None else None
+            ),
+        }
+
+    def _model_config(self, model: str) -> Any | None:
+        return next((item for item in self.config.models if item.name == model), None)
+
+    def _costs(self, model: str) -> tuple[float, float]:
+        model_config = self._model_config(model)
+        if model_config is not None:
+            return model_config.input_cost_per_million, model_config.output_cost_per_million
+        return self.config.input_cost_per_million, self.config.output_cost_per_million
+
+    async def probe_chat_compatibility(self, model: str) -> dict[str, Any]:
+        started = datetime.now(timezone.utc)
+        try:
+            response = await self.client.post(
+                "/chat/completions",
+                headers=self._headers(),
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": self.config.probe_max_output_tokens,
+                    "temperature": 0,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            choices = payload.get("choices") or []
+            compatible = bool(choices)
+            return {
+                "name": model,
+                "compatibility": "compatible" if compatible else "incompatible",
+                "compatibility_checked_at": started.isoformat(),
+                "compatibility_error": None if compatible else "Respuesta sin choices",
+            }
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 429:
+                raise ProviderError(
+                    "RATE_LIMITED",
+                    provider_http_error_message(error),
+                    retryable=True,
+                ) from error
+            return {
+                "name": model,
+                "compatibility": "incompatible",
+                "compatibility_checked_at": started.isoformat(),
+                "compatibility_error": provider_http_error_message(error),
+            }
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            return {
+                "name": model,
+                "compatibility": "incompatible",
+                "compatibility_checked_at": started.isoformat(),
+                "compatibility_error": str(error),
+            }
+
+    async def probe_all_models(
+        self,
+        *,
+        max_models: int | None = None,
+        skip_compatible: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        catalog = await self.models()
+        if skip_compatible is None:
+            skip_compatible = self.config.probe_skip_compatible
+        limit = max_models or self.config.probe_max_models
+        candidates = [
+            item for item in catalog
+            if not (skip_compatible and item.get("compatibility") == "compatible")
+        ]
+        names = [str(item["name"]) for item in candidates[:limit]]
+        results = []
+        for name in names:
+            try:
+                results.append(await self.probe_chat_compatibility(name))
+            except ProviderError as error:
+                if error.code == "RATE_LIMITED":
+                    break
+                raise
+            if self.config.probe_delay_seconds:
+                await asyncio.sleep(self.config.probe_delay_seconds)
+        return results
+
+    async def generate(self, request: TaskCreateRequest, model: str, prompt: str) -> ModelOutput:
+        catalog = await self.models()
+        entry = next((item for item in catalog if item["name"] == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo {self.config.id} no disponible: {model}")
+        if "completion" not in set(entry.get("capabilities") or []):
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad completion")
+        enforce_context_limit(request, entry.get("context_window"), prompt)
+        input_cost, output_cost = self._costs(model)
+        if request.model_requirements.max_cost_usd is not None:
+            estimated_input = max(1, len(prompt.encode("utf-8")))
+            estimated_cost = (
+                estimated_input * input_cost
+                + request.generation.max_output_tokens * output_cost
+            ) / 1_000_000
+            if estimated_cost > request.model_requirements.max_cost_usd:
+                raise ProviderError(
+                    "BUDGET_EXCEEDED",
+                    f"El coste maximo estimado ({estimated_cost:.6f} USD) supera el presupuesto",
+                )
+        started = datetime.now(timezone.utc)
+        try:
+            request_payload: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": request.generation.temperature,
+                "max_tokens": request.generation.max_output_tokens,
+                "stream": False,
+            }
+            if request.output.format == OutputFormat.json:
+                request_payload["response_format"] = {"type": "json_object"}
+            response = await self.client.post("/chat/completions", headers=self._headers(), json=request_payload)
+            response.raise_for_status()
+            payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
+        choices = payload.get("choices") or []
+        content = ((choices[0].get("message") or {}).get("content") if choices else None)
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError("INVALID_PROVIDER_RESPONSE", f"{self.config.id} no devolvio contenido")
+        usage = payload.get("usage") or {}
+        input_tokens = int(usage.get("prompt_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or 0)
+        cost = (input_tokens * input_cost + output_tokens * output_cost) / 1_000_000
+        return ModelOutput(
+            content,
+            input_tokens,
+            output_tokens,
+            cost,
+            (datetime.now(timezone.utc) - started).total_seconds() * 1000,
+        )
+
+
 class RoutedModelProvider:
     def __init__(self, config: BrokerConfig, *, ollama: OllamaProvider | None = None,
-                 deepseek: DeepSeekProvider | None = None) -> None:
+                 deepseek: DeepSeekProvider | None = None,
+                 custom: dict[str, OpenAICompatibleProvider] | None = None) -> None:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
+        self.custom = custom if custom is not None else self._build_custom_providers(config)
         configured = config.processing.max_parallel_invocations
         if isinstance(configured, int):
             parallel_limit = configured
@@ -396,9 +637,24 @@ class RoutedModelProvider:
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(parallel_limit)
 
+    @staticmethod
+    def _build_custom_providers(config: BrokerConfig) -> dict[str, OpenAICompatibleProvider]:
+        return {
+            item.id.lower(): OpenAICompatibleProvider(item)
+            for item in config.providers.custom
+            if item.enabled
+        }
+
+    def reload_config(self, config: BrokerConfig) -> None:
+        self.config = config
+        self.deepseek.config = config.providers.deepseek
+        self.custom = self._build_custom_providers(config)
+
     async def close(self) -> None:
         await self.ollama.close()
         await self.deepseek.close()
+        for provider in self.custom.values():
+            await provider.close()
 
     async def models(self) -> list[dict[str, Any]]:
         result = []
@@ -408,6 +664,9 @@ class RoutedModelProvider:
         if self.config.providers.deepseek.enabled:
             try: result.extend(await self.deepseek.models())
             except ProviderError: pass
+        for provider in self.custom.values():
+            try: result.extend(await provider.models())
+            except ProviderError: pass
         return result
 
     async def health(self) -> dict[str, dict[str, Any]]:
@@ -416,6 +675,8 @@ class RoutedModelProvider:
             checks["ollama"] = await self._provider_health(self.ollama)
         if self.config.providers.deepseek.enabled:
             checks["deepseek"] = await self._provider_health(self.deepseek)
+        for provider_id, provider in self.custom.items():
+            checks[provider_id] = await self._provider_health(provider)
         return checks
 
     async def resource_snapshot(self) -> dict[str, Any]:
@@ -450,6 +711,7 @@ class RoutedModelProvider:
         catalog = [item for item in await self.models() if item["provider"].lower() in allowed]
         if not request.model_requirements.cloud_allowed:
             catalog = [item for item in catalog if item.get("deployment") != "cloud"]
+        catalog = [item for item in catalog if item.get("compatibility") != "incompatible"]
         required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
         capability_catalog = [
             item for item in catalog
@@ -596,13 +858,45 @@ class RoutedModelProvider:
                     code = "MODEL_DEPLOYMENT_MISMATCH" if same_name else "MODEL_UNAVAILABLE"
                     raise ProviderError(code, f"Modelo DeepSeek no disponible: {model.deployment}/{model.model}")
                 return await self.deepseek.generate(request, model.model, prompt)
+            if provider_name in self.custom:
+                if request.inference_kind == InferenceKind.embedding:
+                    raise ProviderError(
+                        "PROVIDER_CAPABILITY_MISMATCH",
+                        f"{model.provider} no admite embeddings en este adapter",
+                    )
+                if not request.model_requirements.cloud_allowed and model.deployment.lower() == "cloud":
+                    raise ProviderError("CLOUD_NOT_ALLOWED", f"{model.provider} requiere cloud_allowed=true")
+                provider = self.custom[provider_name]
+                catalog = await provider.models()
+                exact = any(
+                    item["name"] == model.model
+                    and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                    for item in catalog
+                )
+                if not exact:
+                    same_name = any(item["name"] == model.model for item in catalog)
+                    code = "MODEL_DEPLOYMENT_MISMATCH" if same_name else "MODEL_UNAVAILABLE"
+                    raise ProviderError(code, f"Modelo {model.provider} no disponible: {model.deployment}/{model.model}")
+                entry = next(
+                    item for item in catalog
+                    if item["name"] == model.model
+                    and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                )
+                if entry.get("compatibility") == "incompatible":
+                    detail = entry.get("compatibility_error") or "No compatible con /chat/completions"
+                    raise ProviderError(
+                        "MODEL_COMPATIBILITY_MISMATCH",
+                        f"Modelo {model.provider}/{model.model} marcado como no compatible para mixture: {detail}",
+                    )
+                return await provider.generate(request, model.model, prompt)
             raise ProviderError("PROVIDER_UNAVAILABLE", f"Proveedor no soportado: {model.provider}")
 
 
 class BootstrapModelProvider:
     async def models(self) -> list[dict[str, Any]]:
         return [{"name": "bootstrap-single", "provider": "ollama", "deployment": "bootstrap", "status": "available",
-                 "context_window": 1_000_000, "capabilities": ["completion", "embedding"]}]
+                 "context_window": 1_000_000, "capabilities": ["completion", "embedding"],
+                 "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None}]
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         target = request.model_requirements.target_model

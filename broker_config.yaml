@@ -50,3 +50,539 @@ providers:
     context_window: 64000
     input_cost_per_million: 0.0
     output_cost_per_million: 0.0
+  custom:
+  - id: nvidia
+    enabled: true
+    adapter: openai_compatible
+    display_name: NVIDIA NIM
+    base_url: https://integrate.api.nvidia.com/v1
+    timeout_seconds: 300.0
+    api_key_env: NVIDIA_API_KEY
+    keyring_service: ai-broker
+    keyring_username: nvidia_api_key
+    deployment: api
+    sync_models: true
+    default_context_window: 128000
+    probe_max_output_tokens: 1
+    probe_delay_seconds: 0.25
+    probe_max_models: 50
+    probe_skip_compatible: true
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+    models:
+    - name: 01-ai/yi-large
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:48.889101+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''23bd454d-b225-49a3-8118-582a62fc51b8'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: adept/fuyu-8b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:49.351781+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''e598bfc1-b058-41af-869d-556d3c7e1b48'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: ai21labs/jamba-1.5-large-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:49.797751+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''6497fc2b-7ff8-4019-8946-123dccbfc863'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: aisingapore/sea-lion-7b-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:50.240327+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''02f84bf4-c1a1-489b-a9de-ac3e8dcdec14'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: baai/bge-m3
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:50.676548+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
+    - name: bigcode/starcoder2-15b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:51.005584+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
+    - name: databricks/dbrx-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:51.334490+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''3d6c2ff8-8bfc-4d10-8fd0-b7337288e869'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: deepseek-ai/deepseek-coder-6.7b-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:51.743962+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''e503b15c-62b0-4d69-b532-a88f0bfa2656'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/codegemma-1.1-7b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:52.160010+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''e2d298c5-204e-4213-b921-9f492cc9011b'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/codegemma-7b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:52.583830+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''7dfc10a8-3cc4-448e-97c1-2213308dc222'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/deplot
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:53.002541+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''784a8ca4-ea7d-4c93-bb46-ec027c3fae47'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/gemma-2-2b-it
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:53.439943+00:00'
+      compatibility_error: 'HTTP 422 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"error":"body -> temperature\n  Input should be greater than 0 (type=greater_than;
+        gt=0.0)"}'
+    - name: google/gemma-2b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:53.801964+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''04174188-f742-4069-9e72-d77c2b77d3cb'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/gemma-3-12b-it
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:54.223863+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''ee47df99-c92b-4dc9-b3a7-f3fb0f087b73'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/gemma-3-4b-it
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:54.658745+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''c322f327-55a3-4af3-a91f-c757e2b8b135'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: google/gemma-3n-e4b-it
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:10:55.113624+00:00'
+      compatibility_error: ''
+    - name: google/gemma-4-31b-it
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:15:55.388045+00:00'
+      compatibility_error: ''
+    - name: google/recurrentgemma-2b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:55.762957+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''2f495340-a99f-4b4b-89bd-1beb003dd896'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: ibm/granite-3.0-3b-a800m-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:56.306865+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''67324577-3f91-4aa6-b750-97468262530d'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: ibm/granite-3.0-8b-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:56.748175+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''5a24a4f0-2d59-46b3-ac65-42307f2633d1'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: ibm/granite-34b-code-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:57.228711+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''4df48b4f-e3c5-4ade-82c7-c06b65e25d18'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: ibm/granite-8b-code-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:57.635970+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''af7b6f03-f615-4c5f-86c6-388bd35cede0'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: meta/codellama-70b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:58.185192+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''f6b06895-d073-4714-8bb2-26c09e9f6597'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: meta/llama2-70b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:58.619650+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''2fddadfb-7e76-4c8a-9b82-f7d3fab94471'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: microsoft/kosmos-2
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:59.039728+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''6018fed7-f227-48dc-99bc-3fd4264d5037'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: microsoft/phi-3-vision-128k-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:59.466683+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''20f2537e-8593-4eb9-ad40-60eee3bbaa55'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: microsoft/phi-3.5-moe-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:20:59.871954+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''e6cab982-62f4-481e-9a7a-3dedb87dbd01'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: microsoft/phi-4-mini-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:21:00.307074+00:00'
+      compatibility_error: ''
+    - name: microsoft/phi-4-multimodal-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:26:00.587032+00:00'
+      compatibility_error: null
+    - name: minimaxai/minimax-m2.7
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:10.677873+00:00'
+      compatibility_error: null
+    - name: minimaxai/minimax-m3
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:12.537084+00:00'
+      compatibility_error: null
+    - name: mistralai/codestral-22b-instruct-v0.1
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:24.691939+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''9a10b012-e6df-46fd-83b2-700dcbc75814'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: mistralai/ministral-14b-instruct-2512
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:25.129683+00:00'
+      compatibility_error: null
+    - name: mistralai/mistral-7b-instruct-v0.3
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:25.568390+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''cd89bd68-13e3-47a9-861e-9a62e6e14b05'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: mistralai/mistral-large
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:26.036017+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''767b5b9a-3f9d-4c1d-86e8-fa861988cee7'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: mistralai/mistral-large-2-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:26.507160+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''7fadd4de-e22a-48e4-90e9-f02ef14a74b9'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: mistralai/mistral-large-3-675b-instruct-2512
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:26.928023+00:00'
+      compatibility_error: null
+    - name: mistralai/mistral-medium-3.5-128b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:27.440696+00:00'
+      compatibility_error: null
+    - name: mistralai/mistral-nemotron
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:27.912464+00:00'
+      compatibility_error: null
+    - name: mistralai/mistral-small-4-119b-2603
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:28.631371+00:00'
+      compatibility_error: null
+    - name: mistralai/mixtral-8x22b-v0.1
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:29.067803+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''39655fc1-9ebc-4b24-963e-6915ea6680de'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: mistralai/mixtral-8x7b-instruct-v0.1
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:29.507913+00:00'
+      compatibility_error: null
+    - name: moonshotai/kimi-k2.6
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:30.004273+00:00'
+      compatibility_error: null
+    - name: nv-mistralai/mistral-nemo-12b-instruct
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:30.757085+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''f8c05193-d2e2-4f0f-bb4d-7ad70070002b'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: nvidia/ai-synthetic-video-detector
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:31.207460+00:00'
+      compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
+        Server Error","status":500,"detail":"Internal error while making inference
+        request"}'
+    - name: nvidia/cosmos-reason2-8b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:31.566605+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''e199b43b-6c62-4a63-9379-f60e1a953236'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
+    - name: nvidia/embed-qa-4
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-06-26T20:29:31.976014+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
+    - name: nvidia/gliner-pii
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:32.304789+00:00'
+      compatibility_error: null
+    - name: nvidia/ising-calibration-1-35b-a3b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:32.723477+00:00'
+      compatibility_error: null
+    - name: nvidia/llama-3.1-nemoguard-8b-content-safety
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-26T20:29:33.223259+00:00'
+      compatibility_error: null

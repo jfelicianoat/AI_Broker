@@ -14,10 +14,15 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
-from app.config import BrokerConfig, save_config
+from app.config import (
+    BrokerConfig,
+    OpenAICompatibleModelConfig,
+    OpenAICompatibleProviderConfig,
+    save_config,
+)
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository
-from app.providers import ProviderError
+from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
@@ -43,6 +48,23 @@ templates.env.filters["model_value"] = lambda value: json.dumps({
     "deployment": value["deployment"],
     "model": value["name"],
 }, ensure_ascii=False, separators=(",", ":"))
+templates.env.filters["model_compatibility_label"] = lambda value: {
+    "compatible": "[OK]",
+    "incompatible": "[NO MIX]",
+    "unknown": "[PENDIENTE]",
+}.get(str((value or {}).get("compatibility") or "unknown"), "[PENDIENTE]")
+templates.env.filters["model_compatibility_text"] = lambda value: {
+    "compatible": "Compatible mixture",
+    "incompatible": "No compatible mixture",
+    "unknown": "Pendiente de analizar",
+}.get(str((value or {}).get("compatibility") or "unknown"), "Pendiente de analizar")
+templates.env.filters["model_compatibility_class"] = lambda value: (
+    "model-compatible"
+    if str((value or {}).get("compatibility") or "unknown") == "compatible"
+    else "model-incompatible"
+    if str((value or {}).get("compatibility") or "unknown") == "incompatible"
+    else "model-unknown"
+)
 templates.env.filters["status_label"] = lambda value: {
     "queued": "En cola",
     "routing": "Enrutando",
@@ -227,8 +249,53 @@ def create_dashboard_router(
             updated = _build_dashboard_config(config, form)
             save_config(updated, config_path)
             _apply_config_update(config, updated)
+            if hasattr(provider, "reload_config"):
+                provider.reload_config(config)
         except PromptTesterError as error:
             errors.append(str(error))
+        except ValidationError as error:
+            errors.extend(_validation_messages(error))
+        if errors:
+            context = {
+                "summary": queries.summary(window_hours=24),
+                "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
+                "active": queries.active_task_detail(),
+                "health": await health_loader(),
+                "resources": await resources(),
+                "history": queries.list_terminal_tasks(page_size=20),
+                "config": config,
+                "config_saved": False,
+                "config_errors": errors,
+            }
+            return _template_response(request, "dashboard.html", context)
+        return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
+
+    @router.post("/dashboard/actions/providers/{provider_id}/probe", response_class=HTMLResponse)
+    async def probe_provider_models(request: Request, provider_id: str):
+        form = await _read_urlencoded_form(request)
+        _verify_dashboard_mutation(request, form)
+        errors: list[str] = []
+        try:
+            updated = _build_dashboard_config(config, form)
+            provider_config = _find_custom_provider(updated, provider_id)
+            if provider_config is None:
+                raise PromptTesterError(f"Proveedor custom no encontrado: {provider_id}")
+            if not provider_config.enabled:
+                raise PromptTesterError(f"Activa el proveedor {provider_id} antes de analizarlo.")
+            probe = OpenAICompatibleProvider(provider_config)
+            try:
+                results = await probe.probe_all_models()
+            finally:
+                await probe.close()
+            _apply_probe_results(updated, provider_config.id, results)
+            save_config(updated, config_path)
+            _apply_config_update(config, updated)
+            if hasattr(provider, "reload_config"):
+                provider.reload_config(config)
+        except PromptTesterError as error:
+            errors.append(str(error))
+        except ProviderError as error:
+            errors.append(f"{error.code}: {error}")
         except ValidationError as error:
             errors.extend(_validation_messages(error))
         if errors:
@@ -436,13 +503,133 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         raise PromptTesterError("El margen de VRAM debe ser menor que el presupuesto total de VRAM.")
     payload["processing"] = processing
     payload["resources"] = resources
+    payload["providers"]["custom"] = _parse_custom_providers(current, form)
     return BrokerConfig.model_validate(payload)
 
 
 def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     target.processing = updated.processing
     target.resources = updated.resources
+    target.providers = updated.providers
 
+
+
+def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list[dict[str, Any]]:
+    providers: list[dict[str, Any]] = []
+    for index in range(1, 4):
+        provider_id = form.get(f"custom_provider_{index}_id", "").strip()
+        base_url = form.get(f"custom_provider_{index}_base_url", "").strip()
+        models_text = form.get(f"custom_provider_{index}_models", "").strip()
+        enabled = _checked(form, f"custom_provider_{index}_enabled")
+        if not provider_id and not base_url and not models_text:
+            continue
+        if not provider_id:
+            raise PromptTesterError(f"Proveedor custom {index}: indica un id.")
+        if not base_url:
+            raise PromptTesterError(f"Proveedor custom {provider_id}: indica base_url.")
+        previous = _find_custom_provider(current, provider_id)
+        previous_models = {item.name: item for item in previous.models} if previous is not None else {}
+        models = _parse_custom_provider_models(provider_id, models_text, previous_models)
+        sync_models = _checked(form, f"custom_provider_{index}_sync_models")
+        if enabled and not sync_models and not models:
+            raise PromptTesterError(
+                f"Proveedor custom {provider_id}: anade al menos un modelo o activa sincronizar catalogo."
+            )
+        providers.append({
+            "id": provider_id,
+            "enabled": enabled,
+            "adapter": "openai_compatible",
+            "display_name": form.get(f"custom_provider_{index}_display_name", "").strip() or None,
+            "base_url": base_url.rstrip("/"),
+            "timeout_seconds": _float_field(form, f"custom_provider_{index}_timeout_seconds", 300.0),
+            "api_key_env": form.get(f"custom_provider_{index}_api_key_env", "").strip() or "NVIDIA_API_KEY",
+            "keyring_service": "ai-broker",
+            "keyring_username": form.get(f"custom_provider_{index}_keyring_username", "").strip() or None,
+            "deployment": form.get(f"custom_provider_{index}_deployment", "cloud") or "cloud",
+            "sync_models": sync_models,
+            "default_context_window": _int_field(form, f"custom_provider_{index}_default_context_window", 128000),
+            "probe_max_output_tokens": _int_field(form, f"custom_provider_{index}_probe_max_output_tokens", 1),
+            "probe_delay_seconds": _float_field(form, f"custom_provider_{index}_probe_delay_seconds", 0.25),
+            "probe_max_models": _int_field(form, f"custom_provider_{index}_probe_max_models", 50),
+            "probe_skip_compatible": _checked(form, f"custom_provider_{index}_probe_skip_compatible"),
+            "input_cost_per_million": _float_field(form, f"custom_provider_{index}_input_cost_per_million", 0.0),
+            "output_cost_per_million": _float_field(form, f"custom_provider_{index}_output_cost_per_million", 0.0),
+            "models": [item.model_dump(mode="json") for item in models],
+        })
+    return providers
+
+
+def _parse_custom_provider_models(
+    provider_id: str,
+    models_text: str,
+    previous_models: dict[str, OpenAICompatibleModelConfig] | None = None,
+) -> list[OpenAICompatibleModelConfig]:
+    if not models_text:
+        return []
+    previous_models = previous_models or {}
+    models: list[OpenAICompatibleModelConfig] = []
+    for line_number, raw_line in enumerate(models_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        try:
+            previous = previous_models.get(parts[0])
+            models.append(OpenAICompatibleModelConfig(
+                name=parts[0],
+                context_window=int(parts[1]) if len(parts) > 1 and parts[1] else 128000,
+                input_cost_per_million=float(parts[2]) if len(parts) > 2 and parts[2] else 0.0,
+                output_cost_per_million=float(parts[3]) if len(parts) > 3 and parts[3] else 0.0,
+                compatibility=previous.compatibility if previous is not None else "unknown",
+                compatibility_checked_at=previous.compatibility_checked_at if previous is not None else None,
+                compatibility_error=previous.compatibility_error if previous is not None else None,
+            ))
+        except (ValueError, ValidationError) as error:
+            raise PromptTesterError(
+                f"Proveedor custom {provider_id}: modelo invalido en linea {line_number}. "
+                "Usa nombre|contexto|coste_input_millon|coste_output_millon."
+            ) from error
+    return models
+
+
+def _find_custom_provider(
+    config: BrokerConfig,
+    provider_id: str,
+) -> OpenAICompatibleProviderConfig | None:
+    return next(
+        (item for item in config.providers.custom if item.id.lower() == provider_id.lower()),
+        None,
+    )
+
+
+def _apply_probe_results(
+    config: BrokerConfig,
+    provider_id: str,
+    results: list[dict[str, Any]],
+) -> None:
+    provider_config = _find_custom_provider(config, provider_id)
+    if provider_config is None:
+        raise PromptTesterError(f"Proveedor custom no encontrado: {provider_id}")
+    existing = {item.name: item for item in provider_config.models}
+    updated_models: list[OpenAICompatibleModelConfig] = []
+    for result in results:
+        name = str(result["name"])
+        previous = existing.get(name)
+        updated_models.append(OpenAICompatibleModelConfig(
+            name=name,
+            context_window=previous.context_window if previous is not None else provider_config.default_context_window,
+            input_cost_per_million=(
+                previous.input_cost_per_million if previous is not None else provider_config.input_cost_per_million
+            ),
+            output_cost_per_million=(
+                previous.output_cost_per_million if previous is not None else provider_config.output_cost_per_million
+            ),
+            capabilities=list(previous.capabilities) if previous is not None else ["completion"],
+            compatibility=str(result.get("compatibility") or "unknown"),
+            compatibility_checked_at=result.get("compatibility_checked_at"),
+            compatibility_error=result.get("compatibility_error"),
+        ))
+    provider_config.models = updated_models
 
 
 def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
