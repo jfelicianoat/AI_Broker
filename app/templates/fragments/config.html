@@ -57,6 +57,126 @@
       </label>
     </div>
   </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Proveedores API</h3>
+        <p>Adapters OpenAI-compatible. La API key se lee desde una variable de entorno, no desde este formulario.</p>
+      </div>
+      <span class="badge badge-neutral">custom</span>
+    </div>
+    <div class="provider-grid">
+      {% for index in range(1, 4) %}
+        {% set provider = config.providers.custom[index - 1] if config.providers.custom|length >= index else none %}
+        <div class="provider-config">
+          <div class="provider-config-head">
+            <strong>Proveedor {{ index }}</strong>
+            <label>
+              <input type="checkbox" name="custom_provider_{{ index }}_enabled" {% if provider and provider.enabled %}checked{% endif %}>
+              Activo
+            </label>
+          </div>
+          <div class="provider-fields">
+            <label class="field">
+              <span>ID proveedor</span>
+              <input name="custom_provider_{{ index }}_id" value="{{ provider.id if provider else ('nvidia' if index == 1 else '') }}" placeholder="nvidia">
+            </label>
+            <label class="field">
+              <span>Nombre visible</span>
+              <input name="custom_provider_{{ index }}_display_name" value="{{ provider.display_name if provider and provider.display_name else ('NVIDIA NIM' if index == 1 else '') }}" placeholder="NVIDIA NIM">
+            </label>
+            <label class="field provider-wide">
+              <span>Base URL</span>
+              <input name="custom_provider_{{ index }}_base_url" value="{{ provider.base_url if provider else ('https://integrate.api.nvidia.com/v1' if index == 1 else '') }}" placeholder="https://integrate.api.nvidia.com/v1">
+            </label>
+            <label class="field">
+              <span>Variable API key</span>
+              <input name="custom_provider_{{ index }}_api_key_env" value="{{ provider.api_key_env if provider else ('NVIDIA_API_KEY' if index == 1 else '') }}" placeholder="NVIDIA_API_KEY">
+            </label>
+            <label class="field">
+              <span>Deployment</span>
+              <select name="custom_provider_{{ index }}_deployment">
+                {% set deployment = provider.deployment if provider else 'cloud' %}
+                <option value="cloud" {% if deployment == 'cloud' %}selected{% endif %}>cloud</option>
+                <option value="api" {% if deployment == 'api' %}selected{% endif %}>api</option>
+                <option value="local" {% if deployment == 'local' %}selected{% endif %}>local</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Timeout segundos</span>
+              <input name="custom_provider_{{ index }}_timeout_seconds" value="{{ provider.timeout_seconds if provider else 300 }}" inputmode="decimal">
+            </label>
+            <label class="field">
+              <span>Contexto por defecto</span>
+              <input name="custom_provider_{{ index }}_default_context_window" value="{{ provider.default_context_window if provider else 128000 }}" inputmode="numeric">
+            </label>
+            <label class="field">
+              <span>Tokens probe</span>
+              <input name="custom_provider_{{ index }}_probe_max_output_tokens" value="{{ provider.probe_max_output_tokens if provider else 1 }}" inputmode="numeric">
+            </label>
+            <label class="field">
+              <span>Pausa probe (segundos)</span>
+              <input name="custom_provider_{{ index }}_probe_delay_seconds" value="{{ provider.probe_delay_seconds if provider else 0.25 }}" inputmode="decimal">
+            </label>
+            <label class="field">
+              <span>Max. modelos por analisis</span>
+              <input name="custom_provider_{{ index }}_probe_max_models" value="{{ provider.probe_max_models if provider else 50 }}" inputmode="numeric">
+            </label>
+            <label class="field">
+              <span>Coste input / 1M</span>
+              <input name="custom_provider_{{ index }}_input_cost_per_million" value="{{ provider.input_cost_per_million if provider else 0 }}" inputmode="decimal">
+            </label>
+            <label class="field">
+              <span>Coste output / 1M</span>
+              <input name="custom_provider_{{ index }}_output_cost_per_million" value="{{ provider.output_cost_per_million if provider else 0 }}" inputmode="decimal">
+            </label>
+            <label class="field provider-wide">
+              <span>Modelos: nombre|contexto|coste_input_1M|coste_output_1M</span>
+              <textarea name="custom_provider_{{ index }}_models" rows="5" placeholder="meta/llama-3.1-70b-instruct|128000|0|0">{% if provider %}{% for model in provider.models %}{{ model.name }}|{{ model.context_window }}|{{ model.input_cost_per_million }}|{{ model.output_cost_per_million }}{% if not loop.last %}
+{% endif %}{% endfor %}{% endif %}</textarea>
+            </label>
+            <div class="check-row provider-wide">
+              <label>
+                <input type="checkbox" name="custom_provider_{{ index }}_sync_models" {% if provider and provider.sync_models %}checked{% endif %}>
+                Sincronizar catalogo desde /models
+              </label>
+              <label>
+                <input type="checkbox" name="custom_provider_{{ index }}_probe_skip_compatible" {% if not provider or provider.probe_skip_compatible %}checked{% endif %}>
+                No comprobar modelos ya verdes
+              </label>
+            </div>
+            <div class="provider-wide provider-actions">
+              <button class="button secondary compact"
+                      type="submit"
+                      formaction="/dashboard/actions/providers/{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}/probe">
+                Analizar compatibilidad
+              </button>
+            </div>
+            {% if provider and provider.models %}
+              <div class="provider-wide model-compat-list">
+                {% for model in provider.models %}
+                  {% set catalog_model = {
+                    'compatibility': model.compatibility,
+                    'compatibility_error': model.compatibility_error
+                  } %}
+                  <div class="model-compat-row {{ catalog_model|model_compatibility_class }}">
+                    <span>
+                      <strong>{{ model.name }}</strong>
+                      <small>{{ model.context_window }} contexto · {{ model.compatibility_checked_at or 'sin analizar' }}</small>
+                    </span>
+                    <span class="badge">{{ catalog_model|model_compatibility_text }}</span>
+                    {% if model.compatibility_error %}
+                      <small class="compat-error">{{ model.compatibility_error }}</small>
+                    {% endif %}
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
   <div class="panel-actions config-actions">
     <button class="button" type="submit">Guardar configuracion</button>
   </div>

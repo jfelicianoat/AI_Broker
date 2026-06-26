@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 import yaml
@@ -84,9 +85,61 @@ class DeepSeekConfig(BaseModel):
     output_cost_per_million: float = Field(default=0.0, ge=0)
 
 
+class OpenAICompatibleModelConfig(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    context_window: int = Field(default=128_000, gt=0)
+    input_cost_per_million: float = Field(default=0.0, ge=0)
+    output_cost_per_million: float = Field(default=0.0, ge=0)
+    capabilities: list[str] = Field(default_factory=lambda: ["completion"])
+    compatibility: Literal["unknown", "compatible", "incompatible"] = "unknown"
+    compatibility_checked_at: str | None = None
+    compatibility_error: str | None = Field(default=None, max_length=2000)
+
+
+class OpenAICompatibleProviderConfig(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    enabled: bool = False
+    adapter: Literal["openai_compatible"] = "openai_compatible"
+    display_name: str | None = Field(default=None, max_length=120)
+    base_url: str = Field(min_length=1, max_length=512)
+    timeout_seconds: float = Field(default=300, gt=0)
+    api_key_env: str = Field(default="NVIDIA_API_KEY", min_length=1, max_length=120)
+    keyring_service: str = Field(default="ai-broker", max_length=120)
+    keyring_username: str | None = Field(default=None, max_length=120)
+    deployment: Literal["cloud", "api", "local"] = "cloud"
+    sync_models: bool = False
+    default_context_window: int = Field(default=128_000, gt=0)
+    probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
+    probe_delay_seconds: float = Field(default=0.25, ge=0, le=60)
+    probe_max_models: int = Field(default=50, ge=1, le=1000)
+    probe_skip_compatible: bool = True
+    input_cost_per_million: float = Field(default=0.0, ge=0)
+    output_cost_per_million: float = Field(default=0.0, ge=0)
+    models: list[OpenAICompatibleModelConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_provider_id(self) -> "OpenAICompatibleProviderConfig":
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.id):
+            raise ValueError("provider id only allows letters, numbers, underscore and dash")
+        if self.keyring_username is None:
+            self.keyring_username = f"{self.id}_api_key"
+        return self
+
+
 class ProvidersConfig(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
+    custom: list[OpenAICompatibleProviderConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_custom_ids(self) -> "ProvidersConfig":
+        ids = [item.id.lower() for item in self.custom]
+        if len(ids) != len(set(ids)):
+            raise ValueError("custom provider ids must be unique")
+        reserved = {"ollama", "deepseek", "bootstrap"}
+        if reserved.intersection(ids):
+            raise ValueError("custom provider ids cannot use reserved provider names")
+        return self
 
 
 class BrokerConfig(BaseModel):

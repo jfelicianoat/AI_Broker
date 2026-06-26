@@ -101,6 +101,9 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .badge-degraded { border-color: #6b511f; color: #ffc34f; }
 .badge-unavailable { border-color: #6d343b; color: #ff8993; }
 .badge-neutral { color: #91bfe8; }
+.model-compatible { border-color: #25623d !important; background: #10291c !important; color: #a3edb4 !important; }
+.model-incompatible { border-color: #6d343b !important; background: #2a171e !important; color: #ffadb5 !important; }
+.model-unknown { border-color: #6b511f !important; background: #211b0d !important; color: #ffd37a !important; }
 
 .detail-list { margin: 0; padding: 12px 16px 4px; display: grid; }
 .detail-list div { display: grid; grid-template-columns: 42% 58%; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
@@ -182,6 +185,34 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .config-alert { margin: 14px 16px 0; }
 .config-checks { grid-column: 1 / -1; }
 .config-actions { border-top: 1px solid var(--border-soft); padding-top: 16px; }
+.config-subsection { border-top: 1px solid var(--border-soft); }
+.subsection-heading { min-height: 56px; padding: 13px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.subsection-heading h3 { margin: 0; font-size: 14px; }
+.subsection-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.provider-grid { padding: 0 16px 16px; display: grid; gap: 12px; }
+.provider-config { border: 1px solid var(--border-soft); border-radius: var(--radius); background: #0a1724; }
+.provider-config-head { min-height: 44px; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
+.provider-config-head label { display: inline-flex; align-items: center; gap: 7px; color: #cbd8e3; }
+.provider-fields { padding: 12px; display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 11px; }
+.provider-wide { grid-column: 1 / -1; }
+.provider-actions { display: flex; justify-content: flex-end; }
+.model-compat-list { display: grid; gap: 8px; }
+.model-compat-row { padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--radius); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; }
+.model-compat-row span:first-child { display: grid; gap: 3px; }
+.model-compat-row strong { font-size: 12px; overflow-wrap: anywhere; }
+.model-compat-row small { font-size: 10px; color: inherit; opacity: .78; overflow-wrap: anywhere; }
+.model-compat-row .compat-error { grid-column: 1 / -1; font-family: ui-monospace, "Cascadia Code", monospace; line-height: 1.45; }
+.model-catalog-panel { margin-top: 14px; }
+.model-catalog-panel > summary { cursor: pointer; list-style: none; }
+.model-catalog-panel > summary::-webkit-details-marker { display: none; }
+.model-catalog-summary { position: relative; padding-right: 92px; }
+.model-catalog-summary::after { content: "Desplegar"; position: absolute; right: 16px; color: var(--muted); font-size: 11px; }
+.model-catalog-panel[open] .model-catalog-summary::after { content: "Plegar"; }
+.model-catalog-grid { padding: 14px 16px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.model-catalog-card { min-height: 78px; padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--radius); display: grid; align-content: start; gap: 5px; }
+.model-catalog-card strong { font-size: 12px; overflow-wrap: anywhere; }
+.model-catalog-card span { font-size: 11px; font-weight: 650; }
+.model-catalog-card small { font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; opacity: .78; }
 
 .comparison-grid { display: grid; grid-template-columns: minmax(280px, .35fr) minmax(680px, 1fr); gap: 14px; align-items: start; }
 .task-stack { display: grid; }
@@ -243,6 +274,7 @@ td small { display: block; margin-top: 3px; color: #718599; }
   .health-detail { grid-column: 1 / -1; white-space: normal; }
   .field-pair, .proposer-row { grid-template-columns: 1fr; }
   .config-grid { grid-template-columns: 1fr; }
+  .provider-fields { grid-template-columns: 1fr; }
   .timeline-row { grid-template-columns: 1fr; gap: 8px; padding: 12px 0; }
   .lane-metrics { justify-items: start; }
   .comparison-summary { grid-template-columns: 1fr; }
