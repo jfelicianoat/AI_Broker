@@ -47,6 +47,30 @@
             <p>{{ task_result.error_message }}</p>
           </div>
         {% endif %}
+        {% if task_result.skipped_proposers %}
+          <div class="alert warning">
+            <strong>Modelos omitidos durante el consenso</strong>
+            <p>La tarea continuo porque habia quorum suficiente, pero estos modelos fallaron y no aportaron propuesta.</p>
+            <ul>
+              {% for item in task_result.skipped_proposers %}
+                <li>
+                  {{ item.role or 'proposer' }} - {{ item.provider }}/{{ item.deployment }}/{{ item.model }}
+                  {% if item.code %}- {{ item.code }}{% endif %}
+                  {% if item.message %}: {{ item.message }}{% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% elif task_result.warnings %}
+          <div class="alert warning">
+            <strong>Avisos del consenso</strong>
+            <ul>
+              {% for warning in task_result.warnings %}
+                <li>{{ warning }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
 
         <section class="task-detail-grid">
           <article class="panel task-result-panel">

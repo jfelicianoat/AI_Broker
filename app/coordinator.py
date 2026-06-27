@@ -130,6 +130,7 @@ class ConsensusCoordinator:
                     "code": error.code,
                     "message": str(error),
                     "retryable": error.retryable,
+                    **({"details": error.details} if getattr(error, "details", None) else {}),
                     **context,
                 },
                 clear_queue_position=True,
@@ -256,11 +257,14 @@ class ConsensusCoordinator:
         self._write_request_artifacts(repository, task_id, run_id, request, resource_plan.model_dump(mode="json"))
 
         proposals: list[tuple[ModelReference, ModelOutput]] = []
+        skipped_proposers: list[dict[str, Any]] = []
         completed = 0
+        attempted = 0
         max_parallel_launched = 0
         repository.update_task(task_id, TaskStatus.proposing, progress={**progress, "phase": TaskStatus.proposing.value})
         for wave_index, labels in enumerate(resource_plan.waves, start=1):
-            active_models = proposers[completed : completed + len(labels)]
+            active_models = proposers[attempted : attempted + len(labels)]
+            attempted += len(active_models)
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return
@@ -278,17 +282,34 @@ class ConsensusCoordinator:
                     "invocations_completed": completed,
                     "wave_current": wave_index,
                     "active_invocations": [item.model_dump(mode="json") for item in launch_models],
+                    "skipped_proposers": skipped_proposers,
                     "max_parallel_invocations_launched": max_parallel_launched,
                     "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
                 },
             )
-            wave_outputs = await self._run_proposer_wave(
+            wave_outputs, wave_skipped = await self._run_proposer_wave(
                 repository,
                 task_id,
                 request,
                 active_models,
                 proposals,
             )
+            skipped_proposers.extend(wave_skipped)
+            if wave_skipped and not wave_outputs:
+                repository.update_task(
+                    task_id,
+                    TaskStatus.proposing,
+                    progress={
+                        **progress,
+                        "phase": TaskStatus.proposing.value,
+                        "invocations_completed": completed,
+                        "wave_current": wave_index,
+                        "active_invocations": [],
+                        "skipped_proposers": skipped_proposers,
+                        "max_parallel_invocations_launched": max_parallel_launched,
+                        "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
+                    },
+                )
 
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
@@ -316,6 +337,7 @@ class ConsensusCoordinator:
                         "invocations_completed": completed,
                         "wave_current": wave_index,
                         "active_invocations": [],
+                        "skipped_proposers": skipped_proposers,
                         "max_parallel_invocations_launched": max_parallel_launched,
                         "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
                     },
@@ -344,6 +366,7 @@ class ConsensusCoordinator:
                 "invocations_completed": len(proposals),
                 "wave_current": len(resource_plan.waves),
                 "active_invocations": [arbiter.model_dump(mode="json")],
+                "skipped_proposers": skipped_proposers,
                 "max_parallel_invocations_launched": max_parallel_launched,
                 "cost_actual_usd": sum(output.cost_usd for _, output in proposals),
             },
@@ -382,10 +405,12 @@ class ConsensusCoordinator:
                 "level": request.execution.preset.value,
                 "confidence": None,
                 "proposers_completed": len(proposals),
+                "proposers_failed": len(skipped_proposers),
                 "rounds": 1,
                 "remaining_disagreements": [],
-                "warnings": [],
+                "warnings": [self._skipped_proposer_warning(item) for item in skipped_proposers],
             },
+            "skipped_proposers": skipped_proposers,
             "scheduling": {
                 "requested": request.execution.scheduling.value,
                 "mode_used": resource_plan.mode.value,
@@ -409,6 +434,7 @@ class ConsensusCoordinator:
                 "phase": TaskStatus.completed.value,
                 "invocations_completed": len(all_outputs),
                 "active_invocations": [],
+                "skipped_proposers": skipped_proposers,
                 "max_parallel_invocations_launched": max_parallel_launched,
                 "cost_actual_usd": result["usage"]["cost_usd"],
             },
@@ -422,7 +448,7 @@ class ConsensusCoordinator:
         request: TaskCreateRequest,
         active_models: list[ModelReference],
         completed_proposals: list[tuple[ModelReference, ModelOutput]],
-    ) -> list[tuple[ModelReference, ModelOutput]]:
+    ) -> tuple[list[tuple[ModelReference, ModelOutput]], list[dict[str, Any]]]:
         completed_outputs = [output for _, output in completed_proposals]
         invocation_request = self._with_wave_budget(request, completed_outputs, len(active_models))
 
@@ -448,14 +474,34 @@ class ConsensusCoordinator:
                 results.append(await invoke(ordinal, model))
 
         outputs: list[tuple[ModelReference, ModelOutput]] = []
+        skipped: list[dict[str, Any]] = []
         for model, output, error in results:
             if error is not None:
                 if not error.retryable:
                     raise error
+                skipped_item = self._skipped_proposer_detail(model, error)
+                repository.add_event(task_id, "proposer.skipped", skipped_item)
+                skipped.append(skipped_item)
                 continue
             assert output is not None
             outputs.append((model, output))
-        return outputs
+        return outputs, skipped
+
+    def _skipped_proposer_detail(self, model: ModelReference, error: ProviderError) -> dict[str, Any]:
+        return {
+            "stage": error.stage or "proposing",
+            "role": error.role or model.role or "proposer",
+            "provider": error.provider or model.provider,
+            "deployment": error.deployment or model.deployment,
+            "model": error.model or model.model,
+            "code": error.code,
+            "message": str(error),
+            "retryable": error.retryable,
+        }
+
+    def _skipped_proposer_warning(self, item: dict[str, Any]) -> str:
+        model_name = f"{item.get('provider')}/{item.get('deployment')}/{item.get('model')}"
+        return f"{item.get('role', 'proposer')} omitido ({model_name}): {item.get('code')}"
 
     def _with_wave_budget(
         self,

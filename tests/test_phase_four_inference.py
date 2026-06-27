@@ -113,6 +113,9 @@ class PhaseFourOllamaTests(unittest.IsolatedAsyncioTestCase):
             await provider.generate(request, "tiny", request.content.prompt)
         await provider.close()
         self.assertEqual(raised.exception.code, "CONTEXT_LIMIT_EXCEEDED")
+        self.assertEqual(raised.exception.details["reason"], "prompt_context_exceeded")
+        self.assertEqual(raised.exception.details["context_window"], 10)
+        self.assertEqual(raised.exception.details["max_output_tokens_allowed"], 0)
         self.assertFalse(chat_called)
 
     async def test_embedding_uses_embed_endpoint_and_returns_one_numeric_vector(self) -> None:

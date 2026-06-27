@@ -939,6 +939,14 @@ def _task_result_view(detail: DashboardTaskDetail) -> dict[str, Any]:
     active = detail.progress.get("active_invocations")
     if not isinstance(active, list):
         active = []
+    skipped_proposers = result.get("skipped_proposers")
+    if not isinstance(skipped_proposers, list):
+        skipped_proposers = detail.progress.get("skipped_proposers")
+    if not isinstance(skipped_proposers, list):
+        skipped_proposers = []
+    warnings = (result.get("consensus") or {}).get("warnings") if isinstance(result.get("consensus"), dict) else []
+    if not isinstance(warnings, list):
+        warnings = []
     expected_total = detail.progress.get("invocations_total")
     if not isinstance(expected_total, int):
         expected_total = _expected_invocations(detail)
@@ -952,6 +960,8 @@ def _task_result_view(detail: DashboardTaskDetail) -> dict[str, Any]:
         "error_deployment": error.get("deployment") if isinstance(error, dict) else None,
         "error_model": error.get("model") if isinstance(error, dict) else None,
         "active_invocations": active,
+        "skipped_proposers": skipped_proposers,
+        "warnings": warnings,
         "expected_invocations": expected_total,
     }
 

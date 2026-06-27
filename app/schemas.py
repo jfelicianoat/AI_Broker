@@ -298,6 +298,20 @@ class UsageResponse(StrictBaseModel):
     providers: dict[str, dict[str, float]]
 
 
+class ModelContextResponse(StrictBaseModel):
+    provider: str
+    deployment: str
+    model: str
+    context_window: int | None
+    context_window_known: bool
+    capabilities: list[str] = Field(default_factory=list)
+    features: dict[str, dict[str, Literal["supported", "unsupported", "unknown"]]] = Field(default_factory=dict)
+    feature_notes: list[str] = Field(default_factory=list)
+    compatibility: str | None = None
+    compatibility_checked_at: str | None = None
+    compatibility_error: str | None = None
+
+
 class BrokerCapabilitiesResponse(StrictBaseModel):
     contract_version: str
     strategies: list[ExecutionStrategy]

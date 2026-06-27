@@ -33,6 +33,17 @@
       <div><dt>Coste real</dt><dd>${{ '%.4f'|format(active.task.cost_actual_usd) }}</dd></div>
       <div><dt>Actualizada</dt><dd>{{ active.task.updated_at|short_date }}</dd></div>
     </dl>
+    {% set skipped_models = active.progress.get('skipped_proposers', []) %}
+    {% if skipped_models %}
+      <div class="alert warning">
+        <strong>Modelos omitidos</strong>
+        <ul>
+          {% for item in skipped_models %}
+            <li>{{ item.role or 'proposer' }} - {{ item.provider }}/{{ item.deployment }}/{{ item.model }}{% if item.code %} - {{ item.code }}{% endif %}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
     <div class="phase-track" aria-label="Procesamiento en curso"><span></span></div>
     <details class="prompt-preview">
       <summary>Vista del prompt</summary>

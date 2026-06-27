@@ -6,7 +6,16 @@ import time
 from fastapi.testclient import TestClient
 
 import app.dashboard_web as dashboard_web
-from app.config import BrokerConfig, LoggingConfig, PersistenceConfig, ProcessingConfig, load_config
+from app.config import (
+    BrokerConfig,
+    LoggingConfig,
+    OpenAICompatibleModelConfig,
+    OpenAICompatibleProviderConfig,
+    PersistenceConfig,
+    ProcessingConfig,
+    ProvidersConfig,
+    load_config,
+)
 from app.dashboard_web import load_dashboard_resources
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.main import create_app
@@ -64,9 +73,31 @@ class TimelineProbeProvider(BootstrapModelProvider):
         )
 
 
+class RetryableFirstProposerProvider(TimelineProbeProvider):
+    async def propose(self, request, model, ordinal):
+        if model.role == "generalist":
+            raise ProviderError("MODEL_ERROR", "fallo retryable", retryable=True)
+        return await super().propose(request, model, ordinal)
+
+
 class FailingSynthesisProvider(TimelineProbeProvider):
     async def synthesize(self, request, model, proposals):
         raise ProviderError("MODEL_ERROR", "fallo controlado", retryable=True)
+
+
+class PromptTooLargeProvider(BootstrapModelProvider):
+    async def propose(self, request, model, ordinal):
+        raise ProviderError(
+            "CONTEXT_LIMIT_EXCEEDED",
+            "El prompt ya supera la ventana del modelo",
+            details={
+                "reason": "prompt_context_exceeded",
+                "prompt_tokens_estimate": 1200,
+                "context_window": 1000,
+                "max_output_tokens_requested": 4000,
+                "max_output_tokens_allowed": 0,
+            },
+        )
 
 
 class UnavailableResourceProvider(BootstrapModelProvider):
@@ -141,6 +172,97 @@ def test_models_endpoint_is_available(tmp_path: Path) -> None:
 
         assert response.status_code == 200
         assert response.json()["models"][0]["deployment"] == "bootstrap"
+
+
+def test_model_context_endpoint_returns_llm_context_window(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/models/context",
+            params={
+                "provider": "ollama",
+                "deployment": "bootstrap",
+                "model": "bootstrap-single",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "ollama"
+    assert payload["deployment"] == "bootstrap"
+    assert payload["model"] == "bootstrap-single"
+    assert payload["context_window"] == 1_000_000
+    assert payload["context_window_known"] is True
+    assert "completion" in payload["capabilities"]
+    assert payload["features"]["modalities"]["text_input"] == "supported"
+    assert payload["features"]["modalities"]["embedding_output"] == "supported"
+    assert payload["features"]["tools"]["web_search"] == "unknown"
+    assert payload["features"]["tools"]["computer_use"] == "unknown"
+    assert payload["features"]["understanding"]["coding"] == "unknown"
+    assert payload["features"]["generation"]["structured_outputs"] == "unknown"
+    assert payload["features"]["operations"]["fine_tuning"] == "unknown"
+    assert payload["features"]["deployment"]["local_execution"] == "unsupported"
+    assert payload["features"]["deployment"]["offline_capable"] == "unknown"
+    assert payload["features"]["broker_support"]["mixture_proposer"] == "supported"
+    assert payload["feature_notes"]
+
+
+def test_model_context_endpoint_infers_multimodal_features(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-model-context-custom.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="real"),
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="nvidia",
+                    enabled=True,
+                    base_url="https://integrate.api.nvidia.com/v1",
+                    models=[
+                        OpenAICompatibleModelConfig(
+                            name="microsoft/phi-4-multimodal-instruct",
+                            context_window=262144,
+                            compatibility="compatible",
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.get(
+            "/api/v1/models/context",
+            params={
+                "provider": "nvidia",
+                "deployment": "cloud",
+                "model": "microsoft/phi-4-multimodal-instruct",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["context_window"] == 262144
+    assert payload["features"]["modalities"]["image_input"] == "supported"
+    assert payload["features"]["modalities"]["multimodal_input"] == "supported"
+    assert payload["features"]["understanding"]["ocr"] == "supported"
+    assert payload["features"]["understanding"]["chart_understanding"] == "supported"
+    assert payload["features"]["reasoning"]["mixture_compatible"] == "supported"
+    assert payload["features"]["tools"]["deep_research"] == "unknown"
+    assert payload["features"]["deployment"]["cloud_execution"] == "supported"
+    assert any("image_input inferido" in item for item in payload["feature_notes"])
+
+
+def test_model_context_endpoint_returns_404_for_unknown_model(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/models/context",
+            params={
+                "provider": "ollama",
+                "deployment": "bootstrap",
+                "model": "missing",
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "MODEL_NOT_FOUND"
 
 
 def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
@@ -857,6 +979,66 @@ def test_slow_parallel_fails_before_launch_when_capacity_is_insufficient(tmp_pat
     assert probe.max_active == 0
 
 
+def test_slow_waves_do_not_repeat_models_after_retryable_proposer_failure(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-waves-retryable.db")),
+        processing=ProcessingConfig(
+            auto_dispatch=False,
+            provider_mode="bootstrap",
+            max_parallel_invocations=3,
+        ),
+    )
+    provider = RetryableFirstProposerProvider()
+    proposers = [
+        {"provider": "ollama", "deployment": "test", "model": "m1", "role": "generalist"},
+        {"provider": "ollama", "deployment": "test", "model": "m2", "role": "specialist"},
+        {"provider": "ollama", "deployment": "test", "model": "m3", "role": "skeptic"},
+        {"provider": "ollama", "deployment": "test", "model": "m4", "role": "analyst"},
+        {"provider": "ollama", "deployment": "test", "model": "m5", "role": "reviewer"},
+    ]
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.provider = provider
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "waves:retryable-proposer",
+                "content": {"prompt": "Compara cinco perspectivas"},
+                "model_requirements": {"allowed_providers": ["ollama"]},
+                "execution": {
+                    "strategy": "mixture_of_agents",
+                    "preset": "slow",
+                    "scheduling": "adaptive",
+                    "max_proposers": 5,
+                    "selection": {
+                        "mode": "manual",
+                        "proposer_count": 5,
+                        "proposers": proposers,
+                        "arbiter": {"provider": "ollama", "deployment": "test", "model": "arbiter"},
+                    },
+                },
+            },
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{created['task_id']}").json()
+        page = client.get(f"/dashboard/tasks/{created['task_id']}")
+
+    invoked_proposers = [
+        item["model"]
+        for item in detail["invocations"]
+        if item["role"] != "arbiter"
+    ]
+    skipped = detail["result"]["skipped_proposers"]
+    assert detail["task"]["status"] == "completed"
+    assert invoked_proposers == ["m2", "m3", "m4", "m5"]
+    assert len(invoked_proposers) == len(set(invoked_proposers))
+    assert detail["result"]["consensus"]["proposers_failed"] == 1
+    assert skipped[0]["model"] == "m1"
+    assert skipped[0]["role"] == "generalist"
+    assert "m1" in detail["result"]["consensus"]["warnings"][0]
+    assert "Modelos omitidos" in page.text
+    assert "ollama/test/m1" in page.text
+
+
 def test_comparison_dashboard_renders_measured_slow_overlap(tmp_path: Path) -> None:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker-comparison.db")),
@@ -939,6 +1121,34 @@ def test_execution_timeout_cancels_provider_and_persists_typed_error(tmp_path: P
     assert task["error"]["code"] == "TASK_TIMEOUT"
     assert task["progress"]["timeout_seconds"] == 1
     assert probe.cancelled
+
+
+def test_context_limit_error_json_explains_prompt_exceeds_model_window(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-context-error.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.provider = PromptTooLargeProvider()
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "test:context:prompt-too-large",
+                "content": {"prompt": "Prompt enorme"},
+            },
+        ).json()
+
+        client.post("/api/v1/dispatcher/tick")
+        task = client.get(created["status_url"]).json()
+
+    assert task["status"] == "failed"
+    assert task["error"]["code"] == "CONTEXT_LIMIT_EXCEEDED"
+    assert task["error"]["details"]["reason"] == "prompt_context_exceeded"
+    assert task["error"]["details"]["prompt_tokens_estimate"] == 1200
+    assert task["error"]["details"]["context_window"] == 1000
+    assert task["error"]["details"]["max_output_tokens_allowed"] == 0
+    assert task["error"]["stage"] == "generating"
+    assert task["error"]["model"] == "bootstrap-1"
 
 
 def test_standard_consensus_fails_until_phase_c(tmp_path: Path) -> None:
