@@ -312,6 +312,27 @@ class ModelContextResponse(StrictBaseModel):
     compatibility_error: str | None = None
 
 
+class ModelAvailabilityItem(StrictBaseModel):
+    provider: str
+    deployment: str
+    model: str
+    availability: Literal["online", "offline", "unknown", "incompatible"]
+    dispatchable: bool
+    reason: str
+    provider_status: Literal["healthy", "degraded", "unavailable", "unknown"]
+    model_status: str | None = None
+    compatibility: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    context_window: int | None = None
+    compatibility_error: str | None = None
+
+
+class ModelAvailabilityResponse(StrictBaseModel):
+    checked_at: datetime
+    items: list[ModelAvailabilityItem]
+    counts: dict[str, int]
+
+
 class BrokerCapabilitiesResponse(StrictBaseModel):
     contract_version: str
     strategies: list[ExecutionStrategy]
