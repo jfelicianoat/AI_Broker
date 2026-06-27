@@ -219,6 +219,42 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.content, "nvidia")
         self.assertEqual(output.cost_usd, 0.00002)
 
+    async def test_caps_max_tokens_to_model_context_window(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            self.assertEqual(body["max_tokens"], 84)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "capado"}}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 3},
+                },
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[
+                OpenAICompatibleModelConfig(
+                    name="small-context",
+                    context_window=600,
+                )
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(
+            idempotency_key="nvidia:cap-context",
+            content={"prompt": "hola"},
+            generation={"max_output_tokens": 1000},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        )
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            output = await provider.generate(request, "small-context", "hola")
+        await provider.close()
+
+        self.assertEqual(output.content, "capado")
+
     async def test_includes_provider_error_body_on_http_errors(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

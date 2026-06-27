@@ -23,10 +23,18 @@ from app.schemas import (
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,65 @@ def enforce_context_limit(request: TaskCreateRequest, context_window: int | None
             "CONTEXT_LIMIT_EXCEEDED",
             f"La inferencia requiere como máximo conservador {required} tokens y el modelo admite {context_window}",
         )
+
+def request_with_context_capped_output(
+    request: TaskCreateRequest,
+    context_window: int | None,
+    prompt: str | None = None,
+) -> TaskCreateRequest:
+    try:
+        window = int(context_window) if context_window is not None else None
+    except (TypeError, ValueError):
+        window = None
+    if window is None or request.inference_kind != InferenceKind.chat:
+        enforce_context_limit(request, window, prompt)
+        return request
+    required = estimate_required_context(request, prompt)
+    if required <= window:
+        return request
+    value = request.content.prompt if prompt is None else prompt
+    input_upper_bound = max(1, len(value.encode("utf-8")))
+    if request.output.format == OutputFormat.json and request.output.json_schema is not None:
+        input_upper_bound += len(json.dumps(
+            request.output.json_schema, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8"))
+    available_output_tokens = window - input_upper_bound - 512
+    if available_output_tokens < 1:
+        raise ProviderError(
+            "CONTEXT_LIMIT_EXCEEDED",
+            f"La inferencia requiere como maximo conservador {required} tokens y el modelo admite {window}",
+            details={
+                "reason": "prompt_context_exceeded",
+                "prompt_tokens_estimate": input_upper_bound,
+                "output_reserve_tokens": request.generation.max_output_tokens + 512,
+                "context_window": window,
+                "max_output_tokens_requested": request.generation.max_output_tokens,
+                "max_output_tokens_allowed": 0,
+                "required_context_tokens": required,
+                "message": "El prompt ya supera la ventana del modelo; no se puede corregir reduciendo max_output_tokens.",
+            },
+        )
+    return request.model_copy(
+        update={
+            "generation": request.generation.model_copy(
+                update={"max_output_tokens": min(request.generation.max_output_tokens, available_output_tokens)},
+            ),
+        },
+    )
+
+
+def context_fits_with_capped_output(
+    request: TaskCreateRequest,
+    context_window: int | None,
+    prompt: str | None = None,
+) -> bool:
+    try:
+        request_with_context_capped_output(request, context_window, prompt)
+        return True
+    except ProviderError as error:
+        if error.code in {"CONTEXT_LIMIT_EXCEEDED", "CONTEXT_WINDOW_UNKNOWN"}:
+            return False
+        raise
 
 
 def provider_http_error_message(error: httpx.HTTPStatusError) -> str:
@@ -247,7 +314,7 @@ class OllamaProvider:
         entry = next((item for item in catalog if item["name"] == model), None)
         if entry is None:
             raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model}")
-        enforce_context_limit(request, entry.get("context_window"), prompt)
+        inference_request = request_with_context_capped_output(request, entry.get("context_window"), prompt)
         started = datetime.now(timezone.utc)
         try:
             async with self.lifecycle.lease(model, int(entry.get("size_bytes") or 0)):
@@ -257,12 +324,12 @@ class OllamaProvider:
                     "stream": False,
                     "keep_alive": -1,
                     "options": {
-                        "temperature": request.generation.temperature,
-                        "num_predict": request.generation.max_output_tokens,
+                        "temperature": inference_request.generation.temperature,
+                        "num_predict": inference_request.generation.max_output_tokens,
                     },
                 }
-                if request.output.format == OutputFormat.json:
-                    payload_request["format"] = request.output.json_schema
+                if inference_request.output.format == OutputFormat.json:
+                    payload_request["format"] = inference_request.output.json_schema
                 response = await self.client.post("/api/chat", json=payload_request)
                 response.raise_for_status()
                 payload = response.json()
@@ -359,13 +426,13 @@ class DeepSeekProvider:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
 
     async def generate(self, request: TaskCreateRequest, model: str, prompt: str) -> ModelOutput:
-        enforce_context_limit(request, self.config.context_window, prompt)
+        inference_request = request_with_context_capped_output(request, self.config.context_window, prompt)
         if request.model_requirements.max_cost_usd is not None:
             # UTF-8 bytes are a conservative upper bound for normal tokenizer input.
             estimated_input = max(1, len(prompt.encode("utf-8")))
             estimated_cost = (
                 estimated_input * self.config.input_cost_per_million
-                + request.generation.max_output_tokens * self.config.output_cost_per_million
+                + inference_request.generation.max_output_tokens * self.config.output_cost_per_million
             ) / 1_000_000
             if estimated_cost > request.model_requirements.max_cost_usd:
                 raise ProviderError(
@@ -376,11 +443,11 @@ class DeepSeekProvider:
         try:
             request_payload: dict[str, Any] = {
                 "model": model, "messages": [{"role": "user", "content": prompt}],
-                "temperature": request.generation.temperature,
-                "max_tokens": request.generation.max_output_tokens,
+                "temperature": inference_request.generation.temperature,
+                "max_tokens": inference_request.generation.max_output_tokens,
                 "stream": False,
             }
-            if request.output.format == OutputFormat.json:
+            if inference_request.output.format == OutputFormat.json:
                 request_payload["response_format"] = {"type": "json_object"}
             response = await self.client.post("/chat/completions", headers=self._headers(), json=request_payload)
             response.raise_for_status()
@@ -563,13 +630,13 @@ class OpenAICompatibleProvider:
             raise ProviderError("MODEL_UNAVAILABLE", f"Modelo {self.config.id} no disponible: {model}")
         if "completion" not in set(entry.get("capabilities") or []):
             raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad completion")
-        enforce_context_limit(request, entry.get("context_window"), prompt)
+        inference_request = request_with_context_capped_output(request, entry.get("context_window"), prompt)
         input_cost, output_cost = self._costs(model)
         if request.model_requirements.max_cost_usd is not None:
             estimated_input = max(1, len(prompt.encode("utf-8")))
             estimated_cost = (
                 estimated_input * input_cost
-                + request.generation.max_output_tokens * output_cost
+                + inference_request.generation.max_output_tokens * output_cost
             ) / 1_000_000
             if estimated_cost > request.model_requirements.max_cost_usd:
                 raise ProviderError(
@@ -581,11 +648,11 @@ class OpenAICompatibleProvider:
             request_payload: dict[str, Any] = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": request.generation.temperature,
-                "max_tokens": request.generation.max_output_tokens,
+                "temperature": inference_request.generation.temperature,
+                "max_tokens": inference_request.generation.max_output_tokens,
                 "stream": False,
             }
-            if request.output.format == OutputFormat.json:
+            if inference_request.output.format == OutputFormat.json:
                 request_payload["response_format"] = {"type": "json_object"}
             response = await self.client.post("/chat/completions", headers=self._headers(), json=request_payload)
             response.raise_for_status()
@@ -720,7 +787,7 @@ class RoutedModelProvider:
         required_context = estimate_required_context(request)
         context_catalog = [
             item for item in capability_catalog
-            if item.get("context_window") is not None and int(item["context_window"]) >= required_context
+            if context_fits_with_capped_output(request, item.get("context_window"))
         ]
         target = request.model_requirements.target_model
         if target is not None:
