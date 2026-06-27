@@ -4,3 +4,4 @@
 /ai_broker.egg-info/
 /state/
 *.pyc
+/logs/
