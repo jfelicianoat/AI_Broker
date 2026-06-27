@@ -31,6 +31,8 @@ from app.schemas import (
     DashboardTaskPage,
     HealthDependency,
     HealthResponse,
+    ModelAvailabilityItem,
+    ModelAvailabilityResponse,
     ModelContextResponse,
     QueueReorderRequest,
     QueueResponse,
@@ -205,6 +207,32 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/models")
     async def list_models() -> dict[str, object]:
         return {"models": await provider.models()}
+
+    @app.get("/api/v1/models/availability", response_model=ModelAvailabilityResponse)
+    async def model_availability(
+        provider_filter: str | None = Query(default=None, alias="provider", min_length=1, max_length=64),
+        deployment_filter: str | None = Query(default=None, alias="deployment", min_length=1, max_length=64),
+        capability: str | None = Query(default=None, min_length=1, max_length=64),
+        only_dispatchable: bool = Query(default=False),
+    ) -> ModelAvailabilityResponse:
+        checked_at = datetime.now(timezone.utc)
+        catalog = await provider.models()
+        health = await provider.health()
+        items = [
+            _model_availability_item(entry, health)
+            for entry in catalog
+            if provider_filter is None or str(entry.get("provider") or "").lower() == provider_filter.lower()
+            if deployment_filter is None or str(entry.get("deployment") or "").lower() == deployment_filter.lower()
+            if capability is None or capability.lower() in {str(item).lower() for item in entry.get("capabilities") or []}
+        ]
+        if only_dispatchable:
+            items = [item for item in items if item.dispatchable]
+        counts = {"online": 0, "offline": 0, "unknown": 0, "incompatible": 0, "dispatchable": 0}
+        for item in items:
+            counts[item.availability] += 1
+            if item.dispatchable:
+                counts["dispatchable"] += 1
+        return ModelAvailabilityResponse(checked_at=checked_at, items=items, counts=counts)
 
     @app.get("/api/v1/models/context", response_model=ModelContextResponse)
     async def model_context(
@@ -385,6 +413,67 @@ async def _health_response(db: Database, provider) -> HealthResponse:
     elif "degraded" in states:
         status = "degraded"
     return HealthResponse(status=status, checked_at=checked_at, dependencies=dependencies)
+
+
+def _model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, Any]]) -> ModelAvailabilityItem:
+    provider_name = str(entry.get("provider") or "unknown")
+    deployment_name = str(entry.get("deployment") or "unknown")
+    provider_status = str(
+        (
+            health.get(provider_name.lower())
+            or health.get(provider_name)
+            or health.get(deployment_name.lower())
+            or health.get(deployment_name)
+            or {}
+        ).get("status")
+        or "unknown"
+    )
+    if provider_status not in {"healthy", "degraded", "unavailable"}:
+        provider_status = "unknown"
+    model_status = str(entry.get("status") or "unknown")
+    compatibility = str(entry.get("compatibility") or "unknown")
+    capabilities = [str(item) for item in entry.get("capabilities") or []]
+    context_window = entry.get("context_window")
+    try:
+        context_window = int(context_window) if context_window is not None else None
+    except (TypeError, ValueError):
+        context_window = None
+
+    if provider_status == "unavailable":
+        availability = "offline"
+        dispatchable = False
+        reason = "Proveedor no disponible en este momento."
+    elif compatibility == "incompatible":
+        availability = "incompatible"
+        dispatchable = False
+        reason = entry.get("compatibility_error") or "Modelo marcado como incompatible con el endpoint de inferencia."
+    elif compatibility == "compatible":
+        availability = "online"
+        dispatchable = "completion" in {item.lower() for item in capabilities}
+        reason = "Modelo compatible y proveedor disponible." if dispatchable else "Modelo disponible, pero no declara completion."
+    elif model_status in {"available", "online"} and provider_status in {"healthy", "degraded"}:
+        availability = "unknown"
+        dispatchable = False
+        reason = "Proveedor disponible, pero compatibilidad del modelo no comprobada."
+    else:
+        availability = "unknown"
+        dispatchable = False
+        reason = "No hay suficiente informacion para confirmar disponibilidad operativa."
+
+    return ModelAvailabilityItem(
+        provider=provider_name,
+        deployment=deployment_name,
+        model=str(entry.get("name") or entry.get("model") or "unknown"),
+        availability=availability,
+        dispatchable=dispatchable,
+        reason=str(reason),
+        provider_status=provider_status,
+        model_status=model_status,
+        compatibility=compatibility,
+        capabilities=capabilities,
+        context_window=context_window,
+        compatibility_error=entry.get("compatibility_error"),
+    )
 
 
 def _model_feature_profile(entry: dict[str, Any]) -> dict[str, Any]:

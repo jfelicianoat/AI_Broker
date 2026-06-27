@@ -174,6 +174,69 @@ def test_models_endpoint_is_available(tmp_path: Path) -> None:
         assert response.json()["models"][0]["deployment"] == "bootstrap"
 
 
+def test_model_availability_endpoint_marks_dispatchable_models(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        response = client.get("/api/v1/models/availability")
+        filtered = client.get("/api/v1/models/availability?only_dispatchable=true")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["counts"]["online"] == 1
+    assert payload["counts"]["dispatchable"] == 1
+    assert payload["items"][0]["availability"] == "online"
+    assert payload["items"][0]["dispatchable"] is True
+    assert payload["items"][0]["provider_status"] == "healthy"
+    assert payload["items"][0]["model"] == "bootstrap-single"
+    assert filtered.json()["items"][0]["model"] == "bootstrap-single"
+
+
+def test_model_availability_endpoint_marks_incompatible_and_unknown_models(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-model-availability-custom.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="real"),
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="nvidia",
+                    enabled=True,
+                    base_url="https://integrate.api.nvidia.com/v1",
+                    models=[
+                        OpenAICompatibleModelConfig(
+                            name="chat-ok",
+                            context_window=128000,
+                            compatibility="compatible",
+                        ),
+                        OpenAICompatibleModelConfig(
+                            name="vision-only",
+                            context_window=128000,
+                            compatibility="incompatible",
+                            compatibility_error="No compatible con chat completions",
+                        ),
+                        OpenAICompatibleModelConfig(
+                            name="pending",
+                            context_window=128000,
+                            compatibility="unknown",
+                        ),
+                    ],
+                )
+            ]
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.get("/api/v1/models/availability?provider=nvidia")
+        dispatchable = client.get("/api/v1/models/availability?provider=nvidia&only_dispatchable=true")
+
+    assert response.status_code == 200
+    by_model = {item["model"]: item for item in response.json()["items"]}
+    assert by_model["chat-ok"]["availability"] == "online"
+    assert by_model["chat-ok"]["dispatchable"] is True
+    assert by_model["vision-only"]["availability"] == "incompatible"
+    assert by_model["vision-only"]["dispatchable"] is False
+    assert by_model["pending"]["availability"] == "unknown"
+    assert by_model["pending"]["dispatchable"] is False
+    assert [item["model"] for item in dispatchable.json()["items"]] == ["chat-ok"]
+
+
 def test_model_context_endpoint_returns_llm_context_window(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         response = client.get(
