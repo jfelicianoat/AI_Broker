@@ -154,6 +154,15 @@
     return match ? Number(match[1]) * 1000 : null;
   }
 
+  function refreshPaused(element) {
+    const panel = element.closest("[data-refresh-pauseable]") || element;
+    const active = document.activeElement;
+    return Boolean(
+      panel.matches("[data-refresh-pauseable]") &&
+      (panel.matches(":hover") || (active && panel.contains(active)))
+    );
+  }
+
   function bind(root) {
     root.querySelectorAll("[hx-get], [hx-post], [hx-delete]").forEach((element) => {
       if (processed.has(element)) return;
@@ -168,6 +177,10 @@
       if (interval) {
         const schedule = () => window.setTimeout(async () => {
           if (!document.contains(element)) return;
+          if (refreshPaused(element)) {
+            schedule();
+            return;
+          }
           await requestAndSwap(element, method, url);
           schedule();
         }, interval);

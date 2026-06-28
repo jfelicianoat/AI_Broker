@@ -48,7 +48,8 @@
         <section id="summary-panel"
                  hx-get="/dashboard/fragments/summary"
                  hx-trigger="every 10s"
-                 hx-swap="innerHTML">
+                 hx-swap="innerHTML"
+                 data-refresh-pauseable>
           {% include 'fragments/summary.html' %}
         </section>
 
@@ -57,7 +58,8 @@
                class="panel queue-panel"
                hx-get="/dashboard/fragments/queue"
                hx-trigger="every 5s"
-               hx-swap="outerHTML">
+               hx-swap="outerHTML"
+               data-refresh-pauseable>
             {% include 'fragments/queue.html' %}
           </div>
 
@@ -65,7 +67,8 @@
                class="panel active-panel"
                hx-get="/dashboard/fragments/active"
                hx-trigger="every 3s"
-               hx-swap="outerHTML">
+               hx-swap="outerHTML"
+               data-refresh-pauseable>
             {% include 'fragments/active.html' %}
           </div>
 
@@ -73,7 +76,8 @@
                class="panel health-panel"
                hx-get="/dashboard/fragments/health"
                hx-trigger="every 30s"
-               hx-swap="outerHTML">
+               hx-swap="outerHTML"
+               data-refresh-pauseable>
             {% include 'fragments/health.html' %}
           </div>
 
@@ -81,7 +85,8 @@
                class="panel resources-panel"
                hx-get="/dashboard/fragments/resources"
                hx-trigger="every 10s"
-               hx-swap="outerHTML">
+               hx-swap="outerHTML"
+               data-refresh-pauseable>
             {% include 'fragments/resources.html' %}
           </div>
 
