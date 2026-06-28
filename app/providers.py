@@ -7,11 +7,19 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 import httpx
 
-from app.config import BrokerConfig, DeepSeekConfig, OllamaConfig, OpenAICompatibleProviderConfig
+from app.config import (
+    BrokerConfig,
+    DeepSeekConfig,
+    HuggingFaceLocalConfig,
+    HuggingFaceLocalModelConfig,
+    OllamaConfig,
+    OpenAICompatibleProviderConfig,
+)
 from app.schemas import (
     ExecutionPreset,
     ExecutionStrategy,
@@ -20,6 +28,25 @@ from app.schemas import (
     OutputFormat,
     TaskCreateRequest,
 )
+
+
+PROBE_HARD_MAX_MODELS = 20
+
+
+def infer_openai_compatible_capabilities(model_name: str) -> list[str]:
+    name = model_name.lower()
+    capabilities: set[str] = set()
+    if any(hint in name for hint in ("embed", "embedding", "bge-", "e5-", "nvclip", "clip")):
+        capabilities.add("embedding")
+    if any(hint in name for hint in ("rerank", "ranker")):
+        capabilities.add("reranking")
+    if any(hint in name for hint in ("parse", "ocr")):
+        capabilities.add("document")
+    if any(hint in name for hint in ("video", "detector", "gliner", "ising-calibration", "reward")):
+        capabilities.add("specialized")
+    if not capabilities:
+        capabilities.add("completion")
+    return sorted(capabilities)
 
 
 class ProviderError(RuntimeError):
@@ -474,6 +501,203 @@ class DeepSeekProvider:
                            (datetime.now(timezone.utc) - started).total_seconds() * 1000)
 
 
+class HuggingFaceLocalProvider:
+    def __init__(self, config: HuggingFaceLocalConfig) -> None:
+        self.config = config
+        self._loaded: dict[str, tuple[Any, Any]] = {}
+        self._load_lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        self._loaded.clear()
+
+    def reload_config(self, config: HuggingFaceLocalConfig) -> None:
+        if config != self.config:
+            self._loaded.clear()
+        self.config = config
+
+    async def models(self) -> list[dict[str, Any]]:
+        if not self.config.enabled:
+            return []
+        return [self._catalog_entry(item) for item in self.config.models]
+
+    async def health(self) -> dict[str, Any]:
+        started = asyncio.get_running_loop().time()
+        if not self.config.enabled:
+            return {"status": "degraded", "detail": "Hugging Face local deshabilitado", "latency_ms": 0.0}
+        missing = [item.name for item in self.config.models if not self._model_path(item).exists()]
+        try:
+            self._import_runtime()
+        except ProviderError as error:
+            return {
+                "status": "unavailable",
+                "detail": f"{error.code}: {error}",
+                "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
+            }
+        if missing:
+            return {
+                "status": "degraded",
+                "detail": "Rutas de modelos no encontradas: " + ", ".join(missing[:5]),
+                "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
+            }
+        return {
+            "status": "healthy" if self.config.models else "degraded",
+            "detail": f"{len(self.config.models)} modelos locales configurados",
+            "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
+        }
+
+    def _catalog_entry(self, item: HuggingFaceLocalModelConfig) -> dict[str, Any]:
+        path = self._model_path(item)
+        compatible = item.compatibility
+        compatibility_error = item.compatibility_error
+        if not path.exists():
+            compatible = "incompatible"
+            compatibility_error = f"Ruta local no encontrada: {path}"
+        return {
+            "name": item.name,
+            "provider": "huggingface_local",
+            "deployment": "local",
+            "status": "available" if path.exists() else "offline",
+            "path": str(path),
+            "context_window": item.context_window,
+            "capabilities": list(item.capabilities),
+            "family": "huggingface_local",
+            "compatibility": compatible,
+            "compatibility_checked_at": item.compatibility_checked_at,
+            "compatibility_error": compatibility_error,
+        }
+
+    def _model_path(self, item: HuggingFaceLocalModelConfig) -> Path:
+        raw = Path(item.path)
+        if raw.is_absolute():
+            return raw
+        return Path(self.config.models_dir) / raw
+
+    def _find_model_config(self, model: str) -> HuggingFaceLocalModelConfig | None:
+        return next((item for item in self.config.models if item.name == model), None)
+
+    @staticmethod
+    def _import_runtime() -> tuple[Any, Any, Any]:
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            return torch, AutoModelForCausalLM, AutoTokenizer
+        except ImportError as error:
+            raise ProviderError(
+                "LOCAL_RUNTIME_UNAVAILABLE",
+                "Faltan dependencias locales: instala transformers y torch para usar HuggingFaceLocalProvider",
+                retryable=False,
+            ) from error
+
+    @staticmethod
+    def _torch_dtype(torch: Any, dtype: str | None) -> Any | None:
+        if not dtype:
+            return None
+        normalized = dtype.lower()
+        mapping = {
+            "auto": "auto",
+            "float16": torch.float16,
+            "fp16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+            "float32": torch.float32,
+            "fp32": torch.float32,
+        }
+        if normalized not in mapping:
+            raise ProviderError("INVALID_LOCAL_MODEL_CONFIG", f"dtype no soportado: {dtype}")
+        return mapping[normalized]
+
+    async def _load(self, item: HuggingFaceLocalModelConfig) -> tuple[Any, Any]:
+        if item.name in self._loaded:
+            return self._loaded[item.name]
+        async with self._load_lock:
+            if item.name in self._loaded:
+                return self._loaded[item.name]
+            torch, AutoModelForCausalLM, AutoTokenizer = self._import_runtime()
+            path = self._model_path(item)
+            if not path.exists():
+                raise ProviderError("MODEL_UNAVAILABLE", f"Ruta local no encontrada para {item.name}: {path}")
+            trust_remote_code = self.config.trust_remote_code if item.trust_remote_code is None else item.trust_remote_code
+            dtype = self._torch_dtype(torch, item.dtype or self.config.default_dtype)
+            device = item.device or self.config.default_device
+            load_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+            if dtype is not None:
+                load_kwargs["torch_dtype"] = dtype
+            if device == "auto":
+                load_kwargs["device_map"] = "auto"
+            model = await asyncio.to_thread(AutoModelForCausalLM.from_pretrained, str(path), **load_kwargs)
+            tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, str(path), trust_remote_code=trust_remote_code)
+            if device and device != "auto":
+                model = await asyncio.to_thread(model.to, device)
+            if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token", None) is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            self._loaded[item.name] = (model, tokenizer)
+            return model, tokenizer
+
+    async def generate(self, request: TaskCreateRequest, model: str, prompt: str) -> ModelOutput:
+        item = self._find_model_config(model)
+        if item is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Hugging Face local no configurado: {model}")
+        if "completion" not in {capability.lower() for capability in item.capabilities}:
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad completion")
+        inference_request = request_with_context_capped_output(request, item.context_window, prompt)
+        started = datetime.now(timezone.utc)
+        loaded_model, tokenizer = await self._load(item)
+        try:
+            generated_text, input_tokens, output_tokens = await asyncio.to_thread(
+                self._generate_sync,
+                loaded_model,
+                tokenizer,
+                prompt,
+                inference_request.generation.temperature,
+                inference_request.generation.max_output_tokens,
+            )
+        except ProviderError:
+            raise
+        except Exception as error:
+            raise ProviderError("MODEL_ERROR", f"Error ejecutando {model}: {type(error).__name__}: {error}") from error
+        if not generated_text.strip():
+            raise ProviderError("INVALID_PROVIDER_RESPONSE", f"{model} no devolvio contenido")
+        return ModelOutput(
+            generated_text,
+            input_tokens,
+            output_tokens,
+            0.0,
+            (datetime.now(timezone.utc) - started).total_seconds() * 1000,
+        )
+
+    @staticmethod
+    def _generate_sync(
+        model: Any,
+        tokenizer: Any,
+        prompt: str,
+        temperature: float,
+        max_output_tokens: int,
+    ) -> tuple[str, int, int]:
+        messages = [{"role": "user", "content": prompt}]
+        if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
+            input_ids = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            )
+        else:
+            input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+        device = getattr(model, "device", None)
+        if device is not None and hasattr(input_ids, "to"):
+            input_ids = input_ids.to(device)
+        generated = model.generate(
+            input_ids,
+            max_new_tokens=max_output_tokens,
+            do_sample=temperature > 0,
+            temperature=max(temperature, 0.01),
+            pad_token_id=getattr(tokenizer, "pad_token_id", None),
+            eos_token_id=getattr(tokenizer, "eos_token_id", None),
+        )
+        output_ids = generated[0][input_ids.shape[-1]:]
+        text = tokenizer.decode(output_ids, skip_special_tokens=True)
+        return text, int(input_ids.shape[-1]), int(output_ids.shape[-1])
+
+
 class OpenAICompatibleProvider:
     def __init__(
         self,
@@ -519,6 +743,11 @@ class OpenAICompatibleProvider:
         return [self._catalog_entry(name, configured.get(name)) for name in names]
 
     def _catalog_entry(self, name: str, model_config: Any | None = None) -> dict[str, Any]:
+        capabilities = (
+            list(model_config.capabilities)
+            if model_config is not None
+            else infer_openai_compatible_capabilities(name)
+        )
         return {
             "name": name,
             "provider": self.config.id,
@@ -527,9 +756,7 @@ class OpenAICompatibleProvider:
             "context_window": (
                 model_config.context_window if model_config is not None else self.config.default_context_window
             ),
-            "capabilities": (
-                list(model_config.capabilities) if model_config is not None else ["completion"]
-            ),
+            "capabilities": capabilities,
             "family": self.config.display_name or self.config.id,
             "compatibility": (
                 model_config.compatibility if model_config is not None else "unknown"
@@ -561,7 +788,7 @@ class OpenAICompatibleProvider:
                     "model": model,
                     "messages": [{"role": "user", "content": "ping"}],
                     "max_tokens": self.config.probe_max_output_tokens,
-                    "temperature": 0,
+                    "temperature": 0.1,
                     "stream": False,
                 },
             )
@@ -596,32 +823,189 @@ class OpenAICompatibleProvider:
                 "compatibility_error": str(error),
             }
 
+    async def probe_embedding_compatibility(self, model: str) -> dict[str, Any]:
+        started = datetime.now(timezone.utc)
+        try:
+            response = await self.client.post(
+                "/embeddings",
+                headers=self._headers(),
+                json={"model": model, "input": "ping"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") or []
+            vector = data[0].get("embedding") if data and isinstance(data[0], dict) else None
+            compatible = isinstance(vector, list) and bool(vector)
+            return {
+                "name": model,
+                "compatibility": "compatible" if compatible else "unknown",
+                "compatibility_checked_at": started.isoformat(),
+                "compatibility_error": None if compatible else "Respuesta de embeddings sin vector",
+            }
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 429:
+                raise ProviderError(
+                    "RATE_LIMITED",
+                    provider_http_error_message(error),
+                    retryable=True,
+                ) from error
+            return {
+                "name": model,
+                "compatibility": "incompatible",
+                "compatibility_checked_at": started.isoformat(),
+                "compatibility_error": provider_http_error_message(error),
+            }
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            return {
+                "name": model,
+                "compatibility": "incompatible",
+                "compatibility_checked_at": started.isoformat(),
+                "compatibility_error": str(error),
+            }
+
     async def probe_all_models(
         self,
         *,
         max_models: int | None = None,
         skip_compatible: bool | None = None,
+        skip_checked: bool | None = None,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> list[dict[str, Any]]:
         catalog = await self.models()
         if skip_compatible is None:
             skip_compatible = self.config.probe_skip_compatible
-        limit = max_models or self.config.probe_max_models
-        candidates = [
-            item for item in catalog
-            if not (skip_compatible and item.get("compatibility") == "compatible")
-        ]
-        names = [str(item["name"]) for item in candidates[:limit]]
+        if skip_checked is None:
+            skip_checked = self.config.probe_skip_checked
+        requested_limit = max_models or self.config.probe_max_models
+        limit = min(requested_limit, PROBE_HARD_MAX_MODELS)
+        candidates = []
+        for item in catalog:
+            compatibility = str(item.get("compatibility") or "unknown")
+            if skip_checked and item.get("compatibility_checked_at"):
+                continue
+            if skip_compatible and compatibility == "compatible":
+                continue
+            candidates.append(item)
+            if len(candidates) >= limit:
+                break
         results = []
-        for name in names:
-            try:
-                results.append(await self.probe_chat_compatibility(name))
-            except ProviderError as error:
-                if error.code == "RATE_LIMITED":
-                    break
-                raise
+        if progress_callback is not None:
+            await progress_callback({
+                "phase": "running",
+                "completed": 0,
+                "total": len(candidates),
+                "current_model": None,
+                "last_result": None,
+            })
+        for item in candidates:
+            name = str(item["name"])
+            capabilities = {str(capability).lower() for capability in item.get("capabilities") or []}
+            if progress_callback is not None:
+                await progress_callback({
+                    "phase": "running",
+                    "completed": len(results),
+                    "total": len(candidates),
+                    "current_model": name,
+                    "last_result": None,
+                })
+            if "completion" in capabilities:
+                try:
+                    result = await self.probe_chat_compatibility(name)
+                    results.append(result)
+                except ProviderError as error:
+                    if error.code == "RATE_LIMITED":
+                        break
+                    raise
+            elif "embedding" in capabilities:
+                try:
+                    result = await self.probe_embedding_compatibility(name)
+                    results.append(result)
+                except ProviderError as error:
+                    if error.code == "RATE_LIMITED":
+                        break
+                    raise
+            else:
+                result = {
+                    "name": name,
+                    "compatibility": "unknown",
+                    "compatibility_checked_at": datetime.now(timezone.utc).isoformat(),
+                    "compatibility_error": "Capacidad no-chat catalogada; endpoint de ejecución aún no soportado.",
+                }
+                results.append(result)
+            if progress_callback is not None:
+                await progress_callback({
+                    "phase": "running",
+                    "completed": len(results),
+                    "total": len(candidates),
+                    "current_model": name,
+                    "last_result": result,
+                })
             if self.config.probe_delay_seconds:
                 await asyncio.sleep(self.config.probe_delay_seconds)
+        if progress_callback is not None:
+            await progress_callback({
+                "phase": "completed",
+                "completed": len(results),
+                "total": len(candidates),
+                "current_model": None,
+                "last_result": results[-1] if results else None,
+            })
         return results
+
+    async def embed(self, request: TaskCreateRequest, model: str, input_text: str) -> ModelOutput:
+        catalog = await self.models()
+        entry = next((item for item in catalog if item["name"] == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo {self.config.id} no disponible: {model}")
+        if "embedding" not in {str(capability).lower() for capability in entry.get("capabilities") or []}:
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad embedding")
+        enforce_context_limit(request, entry.get("context_window"), input_text)
+        input_cost, _ = self._costs(model)
+        if request.model_requirements.max_cost_usd is not None:
+            estimated_input = max(1, len(input_text.encode("utf-8")))
+            estimated_cost = estimated_input * input_cost / 1_000_000
+            if estimated_cost > request.model_requirements.max_cost_usd:
+                raise ProviderError(
+                    "BUDGET_EXCEEDED",
+                    f"El coste maximo estimado ({estimated_cost:.6f} USD) supera el presupuesto",
+                )
+        started = datetime.now(timezone.utc)
+        try:
+            response = await self.client.post(
+                "/embeddings",
+                headers=self._headers(),
+                json={"model": model, "input": input_text},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
+        data = payload.get("data") or []
+        vector = data[0].get("embedding") if data and isinstance(data[0], dict) else None
+        if not isinstance(vector, list) or not vector or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
+            for value in vector
+        ):
+            raise ProviderError("INVALID_PROVIDER_RESPONSE", f"{self.config.id} no devolvio un embedding numerico")
+        usage = payload.get("usage") or {}
+        input_tokens = int(usage.get("prompt_tokens") or usage.get("total_tokens") or 0)
+        cost = input_tokens * input_cost / 1_000_000
+        return ModelOutput(
+            content=None,
+            tokens_input=input_tokens,
+            tokens_output=0,
+            cost_usd=cost,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            embedding=tuple(float(value) for value in vector),
+        )
 
     async def generate(self, request: TaskCreateRequest, model: str, prompt: str) -> ModelOutput:
         catalog = await self.models()
@@ -687,10 +1071,12 @@ class OpenAICompatibleProvider:
 class RoutedModelProvider:
     def __init__(self, config: BrokerConfig, *, ollama: OllamaProvider | None = None,
                  deepseek: DeepSeekProvider | None = None,
+                 huggingface_local: HuggingFaceLocalProvider | None = None,
                  custom: dict[str, OpenAICompatibleProvider] | None = None) -> None:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
+        self.huggingface_local = huggingface_local or HuggingFaceLocalProvider(config.providers.huggingface_local)
         self.custom = custom if custom is not None else self._build_custom_providers(config)
         configured = config.processing.max_parallel_invocations
         if isinstance(configured, int):
@@ -715,11 +1101,13 @@ class RoutedModelProvider:
     def reload_config(self, config: BrokerConfig) -> None:
         self.config = config
         self.deepseek.config = config.providers.deepseek
+        self.huggingface_local.reload_config(config.providers.huggingface_local)
         self.custom = self._build_custom_providers(config)
 
     async def close(self) -> None:
         await self.ollama.close()
         await self.deepseek.close()
+        await self.huggingface_local.close()
         for provider in self.custom.values():
             await provider.close()
 
@@ -730,6 +1118,9 @@ class RoutedModelProvider:
             except ProviderError: pass
         if self.config.providers.deepseek.enabled:
             try: result.extend(await self.deepseek.models())
+            except ProviderError: pass
+        if self.config.providers.huggingface_local.enabled:
+            try: result.extend(await self.huggingface_local.models())
             except ProviderError: pass
         for provider in self.custom.values():
             try: result.extend(await provider.models())
@@ -742,6 +1133,8 @@ class RoutedModelProvider:
             checks["ollama"] = await self._provider_health(self.ollama)
         if self.config.providers.deepseek.enabled:
             checks["deepseek"] = await self._provider_health(self.deepseek)
+        if self.config.providers.huggingface_local.enabled:
+            checks["huggingface_local"] = await self._provider_health(self.huggingface_local)
         for provider_id, provider in self.custom.items():
             checks[provider_id] = await self._provider_health(provider)
         return checks
@@ -758,6 +1151,9 @@ class RoutedModelProvider:
 
     @staticmethod
     async def _provider_health(provider: Any) -> dict[str, Any]:
+        provider_health = getattr(provider, "health", None)
+        if callable(provider_health):
+            return await provider_health()
         started = asyncio.get_running_loop().time()
         try:
             models = await provider.models()
@@ -925,12 +1321,37 @@ class RoutedModelProvider:
                     code = "MODEL_DEPLOYMENT_MISMATCH" if same_name else "MODEL_UNAVAILABLE"
                     raise ProviderError(code, f"Modelo DeepSeek no disponible: {model.deployment}/{model.model}")
                 return await self.deepseek.generate(request, model.model, prompt)
-            if provider_name in self.custom:
+            if provider_name == "huggingface_local":
                 if request.inference_kind == InferenceKind.embedding:
                     raise ProviderError(
                         "PROVIDER_CAPABILITY_MISMATCH",
-                        f"{model.provider} no admite embeddings en este adapter",
+                        "HuggingFaceLocalProvider no admite embeddings en este adapter",
                     )
+                if not self.config.providers.huggingface_local.enabled:
+                    raise ProviderError("PROVIDER_UNAVAILABLE", "Hugging Face local esta deshabilitado")
+                catalog = await self.huggingface_local.models()
+                exact = any(
+                    item["name"] == model.model
+                    and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                    for item in catalog
+                )
+                if not exact:
+                    same_name = any(item["name"] == model.model for item in catalog)
+                    code = "MODEL_DEPLOYMENT_MISMATCH" if same_name else "MODEL_UNAVAILABLE"
+                    raise ProviderError(code, f"Modelo Hugging Face local no disponible: {model.deployment}/{model.model}")
+                entry = next(
+                    item for item in catalog
+                    if item["name"] == model.model
+                    and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                )
+                if entry.get("compatibility") == "incompatible":
+                    detail = entry.get("compatibility_error") or "No compatible con HuggingFaceLocalProvider"
+                    raise ProviderError(
+                        "MODEL_COMPATIBILITY_MISMATCH",
+                        f"Modelo huggingface_local/{model.model} marcado como no compatible: {detail}",
+                    )
+                return await self.huggingface_local.generate(request, model.model, prompt)
+            if provider_name in self.custom:
                 if not request.model_requirements.cloud_allowed and model.deployment.lower() == "cloud":
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"{model.provider} requiere cloud_allowed=true")
                 provider = self.custom[provider_name]
@@ -955,6 +1376,8 @@ class RoutedModelProvider:
                         "MODEL_COMPATIBILITY_MISMATCH",
                         f"Modelo {model.provider}/{model.model} marcado como no compatible para mixture: {detail}",
                     )
+                if request.inference_kind == InferenceKind.embedding:
+                    return await provider.embed(request, model.model, prompt)
                 return await provider.generate(request, model.model, prompt)
             raise ProviderError("PROVIDER_UNAVAILABLE", f"Proveedor no soportado: {model.provider}")
 

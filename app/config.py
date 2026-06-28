@@ -85,6 +85,30 @@ class DeepSeekConfig(BaseModel):
     output_cost_per_million: float = Field(default=0.0, ge=0)
 
 
+class HuggingFaceLocalModelConfig(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1, max_length=1024)
+    context_window: int = Field(default=32_768, gt=0)
+    capabilities: list[str] = Field(default_factory=lambda: ["completion"])
+    device: str | None = Field(default=None, max_length=80)
+    dtype: str | None = Field(default=None, max_length=40)
+    trust_remote_code: bool | None = None
+    compatibility: Literal["unknown", "compatible", "incompatible"] = "compatible"
+    compatibility_checked_at: str | None = None
+    compatibility_error: str | None = Field(default=None, max_length=2000)
+
+
+class HuggingFaceLocalConfig(BaseModel):
+    enabled: bool = False
+    models_dir: str = ".local/models"
+    timeout_seconds: float = Field(default=300, gt=0)
+    default_context_window: int = Field(default=32_768, gt=0)
+    default_device: str = Field(default="auto", max_length=80)
+    default_dtype: str | None = Field(default=None, max_length=40)
+    trust_remote_code: bool = False
+    models: list[HuggingFaceLocalModelConfig] = Field(default_factory=list)
+
+
 class OpenAICompatibleModelConfig(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     context_window: int = Field(default=128_000, gt=0)
@@ -110,9 +134,10 @@ class OpenAICompatibleProviderConfig(BaseModel):
     sync_models: bool = False
     default_context_window: int = Field(default=128_000, gt=0)
     probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
-    probe_delay_seconds: float = Field(default=0.25, ge=0, le=60)
-    probe_max_models: int = Field(default=50, ge=1, le=1000)
+    probe_delay_seconds: float = Field(default=1.0, ge=0, le=60)
+    probe_max_models: int = Field(default=10, ge=1, le=1000)
     probe_skip_compatible: bool = True
+    probe_skip_checked: bool = True
     input_cost_per_million: float = Field(default=0.0, ge=0)
     output_cost_per_million: float = Field(default=0.0, ge=0)
     models: list[OpenAICompatibleModelConfig] = Field(default_factory=list)
@@ -129,6 +154,7 @@ class OpenAICompatibleProviderConfig(BaseModel):
 class ProvidersConfig(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
+    huggingface_local: HuggingFaceLocalConfig = Field(default_factory=HuggingFaceLocalConfig)
     custom: list[OpenAICompatibleProviderConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")

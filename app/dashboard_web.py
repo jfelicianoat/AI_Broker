@@ -16,6 +16,8 @@ from pydantic import ValidationError
 
 from app.config import (
     BrokerConfig,
+    HuggingFaceLocalConfig,
+    HuggingFaceLocalModelConfig,
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
     save_config,
@@ -76,6 +78,8 @@ templates.env.filters["status_label"] = lambda value: {
     "failed": "Fallida",
     "cancelled": "Cancelada",
 }.get(getattr(value, "value", value), str(getattr(value, "value", value)))
+
+PROBE_PROGRESS: dict[str, dict[str, Any]] = {}
 
 
 def create_dashboard_router(
@@ -275,6 +279,18 @@ def create_dashboard_router(
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
         errors: list[str] = []
+        progress_id = form.get("probe_progress_id", "").strip()
+        if progress_id:
+            PROBE_PROGRESS[progress_id] = {
+                "phase": "preparing",
+                "provider_id": provider_id,
+                "completed": 0,
+                "total": None,
+                "current_model": None,
+                "last_result": None,
+                "error": None,
+                "updated_at": _utc_now().isoformat(),
+            }
         try:
             updated = _build_dashboard_config(config, form)
             provider_config = _find_custom_provider(updated, provider_id)
@@ -284,20 +300,49 @@ def create_dashboard_router(
                 raise PromptTesterError(f"Activa el proveedor {provider_id} antes de analizarlo.")
             probe = OpenAICompatibleProvider(provider_config)
             try:
-                results = await probe.probe_all_models()
+                catalog = await probe.models()
+
+                async def update_probe_progress(payload: dict[str, Any]) -> None:
+                    if not progress_id:
+                        return
+                    PROBE_PROGRESS[progress_id] = {
+                        **PROBE_PROGRESS.get(progress_id, {}),
+                        **payload,
+                        "provider_id": provider_config.id,
+                        "updated_at": _utc_now().isoformat(),
+                    }
+
+                results = await probe.probe_all_models(progress_callback=update_probe_progress)
             finally:
                 await probe.close()
-            _apply_probe_results(updated, provider_config.id, results)
+            _apply_probe_results(updated, provider_config.id, results, catalog)
             save_config(updated, config_path)
             _apply_config_update(config, updated)
             if hasattr(provider, "reload_config"):
                 provider.reload_config(config)
+            if progress_id:
+                PROBE_PROGRESS[progress_id] = {
+                    **PROBE_PROGRESS.get(progress_id, {}),
+                    "phase": "completed",
+                    "completed": len(results),
+                    "total": PROBE_PROGRESS.get(progress_id, {}).get("total", len(results)),
+                    "current_model": None,
+                    "error": None,
+                    "updated_at": _utc_now().isoformat(),
+                }
         except PromptTesterError as error:
             errors.append(str(error))
         except ProviderError as error:
             errors.append(f"{error.code}: {error}")
         except ValidationError as error:
             errors.extend(_validation_messages(error))
+        if errors and progress_id:
+            PROBE_PROGRESS[progress_id] = {
+                **PROBE_PROGRESS.get(progress_id, {}),
+                "phase": "failed",
+                "error": "; ".join(errors),
+                "updated_at": _utc_now().isoformat(),
+            }
         if errors:
             context = {
                 "summary": queries.summary(window_hours=24),
@@ -312,6 +357,22 @@ def create_dashboard_router(
             }
             return _template_response(request, "dashboard.html", context)
         return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
+
+    @router.get("/dashboard/actions/providers/{provider_id}/probe/progress")
+    async def probe_provider_progress(provider_id: str, progress_id: str) -> dict[str, Any]:
+        progress = PROBE_PROGRESS.get(progress_id)
+        if progress is None or str(progress.get("provider_id") or "").lower() != provider_id.lower():
+            return {
+                "phase": "unknown",
+                "provider_id": provider_id,
+                "completed": 0,
+                "total": None,
+                "current_model": None,
+                "last_result": None,
+                "error": None,
+                "updated_at": _utc_now().isoformat(),
+            }
+        return progress
 
     @router.post("/dashboard/actions/prompt-tester", response_class=HTMLResponse)
     async def submit_prompt_tester(request: Request):
@@ -503,6 +564,7 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         raise PromptTesterError("El margen de VRAM debe ser menor que el presupuesto total de VRAM.")
     payload["processing"] = processing
     payload["resources"] = resources
+    payload["providers"]["huggingface_local"] = _parse_huggingface_local_provider(current, form)
     payload["providers"]["custom"] = _parse_custom_providers(current, form)
     return BrokerConfig.model_validate(payload)
 
@@ -552,11 +614,60 @@ def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list
             "probe_delay_seconds": _float_field(form, f"custom_provider_{index}_probe_delay_seconds", 0.25),
             "probe_max_models": _int_field(form, f"custom_provider_{index}_probe_max_models", 50),
             "probe_skip_compatible": _checked(form, f"custom_provider_{index}_probe_skip_compatible"),
+            "probe_skip_checked": _checked(form, f"custom_provider_{index}_probe_skip_checked"),
             "input_cost_per_million": _float_field(form, f"custom_provider_{index}_input_cost_per_million", 0.0),
             "output_cost_per_million": _float_field(form, f"custom_provider_{index}_output_cost_per_million", 0.0),
             "models": [item.model_dump(mode="json") for item in models],
         })
     return providers
+
+
+def _parse_huggingface_local_provider(current: BrokerConfig, form: dict[str, str]) -> dict[str, Any]:
+    current_hf = getattr(current.providers, "huggingface_local", HuggingFaceLocalConfig())
+    models_text = form.get("hf_local_models", "").strip()
+    models = _parse_huggingface_local_models(models_text)
+    enabled = _checked(form, "hf_local_enabled")
+    if enabled and not models:
+        raise PromptTesterError("Hugging Face local: anade al menos un modelo.")
+    return {
+        "enabled": enabled,
+        "models_dir": form.get("hf_local_models_dir", "").strip() or current_hf.models_dir,
+        "timeout_seconds": _float_field(form, "hf_local_timeout_seconds", 300.0),
+        "default_context_window": _int_field(form, "hf_local_default_context_window", 32768),
+        "default_device": form.get("hf_local_default_device", "").strip() or "auto",
+        "default_dtype": form.get("hf_local_default_dtype", "").strip() or None,
+        "trust_remote_code": _checked(form, "hf_local_trust_remote_code"),
+        "models": [item.model_dump(mode="json") for item in models],
+    }
+
+
+def _parse_huggingface_local_models(models_text: str) -> list[HuggingFaceLocalModelConfig]:
+    if not models_text:
+        return []
+    models: list[HuggingFaceLocalModelConfig] = []
+    for line_number, raw_line in enumerate(models_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        try:
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                raise ValueError("missing name or path")
+            models.append(HuggingFaceLocalModelConfig(
+                name=parts[0],
+                path=parts[1],
+                context_window=int(parts[2]) if len(parts) > 2 and parts[2] else 32768,
+                device=parts[3] if len(parts) > 3 and parts[3] else None,
+                dtype=parts[4] if len(parts) > 4 and parts[4] else None,
+                capabilities=["completion"],
+                compatibility="compatible",
+            ))
+        except (ValueError, ValidationError) as error:
+            raise PromptTesterError(
+                f"Hugging Face local: modelo invalido en linea {line_number}. "
+                "Usa nombre|ruta|contexto|device|dtype."
+            ) from error
+    return models
 
 
 def _parse_custom_provider_models(
@@ -606,16 +717,45 @@ def _apply_probe_results(
     config: BrokerConfig,
     provider_id: str,
     results: list[dict[str, Any]],
+    catalog: list[dict[str, Any]] | None = None,
 ) -> None:
     provider_config = _find_custom_provider(config, provider_id)
     if provider_config is None:
         raise PromptTesterError(f"Proveedor custom no encontrado: {provider_id}")
     existing = {item.name: item for item in provider_config.models}
-    updated_models: list[OpenAICompatibleModelConfig] = []
+    updated_by_name: dict[str, OpenAICompatibleModelConfig] = dict(existing)
+    for entry in catalog or []:
+        name = str(entry.get("name") or entry.get("id") or "")
+        if not name:
+            continue
+        previous = updated_by_name.get(name)
+        inferred_capabilities = list(entry.get("capabilities") or [])
+        if previous is not None:
+            updated_by_name[name] = OpenAICompatibleModelConfig(
+                name=name,
+                context_window=previous.context_window,
+                input_cost_per_million=previous.input_cost_per_million,
+                output_cost_per_million=previous.output_cost_per_million,
+                capabilities=inferred_capabilities or list(previous.capabilities),
+                compatibility=previous.compatibility,
+                compatibility_checked_at=previous.compatibility_checked_at,
+                compatibility_error=previous.compatibility_error,
+            )
+            continue
+        updated_by_name[name] = OpenAICompatibleModelConfig(
+            name=name,
+            context_window=int(entry.get("context_window") or provider_config.default_context_window),
+            input_cost_per_million=provider_config.input_cost_per_million,
+            output_cost_per_million=provider_config.output_cost_per_million,
+            capabilities=inferred_capabilities or ["completion"],
+            compatibility=str(entry.get("compatibility") or "unknown"),
+            compatibility_checked_at=entry.get("compatibility_checked_at"),
+            compatibility_error=entry.get("compatibility_error"),
+        )
     for result in results:
         name = str(result["name"])
-        previous = existing.get(name)
-        updated_models.append(OpenAICompatibleModelConfig(
+        previous = updated_by_name.get(name)
+        updated_by_name[name] = OpenAICompatibleModelConfig(
             name=name,
             context_window=previous.context_window if previous is not None else provider_config.default_context_window,
             input_cost_per_million=(
@@ -628,8 +768,8 @@ def _apply_probe_results(
             compatibility=str(result.get("compatibility") or "unknown"),
             compatibility_checked_at=result.get("compatibility_checked_at"),
             compatibility_error=result.get("compatibility_error"),
-        ))
-    provider_config.models = updated_models
+        )
+    provider_config.models = list(updated_by_name.values())
 
 
 def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:

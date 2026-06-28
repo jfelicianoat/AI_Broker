@@ -25,6 +25,8 @@
 
 <form class="config-form" method="post" action="/dashboard/actions/config">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% set hf_local = config.providers.huggingface_local|default(none) %}
+  {% set hf_models = hf_local.models if hf_local else [] %}
   <div class="form-body config-grid">
     <label class="field">
       <span>Timeout global por tarea (segundos)</span>
@@ -55,6 +57,59 @@
         <input type="checkbox" name="allow_execution_waves" {% if config.resources.allow_execution_waves %}checked{% endif %}>
         Permitir waves si no cabe todo en paralelo
       </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Hugging Face local</h3>
+        <p>Modelos descargados en disco y ejecutados dentro del proceso del Broker.</p>
+      </div>
+      <span class="badge badge-neutral">huggingface_local</span>
+    </div>
+    <div class="provider-grid">
+      <div class="provider-config">
+        <div class="provider-config-head">
+          <strong>Runtime local</strong>
+          <label>
+            <input type="checkbox" name="hf_local_enabled" {% if hf_local and hf_local.enabled %}checked{% endif %}>
+            Activo
+          </label>
+        </div>
+        <div class="provider-fields">
+          <label class="field provider-wide">
+            <span>Directorio base de modelos</span>
+            <input name="hf_local_models_dir" value="{{ hf_local.models_dir if hf_local else '.local/models' }}" placeholder=".local/models">
+          </label>
+          <label class="field">
+            <span>Timeout segundos</span>
+            <input name="hf_local_timeout_seconds" value="{{ hf_local.timeout_seconds if hf_local else 300 }}" inputmode="decimal">
+          </label>
+          <label class="field">
+            <span>Contexto por defecto</span>
+            <input name="hf_local_default_context_window" value="{{ hf_local.default_context_window if hf_local else 32768 }}" inputmode="numeric">
+          </label>
+          <label class="field">
+            <span>Device por defecto</span>
+            <input name="hf_local_default_device" value="{{ hf_local.default_device if hf_local else 'auto' }}" placeholder="auto">
+          </label>
+          <label class="field">
+            <span>Dtype por defecto</span>
+            <input name="hf_local_default_dtype" value="{{ hf_local.default_dtype if hf_local and hf_local.default_dtype else '' }}" placeholder="float16">
+          </label>
+          <label class="field provider-wide">
+            <span>Modelos: nombre|ruta|contexto|device|dtype</span>
+            <textarea name="hf_local_models" rows="5" placeholder="qwen2.5-7b|qwen2.5-7b|32768|auto|float16">{% for model in hf_models %}{{ model.name }}|{{ model.path }}|{{ model.context_window }}|{{ model.device or '' }}|{{ model.dtype or '' }}{% if not loop.last %}
+{% endif %}{% endfor %}</textarea>
+          </label>
+          <div class="check-row provider-wide">
+            <label>
+              <input type="checkbox" name="hf_local_trust_remote_code" {% if hf_local and hf_local.trust_remote_code %}checked{% endif %}>
+              Permitir trust_remote_code
+            </label>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
   <div class="config-subsection">
@@ -144,13 +199,26 @@
                 <input type="checkbox" name="custom_provider_{{ index }}_probe_skip_compatible" {% if not provider or provider.probe_skip_compatible %}checked{% endif %}>
                 No comprobar modelos ya verdes
               </label>
+              <label>
+                <input type="checkbox" name="custom_provider_{{ index }}_probe_skip_checked" {% if not provider or provider.probe_skip_checked %}checked{% endif %}>
+                No repetir modelos ya analizados
+              </label>
             </div>
             <div class="provider-wide provider-actions">
               <button class="button secondary compact"
                       type="submit"
+                      data-provider-probe="{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}"
                       formaction="/dashboard/actions/providers/{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}/probe">
                 Analizar compatibilidad
               </button>
+            </div>
+            <div class="provider-wide probe-progress" data-probe-progress="{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}" hidden>
+              <div>
+                <strong>Analizando compatibilidad</strong>
+                <span data-probe-progress-label>Preparando catalogo...</span>
+              </div>
+              <div class="probe-progress-bar" aria-hidden="true"><span data-probe-progress-bar></span></div>
+              <small data-probe-progress-detail>Esperando primera respuesta del proveedor.</small>
             </div>
             {% if provider and provider.models %}
               <div class="provider-wide model-compat-list">

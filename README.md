@@ -13,7 +13,7 @@ Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2
 | Persistencia | SQLite + WAL + event sourcing |
 | Serialización | JSON canónico con `separators=(',',':')` |
 | Scheduling | Un workflow activo; `fast` serial y `slow` con paralelismo interno acotado |
-| LLMs | Ollama (local), DeepSeek (cloud), extensible |
+| LLMs | Ollama (local), Hugging Face local, DeepSeek (cloud), extensible |
 | Panel | Jinja2 + fragmentos hipermedia y recursos locales |
 
 ## Estado de fase 5.3
@@ -87,7 +87,9 @@ Tercer bloque operativo implementado: runner de produccion, scripts de servicio 
 - Árbitro explícito o automático (`strongest_available`)
 - Política de sustitución si un modelo no está disponible
 - Catálogo real de Ollama (`/api/tags` + `/api/show`) sin listas hardcodeadas
+- Hugging Face local opcional con modelos descargados en disco y cargados con `transformers`
 - DeepSeek opcional con credencial en variable de entorno o Windows Credential Manager
+- Analisis de compatibilidad por tandas, sin repetir modelos ya comprobados cuando `probe_skip_checked` esta activo
 - Control preventivo y acumulado de `max_cost_usd`
 - Selección exacta opcional mediante `target_model.provider/deployment/model`
 - Timeout efectivo de tarea con cancelación de las operaciones provider pendientes
@@ -97,6 +99,32 @@ Tercer bloque operativo implementado: runner de produccion, scripts de servicio 
 - Archivo YAML (`broker_config.yaml`) con merge profundo sobre defaults
 - Secciones: `server`, `persistence`, `processing`, `resources`, `health`, `providers`
 - Validación en arranque via Pydantic
+
+Ejemplo minimo para modelos Hugging Face locales:
+
+```yaml
+providers:
+  huggingface_local:
+    enabled: true
+    models_dir: .local/models
+    default_device: auto
+    default_dtype: float16
+    trust_remote_code: false
+    models:
+      - name: qwen2.5-7b
+        path: qwen2.5-7b
+        context_window: 32768
+        capabilities:
+          - completion
+```
+
+Descarga previa:
+
+```powershell
+hf download Qwen/Qwen2.5-7B-Instruct --local-dir C:\Procesos\AI_Broker\.local\models\qwen2.5-7b
+```
+
+La inferencia requiere instalar el extra opcional `hf-local`; si faltan `torch` o `transformers`, el health check de `huggingface_local` queda `unavailable`.
 
 ### 7. Health checks
 
@@ -241,7 +269,7 @@ El Broker recibe inferencias ya preparadas. Su responsabilidad termina en valida
 
 - Sin autenticación entre cliente y broker (solo LAN privada, CORS desactivado por defecto)
 - Clasificación de datos: `public`, `internal`, `confidential`, `local_only`
-- Modo `local_only`: fuerza proveedor Ollama y deshabilita cloud automáticamente
+- Modo `local_only`: conserva solo proveedores locales (`ollama` y `huggingface_local`) y deshabilita cloud automáticamente
 
 ### Recuperación
 
@@ -321,7 +349,7 @@ python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --tim
 │   ├── dashboard.py        # Read models paginados y métricas operativas
 │   ├── dashboard_web.py    # Rutas HTML, fragmentos y acciones del panel
 │   ├── main.py             # FastAPI app + endpoints
-│   ├── providers.py        # Ollama, DeepSeek, routing, secretos y ciclo de VRAM
+│   ├── providers.py        # Ollama, Hugging Face local, DeepSeek, routing, secretos y ciclo de VRAM
 │   ├── repository.py       # Capa de acceso a datos
 │   ├── resource_scheduler.py  # Planificador adaptativo de recursos
 │   ├── schemas.py          # Modelos Pydantic (contrato completo)

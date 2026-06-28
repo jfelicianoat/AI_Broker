@@ -9,6 +9,7 @@ import app.dashboard_web as dashboard_web
 from app.config import (
     BrokerConfig,
     LoggingConfig,
+    OllamaConfig,
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
     PersistenceConfig,
@@ -235,6 +236,39 @@ def test_model_availability_endpoint_marks_incompatible_and_unknown_models(tmp_p
     assert by_model["pending"]["availability"] == "unknown"
     assert by_model["pending"]["dispatchable"] is False
     assert [item["model"] for item in dispatchable.json()["items"]] == ["chat-ok"]
+
+
+def test_model_availability_endpoint_marks_embedding_models_dispatchable(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-model-availability-embedding.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="real"),
+        providers=ProvidersConfig(
+            ollama=OllamaConfig(enabled=False),
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="nvidia",
+                    enabled=True,
+                    base_url="https://integrate.api.nvidia.com/v1",
+                    models=[
+                        OpenAICompatibleModelConfig(
+                            name="nvidia/nv-embedqa-e5-v5",
+                            context_window=8192,
+                            capabilities=["embedding"],
+                            compatibility="compatible",
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.get("/api/v1/models/availability?provider=nvidia&capability=embedding")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["model"] == "nvidia/nv-embedqa-e5-v5"
+    assert item["availability"] == "online"
+    assert item["dispatchable"] is True
 
 
 def test_model_context_endpoint_returns_llm_context_window(tmp_path: Path) -> None:
@@ -554,7 +588,39 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
         def __init__(self, config):
             self.config = config
 
-        async def probe_all_models(self):
+        async def models(self):
+            return [
+                {
+                    "name": "chat-ok",
+                    "context_window": 128000,
+                    "capabilities": ["completion"],
+                    "compatibility": "unknown",
+                },
+                {
+                    "name": "vision-only",
+                    "context_window": 128000,
+                    "capabilities": ["completion"],
+                    "compatibility": "unknown",
+                },
+                {
+                    "name": "not-probed-yet",
+                    "context_window": 64000,
+                    "capabilities": ["completion"],
+                    "compatibility": "unknown",
+                },
+            ]
+
+        async def probe_all_models(self, progress_callback=None):
+            if progress_callback is not None:
+                await progress_callback(
+                    {
+                        "phase": "running",
+                        "completed": 1,
+                        "total": 2,
+                        "current_model": "vision-only",
+                        "last_result": {"name": "chat-ok", "compatibility": "compatible"},
+                    }
+                )
             return [
                 {
                     "name": "chat-ok",
@@ -585,6 +651,7 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
             "/dashboard/actions/providers/nvidia/probe",
             data={
                 "csrf_token": token,
+                "probe_progress_id": "probe-test-id",
                 "task_timeout_seconds": "900",
                 "max_parallel_invocations": "auto",
                 "queue_max_size": "250",
@@ -604,18 +671,29 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
                 "custom_provider_1_probe_delay_seconds": "0",
                 "custom_provider_1_probe_max_models": "50",
                 "custom_provider_1_probe_skip_compatible": "on",
+                "custom_provider_1_probe_skip_checked": "on",
                 "custom_provider_1_input_cost_per_million": "0",
                 "custom_provider_1_output_cost_per_million": "0",
                 "custom_provider_1_sync_models": "on",
             },
         )
+        progress = client.get(
+            "/dashboard/actions/providers/nvidia/probe/progress",
+            params={"progress_id": "probe-test-id"},
+        )
 
     saved = load_config(config_path)
     by_name = {item.name: item for item in saved.providers.custom[0].models}
     assert response.status_code == 200
+    assert progress.status_code == 200
+    assert progress.json()["phase"] == "completed"
+    assert progress.json()["completed"] == 2
     assert by_name["chat-ok"].compatibility == "compatible"
     assert by_name["vision-only"].compatibility == "incompatible"
+    assert by_name["not-probed-yet"].compatibility == "unknown"
+    assert by_name["not-probed-yet"].context_window == 64000
     assert saved.providers.custom[0].probe_skip_compatible is True
+    assert saved.providers.custom[0].probe_skip_checked is True
     assert "No compatible mixture" in response.text
 
 
