@@ -2,7 +2,8 @@
      class="panel active-panel"
      hx-get="/dashboard/fragments/active"
      hx-trigger="every 3s"
-     hx-swap="outerHTML">
+     hx-swap="outerHTML"
+     data-refresh-pauseable>
   <div class="panel-heading">
     <div>
       <h2>Tarea activa</h2>
@@ -11,6 +12,7 @@
     {% if active %}<span class="badge badge-active">{{ active.task.status|status_label }}</span>{% endif %}
   </div>
   {% if active %}
+    <p class="panel-note">Estado persistido de la tarea; las metricas finales aparecen al cerrar cada invocacion.</p>
     <dl class="detail-list">
       <div><dt>ID de tarea</dt><dd>{{ active.task.task_id }}</dd></div>
       <div><dt>Estrategia</dt><dd>{{ active.task.execution_strategy.value }}/{{ active.task.execution_preset.value }}</dd></div>
@@ -53,7 +55,7 @@
       <a class="button secondary" href="/dashboard/tasks/{{ active.task.task_id }}">Ver resultado</a>
       <button class="button danger" type="button"
               hx-post="/dashboard/actions/tasks/{{ active.task.task_id }}/cancel"
-              hx-confirm="Cancelar la tarea activa?">Cancelar tarea</button>
+              hx-confirm="Cancelar tarea activa {{ active.task.task_id }}?">Cancelar tarea</button>
     </div>
   {% else %}
     <div class="empty-state tall">

@@ -467,8 +467,10 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
     assert "Cola de tareas" in page.text
     assert "Historial" in page.text
     assert "Coste real" in page.text
+    assert "data-refresh-pauseable" in page.text
     assert fragment.status_code == 200
     assert first["task_id"] in fragment.text
+    assert f"Cancelar tarea {first['task_id']}?" in fragment.text
     assert moved.status_code == 204
     assert moved.headers["hx-trigger"] == "dashboard-refresh"
     assert reordered[0]["task_id"] == second["task_id"]
@@ -477,6 +479,7 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
     assert "--teal" in css.text
     assert script.status_code == 200
     assert "refreshDashboard" in script.text
+    assert "refreshPaused" in script.text
 
 
 def test_dashboard_actions_require_csrf_and_same_origin(tmp_path: Path) -> None:
@@ -540,6 +543,36 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     assert config.resources.max_loaded_local_models == "auto"
     assert saved.processing.task_timeout_seconds == 900
     assert saved.resources.allow_execution_waves is True
+
+
+def test_dashboard_configuration_can_be_reviewed_without_saving(tmp_path: Path) -> None:
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-review.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "config_action": "validate",
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "Revision lista; no se ha guardado nada" in response.text
+    assert "Timeout global por tarea" in response.text
+    assert config.processing.task_timeout_seconds != 900
+    assert not config_path.exists()
 
 
 def test_dashboard_configuration_adds_custom_api_provider(tmp_path: Path) -> None:
@@ -921,6 +954,9 @@ def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "Tarea encolada" in response.text
+    assert "Impacto operativo validado" in response.text
+    assert "single/fast - 1 invocacion" in response.text
+    assert "Cloud bloqueado - fallback bloqueado" in response.text
     assert f"/dashboard/tasks/{queue['pending'][0]['task_id']}" in response.text
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in response.text
     assert "<script>alert('x')</script>" not in response.text

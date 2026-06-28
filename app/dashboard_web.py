@@ -116,6 +116,7 @@ def create_dashboard_router(
             "config": config,
             "config_saved": config_saved,
             "config_errors": [],
+            "config_review": [],
         }
         return _template_response(request, "dashboard.html", context)
 
@@ -131,6 +132,7 @@ def create_dashboard_router(
                 "form": _prompt_tester_defaults(),
                 "errors": [],
                 "request_preview": None,
+                "impact_preview": None,
                 "accepted": None,
             },
         )
@@ -241,6 +243,7 @@ def create_dashboard_router(
                 "csrf_token": _csrf_token(request),
                 "config_saved": False,
                 "config_errors": [],
+                "config_review": [],
             },
         )
 
@@ -251,6 +254,20 @@ def create_dashboard_router(
         errors: list[str] = []
         try:
             updated = _build_dashboard_config(config, form)
+            if form.get("config_action") == "validate":
+                context = {
+                    "summary": queries.summary(window_hours=24),
+                    "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
+                    "active": queries.active_task_detail(),
+                    "health": await health_loader(),
+                    "resources": await resources(),
+                    "history": queries.list_terminal_tasks(page_size=20),
+                    "config": updated,
+                    "config_saved": False,
+                    "config_errors": [],
+                    "config_review": _config_review_items(config, updated),
+                }
+                return _template_response(request, "dashboard.html", context)
             save_config(updated, config_path)
             _apply_config_update(config, updated)
             if hasattr(provider, "reload_config"):
@@ -270,6 +287,7 @@ def create_dashboard_router(
                 "config": config,
                 "config_saved": False,
                 "config_errors": errors,
+                "config_review": [],
             }
             return _template_response(request, "dashboard.html", context)
         return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
@@ -354,6 +372,7 @@ def create_dashboard_router(
                 "config": config,
                 "config_saved": False,
                 "config_errors": errors,
+                "config_review": [],
             }
             return _template_response(request, "dashboard.html", context)
         return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
@@ -382,9 +401,11 @@ def create_dashboard_router(
         errors: list[str] = []
         accepted = None
         request_preview = None
+        impact_preview = None
         try:
             payload = _build_prompt_tester_request(form)
             request_preview = payload.model_dump(mode="json")
+            impact_preview = _prompt_tester_impact(payload)
             if action == "enqueue":
                 task, created = repository.create_task(
                     payload,
@@ -416,6 +437,7 @@ def create_dashboard_router(
                 "form": {**_prompt_tester_defaults(), **form},
                 "errors": errors,
                 "request_preview": request_preview,
+                "impact_preview": impact_preview,
                 "accepted": accepted,
             },
         )
@@ -535,6 +557,111 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "proposer_model_5": "",
         "proposer_role_5": "reviewer",
     }
+
+
+def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[dict[str, str]]:
+    current_data = current.model_dump(mode="json")
+    updated_data = updated.model_dump(mode="json")
+    checks = [
+        ("processing.task_timeout_seconds", "Timeout global por tarea"),
+        ("processing.queue_max_size", "Tamano maximo de cola"),
+        ("processing.max_parallel_invocations", "Max. invocaciones paralelas slow"),
+        ("resources.local_vram_budget_gb", "Presupuesto VRAM local"),
+        ("resources.vram_safety_margin_gb", "Margen seguridad VRAM"),
+        ("resources.max_loaded_local_models", "Max. modelos locales cargados"),
+        ("resources.allow_execution_waves", "Permitir waves"),
+        ("providers.huggingface_local.enabled", "Hugging Face local activo"),
+        ("providers.huggingface_local.models_dir", "Directorio HF local"),
+        ("providers.huggingface_local.timeout_seconds", "Timeout HF local"),
+        ("providers.huggingface_local.default_context_window", "Contexto HF local"),
+        ("providers.huggingface_local.default_device", "Device HF local"),
+        ("providers.huggingface_local.default_dtype", "Dtype HF local"),
+        ("providers.huggingface_local.trust_remote_code", "HF trust_remote_code"),
+    ]
+    changes: list[dict[str, str]] = []
+    for path, label in checks:
+        before = _nested_value(current_data, path)
+        after = _nested_value(updated_data, path)
+        if before != after:
+            changes.append({"label": label, "before": _display_config_value(before), "after": _display_config_value(after)})
+
+    current_hf_models = _nested_value(current_data, "providers.huggingface_local.models") or []
+    updated_hf_models = _nested_value(updated_data, "providers.huggingface_local.models") or []
+    if _model_names(current_hf_models) != _model_names(updated_hf_models):
+        changes.append({
+            "label": "Modelos HF local",
+            "before": _display_model_list(current_hf_models),
+            "after": _display_model_list(updated_hf_models),
+        })
+
+    current_custom = current_data.get("providers", {}).get("custom", [])
+    updated_custom = updated_data.get("providers", {}).get("custom", [])
+    for index in range(max(len(current_custom), len(updated_custom))):
+        before_provider = current_custom[index] if index < len(current_custom) else {}
+        after_provider = updated_custom[index] if index < len(updated_custom) else {}
+        prefix = after_provider.get("id") or before_provider.get("id") or f"Proveedor {index + 1}"
+        provider_checks = [
+            ("enabled", "activo"),
+            ("id", "id"),
+            ("display_name", "nombre visible"),
+            ("base_url", "base URL"),
+            ("api_key_env", "variable API key"),
+            ("deployment", "deployment"),
+            ("timeout_seconds", "timeout"),
+            ("default_context_window", "contexto"),
+            ("probe_max_output_tokens", "tokens probe"),
+            ("probe_delay_seconds", "pausa probe"),
+            ("probe_max_models", "max. modelos por analisis"),
+            ("sync_models", "sincronizar catalogo"),
+            ("probe_skip_compatible", "omitir verdes"),
+            ("probe_skip_checked", "omitir analizados"),
+        ]
+        for key, label in provider_checks:
+            before = before_provider.get(key)
+            after = after_provider.get(key)
+            if before != after:
+                changes.append({
+                    "label": f"{prefix}: {label}",
+                    "before": _display_config_value(before),
+                    "after": _display_config_value(after),
+                })
+        if _model_names(before_provider.get("models") or []) != _model_names(after_provider.get("models") or []):
+            changes.append({
+                "label": f"{prefix}: modelos",
+                "before": _display_model_list(before_provider.get("models") or []),
+                "after": _display_model_list(after_provider.get("models") or []),
+            })
+    return changes
+
+
+def _nested_value(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _display_config_value(value: Any) -> str:
+    if value is None or value == "":
+        return "N/D"
+    if isinstance(value, bool):
+        return "si" if value else "no"
+    return str(value)
+
+
+def _model_names(models: list[dict[str, Any]]) -> list[str]:
+    return [str(item.get("name") or item.get("path") or "modelo") for item in models]
+
+
+def _display_model_list(models: list[dict[str, Any]]) -> str:
+    names = _model_names(models)
+    if not names:
+        return "0 modelos"
+    preview = ", ".join(names[:3])
+    suffix = f" +{len(names) - 3}" if len(names) > 3 else ""
+    return f"{len(names)} modelos: {preview}{suffix}"
 
 
 def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> BrokerConfig:
@@ -876,6 +1003,39 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
         },
         "priority": _int_field(form, "priority", 100),
     })
+
+
+def _prompt_tester_impact(payload: TaskCreateRequest) -> dict[str, Any]:
+    data = payload.model_dump(mode="json")
+    execution = data.get("execution") or {}
+    model_requirements = data.get("model_requirements") or {}
+    generation = data.get("generation") or {}
+    strategy = execution.get("strategy", "single")
+    preset = execution.get("preset", "fast")
+    if strategy == "mixture_of_agents":
+        selection = execution.get("selection") if isinstance(execution.get("selection"), dict) else {}
+        proposers = selection.get("proposers") if isinstance(selection.get("proposers"), list) else []
+        expected_invocations = len(proposers) + int(execution.get("max_judges") or 1)
+        selected_models = proposers + ([selection.get("arbiter")] if selection.get("arbiter") else [])
+    else:
+        expected_invocations = 1
+        selected_models = [model_requirements.get("target_model")]
+    selected_models = [item for item in selected_models if isinstance(item, dict)]
+    cloud_models = [
+        f"{item.get('provider')}/{item.get('deployment')}/{item.get('model')}"
+        for item in selected_models
+        if str(item.get("deployment") or "").lower() == "cloud"
+    ]
+    return {
+        "strategy": f"{strategy}/{preset}",
+        "expected_invocations": expected_invocations,
+        "scheduling": execution.get("scheduling", "sequential"),
+        "timeout_seconds": execution.get("timeout_seconds"),
+        "max_output_tokens": generation.get("max_output_tokens"),
+        "cloud_allowed": bool(model_requirements.get("cloud_allowed")),
+        "fallback_allowed": bool(model_requirements.get("fallback_allowed")),
+        "cloud_models": cloud_models,
+    }
 
 
 def _parse_proposers(form: dict[str, str]) -> list[ModelReference]:

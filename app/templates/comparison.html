@@ -92,6 +92,7 @@
                 <div><span>Waves</span><strong>{{ comparison.scheduling.waves|default('N/D') }}</strong></div>
                 <div><span>Solapamiento</span><strong>{{ 'observado' if comparison.overlap_detected else 'no observado' }}</strong></div>
               </div>
+              <p class="panel-note">El solapamiento se calcula solo con started_at/completed_at persistidos. No observado significa que esta tarea no lo demostro, no que el runtime nunca pueda solapar.</p>
 
               <div class="timeline-block">
                 <h3>Proponentes</h3>

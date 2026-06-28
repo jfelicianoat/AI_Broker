@@ -2,7 +2,8 @@
      class="panel health-panel"
      hx-get="/dashboard/fragments/health"
      hx-trigger="every 30s"
-     hx-swap="outerHTML">
+     hx-swap="outerHTML"
+     data-refresh-pauseable>
   <div class="panel-heading" id="salud">
     <div>
       <h2>Salud de dependencias</h2>

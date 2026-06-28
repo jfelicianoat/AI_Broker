@@ -61,6 +61,20 @@
             <p><a class="task-link" href="/dashboard/tasks/{{ accepted.task_id }}">{{ accepted.task_id }}</a></p>
           </div>
         {% endif %}
+        {% if impact_preview %}
+          <div class="alert info">
+            <strong>Impacto operativo validado</strong>
+            <p>{{ impact_preview.strategy }} - {{ impact_preview.expected_invocations }} invocacion(es), plan {{ impact_preview.scheduling }}, timeout {{ impact_preview.timeout_seconds }}s, max. {{ impact_preview.max_output_tokens }} tokens de salida.</p>
+            <p>Cloud {{ 'permitido' if impact_preview.cloud_allowed else 'bloqueado' }} - fallback {{ 'permitido' if impact_preview.fallback_allowed else 'bloqueado' }}.</p>
+            {% if impact_preview.cloud_models %}
+              <ul>
+                {% for model in impact_preview.cloud_models %}
+                  <li>Modelo cloud seleccionado: {{ model }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          </div>
+        {% endif %}
 
         <form class="tester-grid" method="post" action="/dashboard/actions/prompt-tester">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

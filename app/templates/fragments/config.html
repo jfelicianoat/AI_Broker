@@ -22,6 +22,19 @@
     </ul>
   </div>
 {% endif %}
+{% if config_review %}
+  <div class="alert info config-alert">
+    <strong>Revision lista; no se ha guardado nada</strong>
+    <p>Estos cambios se aplicarian si pulsas Guardar configuracion.</p>
+    <ul>
+      {% for item in config_review %}
+        <li>{{ item.label }}: {{ item.before }} -> {{ item.after }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% elif config_review is defined and config_review == [] %}
+  <div class="alert info config-alert" hidden></div>
+{% endif %}
 
 <form class="config-form" method="post" action="/dashboard/actions/config">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -246,6 +259,7 @@
     </div>
   </div>
   <div class="panel-actions config-actions">
+    <button class="button secondary" name="config_action" value="validate" type="submit">Revisar sin guardar</button>
     <button class="button" type="submit">Guardar configuracion</button>
   </div>
 </form>
