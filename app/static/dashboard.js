@@ -22,6 +22,99 @@
     return meta ? meta.getAttribute("content") : "";
   }
 
+  function progressId() {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    return `probe-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function setProbeProgress(panel, progress) {
+    if (!panel) return;
+    const label = panel.querySelector("[data-probe-progress-label]");
+    const detail = panel.querySelector("[data-probe-progress-detail]");
+    const bar = panel.querySelector("[data-probe-progress-bar]");
+    const completed = Number(progress.completed || 0);
+    const total = Number(progress.total || 0);
+    const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 8;
+    panel.hidden = false;
+    panel.dataset.phase = progress.phase || "running";
+    if (bar) bar.style.width = `${percent}%`;
+    if (label) {
+      if (progress.phase === "completed") label.textContent = `Tanda completada: ${completed}/${total || completed}`;
+      else if (progress.phase === "failed") label.textContent = "Analisis detenido";
+      else if (total > 0) label.textContent = `Progreso de tanda: ${completed}/${total}`;
+      else label.textContent = "Preparando catalogo...";
+    }
+    if (detail) {
+      if (progress.error) detail.textContent = progress.error;
+      else if (progress.current_model) detail.textContent = `Modelo actual: ${progress.current_model}`;
+      else if (progress.last_result && progress.last_result.name) {
+        detail.textContent = `Ultimo: ${progress.last_result.name} - ${progress.last_result.compatibility || "sin clasificar"}`;
+      } else detail.textContent = "Esperando primera respuesta del proveedor.";
+    }
+  }
+
+  async function pollProbeProgress(providerId, id, panel, stop) {
+    while (!stop.done) {
+      try {
+        const response = await fetch(`/dashboard/actions/providers/${encodeURIComponent(providerId)}/probe/progress?progress_id=${encodeURIComponent(id)}`, {
+          headers: {"Accept": "application/json"}
+        });
+        if (response.ok) {
+          const progress = await response.json();
+          setProbeProgress(panel, progress);
+          if (progress.phase === "completed" || progress.phase === "failed") return;
+        }
+      } catch (_) {
+        // The form submission result will surface the real failure if polling misses once.
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 850));
+    }
+  }
+
+  function submitterProviderId(submitter) {
+    return submitter ? submitter.getAttribute("data-provider-probe") : null;
+  }
+
+  async function submitProbeForm(form, submitter) {
+    const providerId = submitterProviderId(submitter);
+    if (!providerId) return false;
+    const id = progressId();
+    const escapedProvider = window.CSS && CSS.escape ? CSS.escape(providerId) : providerId.replace(/"/g, '\\"');
+    const panel = form.querySelector(`[data-probe-progress="${escapedProvider}"]`);
+    const stop = {done: false};
+    const data = new FormData(form);
+    data.set("probe_progress_id", id);
+    submitter.disabled = true;
+    submitter.setAttribute("aria-busy", "true");
+    setProbeProgress(panel, {phase: "preparing", completed: 0, total: null, current_model: null});
+    const poll = pollProbeProgress(providerId, id, panel, stop);
+    try {
+      const response = await fetch(submitter.getAttribute("formaction") || form.action, {
+        method: "POST",
+        body: new URLSearchParams(data),
+        headers: {
+          "Accept": "text/html",
+          "X-CSRF-Token": csrfToken()
+        }
+      });
+      stop.done = true;
+      await poll;
+      if (!response.ok) throw new Error(`Error ${response.status}`);
+      const html = await response.text();
+      document.open();
+      document.write(html);
+      document.close();
+      return true;
+    } catch (error) {
+      stop.done = true;
+      setProbeProgress(panel, {phase: "failed", error: error.message || "No se pudo analizar compatibilidad"});
+      toast(error.message || "No se pudo analizar compatibilidad");
+      submitter.disabled = false;
+      submitter.removeAttribute("aria-busy");
+      return true;
+    }
+  }
+
   async function requestAndSwap(element, method, url) {
     const confirmMessage = element.getAttribute("hx-confirm");
     if (confirmMessage && !window.confirm(confirmMessage)) return;
@@ -92,6 +185,15 @@
       if (processed.has(button)) return;
       processed.add(button);
       button.addEventListener("click", () => refresh(button.dataset.refreshTarget));
+    });
+    root.querySelectorAll("form.config-form").forEach((form) => {
+      if (processed.has(form)) return;
+      processed.add(form);
+      form.addEventListener("submit", async (event) => {
+        if (!submitterProviderId(event.submitter)) return;
+        event.preventDefault();
+        await submitProbeForm(form, event.submitter);
+      });
     });
   }
 

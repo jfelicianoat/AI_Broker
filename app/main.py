@@ -448,9 +448,14 @@ def _model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, 
         dispatchable = False
         reason = entry.get("compatibility_error") or "Modelo marcado como incompatible con el endpoint de inferencia."
     elif compatibility == "compatible":
+        available_capabilities = {item.lower() for item in capabilities}
         availability = "online"
-        dispatchable = "completion" in {item.lower() for item in capabilities}
-        reason = "Modelo compatible y proveedor disponible." if dispatchable else "Modelo disponible, pero no declara completion."
+        dispatchable = bool({"completion", "embedding"}.intersection(available_capabilities))
+        reason = (
+            "Modelo compatible y proveedor disponible."
+            if dispatchable
+            else "Modelo disponible, pero no declara una capacidad ejecutable por el Broker."
+        )
     elif model_status in {"available", "online"} and provider_status in {"healthy", "degraded"}:
         availability = "unknown"
         dispatchable = False

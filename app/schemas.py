@@ -230,14 +230,15 @@ class TaskCreateRequest(StrictBaseModel):
         if self.risk.data_classification == DataClassification.local_only:
             target = self.model_requirements.target_model
             if target is not None and (
-                target.provider.lower() != "ollama" or target.deployment.lower() == "cloud"
+                target.provider.lower() not in {"ollama", "huggingface_local"}
+                or target.deployment.lower() == "cloud"
             ):
-                raise ValueError("local_only target_model must be a local Ollama deployment")
+                raise ValueError("local_only target_model must be a local deployment")
             self.model_requirements.cloud_allowed = False
             self.model_requirements.allowed_providers = [
                 provider
                 for provider in self.model_requirements.allowed_providers
-                if provider.lower() == "ollama"
+                if provider.lower() in {"ollama", "huggingface_local"}
             ] or ["ollama"]
         if self.content.attachments:
             raise ValueError("attachments are not supported until a lossless provider mapping exists")

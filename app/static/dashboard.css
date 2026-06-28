@@ -196,6 +196,17 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .provider-fields { padding: 12px; display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 11px; }
 .provider-wide { grid-column: 1 / -1; }
 .provider-actions { display: flex; justify-content: flex-end; }
+.probe-progress { padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--radius); background: #071321; display: grid; gap: 8px; }
+.probe-progress[hidden] { display: none; }
+.probe-progress > div:first-child { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 11px; }
+.probe-progress strong { color: #dce6ef; font-size: 12px; }
+.probe-progress span, .probe-progress small { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.probe-progress[data-phase="failed"] { border-color: #6d343b; background: #22141b; }
+.probe-progress[data-phase="completed"] { border-color: #25623d; background: #0d2118; }
+.probe-progress-bar { height: 6px; border-radius: 6px; overflow: hidden; background: #1b2d3d; }
+.probe-progress-bar span { display: block; width: 8%; height: 100%; border-radius: 6px; background: var(--teal); transition: width .24s ease; }
+.probe-progress[data-phase="failed"] .probe-progress-bar span { background: var(--red); }
+.probe-progress[data-phase="completed"] .probe-progress-bar span { background: var(--green); }
 .model-compat-list { display: grid; gap: 8px; }
 .model-compat-row { padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--radius); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; }
 .model-compat-row span:first-child { display: grid; gap: 3px; }

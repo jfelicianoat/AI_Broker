@@ -9,13 +9,22 @@ import httpx
 from app.config import (
     BrokerConfig,
     DeepSeekConfig,
+    HuggingFaceLocalConfig,
+    HuggingFaceLocalModelConfig,
     OllamaConfig,
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
     ProcessingConfig,
     ProvidersConfig,
 )
-from app.providers import DeepSeekProvider, OllamaProvider, OpenAICompatibleProvider, ProviderError, RoutedModelProvider
+from app.providers import (
+    DeepSeekProvider,
+    HuggingFaceLocalProvider,
+    OllamaProvider,
+    OpenAICompatibleProvider,
+    ProviderError,
+    RoutedModelProvider,
+)
 from app.schemas import ModelReference, TaskCreateRequest
 
 
@@ -288,6 +297,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
             if request.url.path == "/v1/models":
                 return httpx.Response(200, json={"data": [{"id": "ok"}, {"id": "bad"}]})
             body = json.loads(request.content)
+            self.assertEqual(body["temperature"], 0.1)
             if body["model"] == "ok":
                 return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
             return httpx.Response(400, json={"error": {"message": "unsupported endpoint"}})
@@ -335,6 +345,214 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(called_models, ["pending"])
         self.assertEqual([item["name"] for item in results], ["pending"])
+
+    async def test_probe_all_models_skips_any_checked_model_by_default(self) -> None:
+        called_models = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            called_models.append(body["model"])
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(
+                    name="already-bad",
+                    compatibility="incompatible",
+                    compatibility_checked_at="2026-06-28T10:00:00+00:00",
+                ),
+                OpenAICompatibleModelConfig(name="pending", compatibility="unknown"),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(called_models, ["pending"])
+        self.assertEqual([item["name"] for item in results], ["pending"])
+
+    async def test_probe_all_models_uses_embeddings_endpoint_for_embedding_models(self) -> None:
+        called_paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            called_paths.append(request.url.path)
+            self.assertEqual(request.url.path, "/v1/embeddings")
+            body = json.loads(request.content)
+            self.assertEqual(body["model"], "nvidia/nv-embedqa-e5-v5")
+            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[OpenAICompatibleModelConfig(name="nvidia/nv-embedqa-e5-v5", capabilities=["embedding"])],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(called_paths, ["/v1/embeddings"])
+        self.assertEqual(results[0]["compatibility"], "compatible")
+        self.assertIsNone(results[0]["compatibility_error"])
+
+    async def test_probe_all_models_catalogs_unsupported_non_chat_without_network_call(self) -> None:
+        called = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(500)
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[OpenAICompatibleModelConfig(name="nvidia/nemoretriever-parse", capabilities=["document"])],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertFalse(called)
+        self.assertEqual(results[0]["compatibility"], "unknown")
+        self.assertIn("endpoint de ejecución", results[0]["compatibility_error"])
+
+    async def test_sync_models_infers_non_chat_capabilities_from_names(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/models")
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "nvidia/nv-embedqa-e5-v5"}, {"id": "meta/llama-3.1-8b-instruct"}]},
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            sync_models=True,
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            models = await provider.models()
+        await provider.close()
+
+        by_name = {item["name"]: item for item in models}
+        self.assertEqual(by_name["nvidia/nv-embedqa-e5-v5"]["capabilities"], ["embedding"])
+        self.assertEqual(by_name["meta/llama-3.1-8b-instruct"]["capabilities"], ["completion"])
+
+    async def test_embed_uses_openai_compatible_embeddings_endpoint(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/embeddings")
+            self.assertEqual(request.headers["authorization"], "Bearer nvidia-secret")
+            body = json.loads(request.content)
+            self.assertEqual(body, {"model": "nvidia/nv-embedqa-e5-v5", "input": "texto"})
+            return httpx.Response(
+                200,
+                json={"data": [{"embedding": [0.1, 0.2, 0.3]}], "usage": {"prompt_tokens": 6}},
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[
+                OpenAICompatibleModelConfig(
+                    name="nvidia/nv-embedqa-e5-v5",
+                    capabilities=["embedding"],
+                    input_cost_per_million=1,
+                )
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "nvidia:embed",
+            "inference_kind": "embedding",
+            "content": {"prompt": "texto"},
+            "output": {
+                "format": "json",
+                "json_schema": {"type": "object"},
+            },
+            "model_requirements": {
+                "cloud_allowed": True,
+                "allowed_providers": ["nvidia"],
+            },
+        })
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvidia-secret"}):
+            output = await provider.embed(request, "nvidia/nv-embedqa-e5-v5", "texto")
+        await provider.close()
+
+        self.assertEqual(output.embedding, (0.1, 0.2, 0.3))
+        self.assertEqual(output.tokens_input, 6)
+        self.assertEqual(output.tokens_output, 0)
+        self.assertEqual(output.cost_usd, 0.000006)
+
+
+class HuggingFaceLocalProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lists_configured_local_models(self) -> None:
+        with self.subTest("catalog"):
+            model_dir = os.getcwd()
+            provider = HuggingFaceLocalProvider(HuggingFaceLocalConfig(
+                enabled=True,
+                models=[
+                    HuggingFaceLocalModelConfig(
+                        name="local-qwen",
+                        path=model_dir,
+                        context_window=32768,
+                    )
+                ],
+            ))
+            models = await provider.models()
+            await provider.close()
+
+        self.assertEqual(models[0]["provider"], "huggingface_local")
+        self.assertEqual(models[0]["deployment"], "local")
+        self.assertEqual(models[0]["compatibility"], "compatible")
+        self.assertIn("completion", models[0]["capabilities"])
+
+    async def test_generate_uses_lazy_loaded_runtime_and_reports_tokens(self) -> None:
+        provider = HuggingFaceLocalProvider(HuggingFaceLocalConfig(
+            enabled=True,
+            models=[
+                HuggingFaceLocalModelConfig(
+                    name="local-qwen",
+                    path=os.getcwd(),
+                    context_window=32768,
+                )
+            ],
+        ))
+
+        async def fake_load(item):
+            return object(), object()
+
+        provider._load = fake_load  # type: ignore[method-assign]
+        provider._generate_sync = lambda model, tokenizer, prompt, temperature, max_tokens: ("respuesta local", 7, 3)  # type: ignore[method-assign]
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "hf-local:generate",
+            "content": {"prompt": "hola"},
+            "model_requirements": {
+                "allowed_providers": ["huggingface_local"],
+                "target_model": {
+                    "provider": "huggingface_local",
+                    "deployment": "local",
+                    "model": "local-qwen",
+                },
+                "fallback_allowed": False,
+            },
+        })
+        output = await provider.generate(request, "local-qwen", "hola")
+        await provider.close()
+
+        self.assertEqual(output.content, "respuesta local")
+        self.assertEqual(output.tokens_input, 7)
+        self.assertEqual(output.tokens_output, 3)
+        self.assertEqual(output.cost_usd, 0.0)
 
 
 class RouterTests(unittest.IsolatedAsyncioTestCase):
@@ -516,6 +734,56 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected[0].provider, "nvidia")
         self.assertEqual(output.content, "custom")
 
+    async def test_routes_custom_openai_compatible_embedding_provider(self) -> None:
+        class DisabledStub:
+            async def models(self):
+                return []
+
+            async def close(self):
+                return None
+
+        class CustomStub:
+            async def models(self):
+                return [
+                    {
+                        "name": "embed",
+                        "provider": "nvidia",
+                        "deployment": "api",
+                        "context_window": 100000,
+                        "capabilities": ["embedding"],
+                        "compatibility": "compatible",
+                    }
+                ]
+
+            async def embed(self, request, model, prompt):
+                from app.providers import ModelOutput
+
+                return ModelOutput(None, 3, 0, 0.0, 1.0, embedding=(0.1, 0.2))
+
+            async def close(self):
+                return None
+
+        router = RoutedModelProvider(
+            BrokerConfig(providers=ProvidersConfig(ollama=OllamaConfig(enabled=False))),
+            ollama=DisabledStub(),
+            deepseek=DisabledStub(),
+            custom={"nvidia": CustomStub()},
+        )
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "route:custom-embed",
+            "inference_kind": "embedding",
+            "content": {"prompt": "hola"},
+            "output": {"format": "json", "json_schema": {"type": "object"}},
+            "model_requirements": {"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        })
+        selected = await router.select(request, 1, ["single"])
+        output = await router.propose(request, selected[0], 1)
+        await router.close()
+
+        self.assertEqual(selected[0].provider, "nvidia")
+        self.assertEqual(selected[0].model, "embed")
+        self.assertEqual(output.embedding, (0.1, 0.2))
+
     async def test_auto_selection_excludes_incompatible_custom_models(self) -> None:
         class CustomStub:
             async def models(self):
@@ -556,6 +824,67 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         await router.close()
 
         self.assertEqual(selected[0].model, "ok")
+
+    async def test_routes_huggingface_local_provider(self) -> None:
+        class DisabledStub:
+            async def models(self):
+                return []
+
+            async def close(self):
+                return None
+
+        class LocalStub:
+            async def models(self):
+                return [
+                    {
+                        "name": "local-qwen",
+                        "provider": "huggingface_local",
+                        "deployment": "local",
+                        "context_window": 100000,
+                        "capabilities": ["completion"],
+                        "compatibility": "compatible",
+                    }
+                ]
+
+            async def generate(self, request, model, prompt):
+                from app.providers import ModelOutput
+
+                return ModelOutput("hf local", 1, 1, 0.0, 1.0)
+
+            async def close(self):
+                return None
+
+        router = RoutedModelProvider(
+            BrokerConfig(
+                providers=ProvidersConfig(
+                    ollama=OllamaConfig(enabled=False),
+                    huggingface_local=HuggingFaceLocalConfig(enabled=True),
+                )
+            ),
+            ollama=DisabledStub(),
+            deepseek=DisabledStub(),
+            huggingface_local=LocalStub(),
+        )
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "route:hf-local",
+            "content": {"prompt": "hola"},
+            "risk": {"data_classification": "local_only"},
+            "model_requirements": {
+                "allowed_providers": ["huggingface_local"],
+                "target_model": {
+                    "provider": "huggingface_local",
+                    "deployment": "local",
+                    "model": "local-qwen",
+                },
+                "fallback_allowed": False,
+            },
+        })
+        selected = await router.select(request, 1, ["single"])
+        output = await router.propose(request, selected[0], 1)
+        await router.close()
+
+        self.assertEqual(selected[0].provider, "huggingface_local")
+        self.assertEqual(output.content, "hf local")
 
 
 if __name__ == "__main__":
