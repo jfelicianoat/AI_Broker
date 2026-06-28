@@ -87,7 +87,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:03:44.618911+00:00'
+      compatibility_checked_at: '2026-06-28T11:39:49.149161+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''23bd454d-b225-49a3-8118-582a62fc51b8'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -98,7 +98,7 @@ providers:
       capabilities:
       - completion
       compatibility: compatible
-      compatibility_checked_at: '2026-06-28T11:03:46.867100+00:00'
+      compatibility_checked_at: '2026-06-28T11:39:51.340902+00:00'
       compatibility_error: null
     - name: adept/fuyu-8b
       context_window: 128000
@@ -107,7 +107,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:04:46.587754+00:00'
+      compatibility_checked_at: '2026-06-28T11:40:07.371593+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''e598bfc1-b058-41af-869d-556d3c7e1b48'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -118,7 +118,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:04:48.771857+00:00'
+      compatibility_checked_at: '2026-06-28T11:40:09.559921+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''6497fc2b-7ff8-4019-8946-123dccbfc863'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -129,7 +129,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:04:50.974248+00:00'
+      compatibility_checked_at: '2026-06-28T11:40:11.745766+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''02f84bf4-c1a1-489b-a9de-ac3e8dcdec14'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -140,7 +140,7 @@ providers:
       capabilities:
       - embedding
       compatibility: compatible
-      compatibility_checked_at: '2026-06-28T11:04:53.270529+00:00'
+      compatibility_checked_at: '2026-06-28T11:40:13.903224+00:00'
       compatibility_error: null
     - name: bigcode/starcoder2-15b
       context_window: 128000
@@ -149,7 +149,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:04:55.405463+00:00'
+      compatibility_checked_at: '2026-06-28T11:40:16.043229+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         404 page not found'
     - name: bytedance/seed-oss-36b-instruct
@@ -159,7 +159,7 @@ providers:
       capabilities:
       - completion
       compatibility: compatible
-      compatibility_checked_at: '2026-06-28T11:04:57.489240+00:00'
+      compatibility_checked_at: '2026-06-28T11:40:18.117554+00:00'
       compatibility_error: null
     - name: databricks/dbrx-instruct
       context_window: 128000
@@ -168,7 +168,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:06:52.348842+00:00'
+      compatibility_checked_at: '2026-06-28T11:42:02.258787+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''3d6c2ff8-8bfc-4d10-8fd0-b7337288e869'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -179,7 +179,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:06:54.553133+00:00'
+      compatibility_checked_at: '2026-06-28T11:42:04.447070+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''e503b15c-62b0-4d69-b532-a88f0bfa2656'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
