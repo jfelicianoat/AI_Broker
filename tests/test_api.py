@@ -930,6 +930,22 @@ def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
     assert resources.detail == "PROVIDER_UNAVAILABLE: snapshot de recursos no disponible"
 
 
+def test_models_dashboard_has_dedicated_screen_and_navigation(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        dashboard = client.get("/dashboard")
+        models = client.get("/dashboard/models")
+        tester = client.get("/dashboard/prompt-tester")
+
+    assert dashboard.status_code == 200
+    assert models.status_code == 200
+    assert tester.status_code == 200
+    assert 'href="/dashboard/models">Modelos' in dashboard.text
+    assert 'href="/dashboard/models">Modelos' in tester.text
+    assert 'href="#resources-panel">Modelos' not in dashboard.text
+    assert "Catalogo operativo" in models.text
+    assert "Runtime local" in models.text
+
+
 def test_prompt_tester_validates_json_without_creating_task(tmp_path: Path) -> None:
     model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
     with make_client(tmp_path) as client:

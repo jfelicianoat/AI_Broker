@@ -137,6 +137,22 @@ def create_dashboard_router(
             },
         )
 
+    @router.get("/dashboard/models", response_class=HTMLResponse)
+    async def model_dashboard(request: Request):
+        catalog, catalog_error = await models()
+        resource_snapshot = await resources()
+        return _template_response(
+            request,
+            "models.html",
+            {
+                "models": catalog,
+                "catalog_error": catalog_error,
+                "resources": resource_snapshot,
+                "config": config,
+                "model_stats": _model_dashboard_stats(catalog, resource_snapshot),
+            },
+        )
+
     @router.get("/dashboard/comparison", response_class=HTMLResponse)
     async def comparison(request: Request, task_id: str | None = None):
         tasks = queries.list_comparison_tasks(page_size=25)
@@ -1037,6 +1053,26 @@ def _prompt_tester_impact(payload: TaskCreateRequest) -> dict[str, Any]:
         "cloud_allowed": bool(model_requirements.get("cloud_allowed")),
         "fallback_allowed": bool(model_requirements.get("fallback_allowed")),
         "cloud_models": cloud_models,
+    }
+
+
+def _model_dashboard_stats(
+    catalog: list[dict[str, Any]],
+    resources: DashboardResourcesResponse,
+) -> dict[str, Any]:
+    providers = {str(item.get("provider") or "unknown") for item in catalog}
+    deployments = {str(item.get("deployment") or "unknown") for item in catalog}
+    compatible = sum(1 for item in catalog if str(item.get("compatibility") or "unknown") == "compatible")
+    incompatible = sum(1 for item in catalog if str(item.get("compatibility") or "unknown") == "incompatible")
+    unknown = len(catalog) - compatible - incompatible
+    return {
+        "total": len(catalog),
+        "providers": len(providers),
+        "deployments": len(deployments),
+        "compatible": compatible,
+        "incompatible": incompatible,
+        "unknown": unknown,
+        "loaded": len(resources.loaded_models),
     }
 
 
