@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>AI Broker - Modelos</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegacion principal">
+      <a class="brand" href="/dashboard">AI Broker</a>
+      <nav class="nav-list">
+        <a class="nav-item" href="/dashboard">Resumen</a>
+        <a class="nav-item" href="/dashboard#queue-panel">Cola</a>
+        <a class="nav-item" href="/dashboard/prompt-tester">Probador <small>Fase 5.3</small></a>
+        <a class="nav-item" href="/dashboard/comparison">Comparacion <small>Fase 5.4</small></a>
+        <a class="nav-item active" href="/dashboard/models">Modelos</a>
+        <a class="nav-item" href="/dashboard#health-panel">Salud</a>
+        <a class="nav-item" href="/dashboard#history-panel">Historial</a>
+        <a class="nav-item" href="/dashboard#config-panel">Configuracion</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span>Contrato 2.1</span>
+        <span>Catalogo operativo</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="service-state">
+          <span class="status-dot status-{{ resources.status }}"></span>
+          <div>
+            <strong>Modelos</strong>
+            <small>Catalogo, compatibilidad, runtime local y proveedores.</small>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <a class="button secondary" href="/dashboard/prompt-tester">Probar modelo</a>
+          <a class="button secondary" href="/dashboard#config-panel">Configurar</a>
+        </div>
+      </header>
+
+      <main class="content">
+        {% if catalog_error %}
+          <div class="alert warning">
+            <strong>Catalogo no disponible</strong>
+            <p>{{ catalog_error }}</p>
+          </div>
+        {% endif %}
+
+        <section class="metric-grid models-overview" aria-label="Resumen de modelos">
+          <div class="metric-card"><span class="metric-label">Modelos catalogados</span><strong>{{ model_stats.total }}</strong><small>{{ model_stats.providers }} proveedor(es), {{ model_stats.deployments }} deployment(s)</small></div>
+          <div class="metric-card"><span class="metric-label">Compatibles mixture</span><strong>{{ model_stats.compatible }}</strong><small>Listos para proponer o arbitrar</small></div>
+          <div class="metric-card"><span class="metric-label">Pendientes</span><strong>{{ model_stats.unknown }}</strong><small>Sin analisis de compatibilidad</small></div>
+          <div class="metric-card"><span class="metric-label">No compatibles</span><strong>{{ model_stats.incompatible }}</strong><small>Excluidos del flujo mixture</small></div>
+          <div class="metric-card"><span class="metric-label">Cargados ahora</span><strong>{{ model_stats.loaded }}</strong><small>Snapshot {{ resources.checked_at|short_time }}</small></div>
+        </section>
+
+        <section class="models-grid">
+          <section class="panel models-catalog">
+            <div class="panel-heading">
+              <div>
+                <h2>Catalogo operativo</h2>
+                <p>Modelos que el Broker puede seleccionar o mostrar al probador.</p>
+              </div>
+              <span class="badge badge-neutral">{{ models|length }} modelos</span>
+            </div>
+            {% if models %}
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Modelo</th>
+                      <th>Proveedor</th>
+                      <th>Deployment</th>
+                      <th>Contexto</th>
+                      <th>Capacidades</th>
+                      <th>Compatibilidad</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for model in models %}
+                      <tr>
+                        <td><strong>{{ model.name }}</strong>{% if model.compatibility_error %}<small>{{ model.compatibility_error }}</small>{% endif %}</td>
+                        <td>{{ model.provider }}</td>
+                        <td>{{ model.deployment }}</td>
+                        <td>{{ model.context_window or 'N/D' }}</td>
+                        <td>{{ (model.capabilities or [])|join(', ') if model.capabilities else 'N/D' }}</td>
+                        <td><span class="badge {{ model|model_compatibility_class }}">{{ model|model_compatibility_text }}</span></td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <div class="empty-state">
+                <strong>Sin modelos catalogados</strong>
+                <p>Revisa proveedores activos o sincroniza el catalogo desde configuracion.</p>
+              </div>
+            {% endif %}
+          </section>
+
+          <aside class="models-side">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>Runtime local</h2>
+                  <p>{{ resources.provider }} - {{ resources.status }}</p>
+                </div>
+                <span class="badge badge-{{ resources.status }}">{{ resources.max_parallel_invocations }} slow</span>
+              </div>
+              {% if resources.status == 'unavailable' %}
+                <div class="resource-warning">{{ resources.detail }}</div>
+              {% endif %}
+              {% set usable = resources.vram_budget_bytes - resources.vram_safety_margin_bytes %}
+              {% set percent = ((resources.used_vram_bytes / usable) * 100) if usable > 0 else 0 %}
+              <div class="resource-summary">
+                <div>
+                  <span>VRAM observada</span>
+                  <strong>{{ (resources.used_vram_bytes|gb) ~ ' / ' ~ (usable|gb) if resources.status == 'healthy' else 'N/D' }}</strong>
+                </div>
+                <div class="meter" aria-label="Uso de VRAM"><span style="width: {{ [percent, 100]|min }}%"></span></div>
+                <small>Margen: {{ resources.vram_safety_margin_bytes|gb }} - Reservada: {{ resources.reserved_vram_bytes|gb }}</small>
+              </div>
+              {% if resources.loaded_models %}
+                <div class="model-list">
+                  {% for model in resources.loaded_models %}
+                    <div>
+                      <span><strong>{{ model.model }}</strong><small>{{ model.context_length or 'contexto N/D' }}</small></span>
+                      <span>{{ model.size_vram_bytes|gb }} - {{ model.lease_count }} leases</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="empty-inline">No hay modelos cargados en este momento.</div>
+              {% endif %}
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>Hugging Face local</h2>
+                  <p>{{ config.providers.huggingface_local.models_dir }}</p>
+                </div>
+                <span class="badge badge-{{ 'active' if config.providers.huggingface_local.enabled else 'cancelled' }}">{{ 'Activo' if config.providers.huggingface_local.enabled else 'Inactivo' }}</span>
+              </div>
+              {% if config.providers.huggingface_local.models %}
+                <div class="model-list">
+                  {% for model in config.providers.huggingface_local.models %}
+                    <div>
+                      <span><strong>{{ model.name }}</strong><small>{{ model.path }}</small></span>
+                      <span>{{ model.context_window }} ctx</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="empty-inline">No hay modelos HF locales declarados.</div>
+              {% endif %}
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>Proveedores API</h2>
+                  <p>OpenAI-compatible configurados.</p>
+                </div>
+                <span class="badge badge-neutral">{{ config.providers.custom|length }}</span>
+              </div>
+              {% if config.providers.custom %}
+                <div class="model-list provider-status-list">
+                  {% for provider in config.providers.custom %}
+                    <div>
+                      <span><strong>{{ provider.display_name or provider.id }}</strong><small>{{ provider.base_url }}</small></span>
+                      <span>{{ provider.deployment }} - {{ provider.models|length }} modelos</span>
+                    </div>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <div class="empty-inline">No hay proveedores API configurados.</div>
+              {% endif %}
+            </section>
+          </aside>
+        </section>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

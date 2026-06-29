@@ -226,6 +226,12 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .model-catalog-card strong { font-size: 12px; overflow-wrap: anywhere; }
 .model-catalog-card span { font-size: 11px; font-weight: 650; }
 .model-catalog-card small { font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; opacity: .78; }
+.models-overview { margin-bottom: 14px; }
+.models-grid { display: grid; grid-template-columns: minmax(720px, 1fr) minmax(330px, .38fr); gap: 14px; align-items: start; }
+.models-side { display: grid; gap: 14px; }
+.models-catalog td strong { display: block; color: #dce6ef; max-width: 420px; overflow-wrap: anywhere; }
+.models-catalog td .badge { justify-content: center; }
+.provider-status-list small { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .comparison-grid { display: grid; grid-template-columns: minmax(280px, .35fr) minmax(680px, 1fr); gap: 14px; align-items: start; }
 .task-stack { display: grid; }
@@ -265,6 +271,7 @@ td small { display: block; margin-top: 3px; color: #718599; }
   .queue-panel, .active-panel, .health-panel, .resources-panel, .config-panel, .history-panel { grid-column: 1; grid-row: auto; }
   .tester-grid { grid-template-columns: 1fr; }
   .tester-input, .tester-config, .tester-limits, .tester-preview { grid-column: 1; grid-row: auto; }
+  .models-grid { grid-template-columns: 1fr; }
   .comparison-grid { grid-template-columns: 1fr; }
   .task-detail-grid { grid-template-columns: 1fr; }
   .comparison-summary { grid-template-columns: repeat(2, 1fr); }
