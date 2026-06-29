@@ -6,6 +6,7 @@ import time
 from fastapi.testclient import TestClient
 
 import app.dashboard_web as dashboard_web
+import app.main as main_module
 from app.config import (
     BrokerConfig,
     LoggingConfig,
@@ -600,6 +601,7 @@ def test_dashboard_configuration_adds_custom_api_provider(tmp_path: Path) -> Non
                 "custom_provider_1_base_url": "https://integrate.api.nvidia.com/v1",
                 "custom_provider_1_api_key_env": "NVIDIA_API_KEY",
                 "custom_provider_1_deployment": "cloud",
+                "custom_provider_1_auto_start": "on",
                 "custom_provider_1_timeout_seconds": "300",
                 "custom_provider_1_default_context_window": "128000",
                 "custom_provider_1_input_cost_per_million": "0",
@@ -613,7 +615,27 @@ def test_dashboard_configuration_adds_custom_api_provider(tmp_path: Path) -> Non
     assert config.providers.custom[0].id == "nvidia"
     assert config.providers.custom[0].enabled is True
     assert saved.providers.custom[0].base_url == "https://integrate.api.nvidia.com/v1"
+    assert saved.providers.custom[0].auto_start is True
     assert saved.providers.custom[0].models[0].name == "meta/llama-3.1-70b-instruct"
+
+
+def test_lmstudio_auto_start_uses_configured_port(monkeypatch) -> None:
+    calls = []
+
+    async def fake_run_process(args, *, timeout_seconds):
+        calls.append((args, timeout_seconds))
+        if args == ["lms", "server", "status"]:
+            return {"returncode": 0, "stdout": "The server is not running.", "stderr": ""}
+        return {"returncode": 0, "stdout": "Success! Server is now running on port 1234", "stderr": ""}
+
+    monkeypatch.setattr(main_module, "_run_process", fake_run_process)
+    logger = main_module.logging.getLogger("test.lmstudio")
+    asyncio.run(main_module._ensure_lmstudio_server("http://127.0.0.1:1234/v1", logger))
+
+    assert calls == [
+        (["lms", "server", "status"], 10),
+        (["lms", "server", "start", "--port", "1234"], 30),
+    ]
 
 
 def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, monkeypatch) -> None:

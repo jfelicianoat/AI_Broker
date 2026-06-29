@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
@@ -57,6 +58,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        await _auto_start_local_provider_servers(broker_config, logger)
         db.init_schema()
         repository.recover_interrupted_tasks()
         stop_dispatcher = asyncio.Event()
@@ -344,6 +346,64 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         return health_response
 
     return app
+
+
+async def _auto_start_local_provider_servers(config: BrokerConfig, logger: logging.Logger) -> None:
+    for provider in config.providers.custom:
+        if not provider.enabled or not provider.auto_start:
+            continue
+        if provider.deployment != "local":
+            logger.warning(
+                "provider.auto_start_ignored",
+                extra={"provider": provider.id, "reason": "deployment_not_local"},
+            )
+            continue
+        if provider.id.lower() not in {"lmstudio", "lm_studio"}:
+            logger.warning(
+                "provider.auto_start_ignored",
+                extra={"provider": provider.id, "reason": "unsupported_provider"},
+            )
+            continue
+        await _ensure_lmstudio_server(provider.base_url, logger)
+
+
+async def _ensure_lmstudio_server(base_url: str, logger: logging.Logger) -> None:
+    parsed = urlparse(base_url)
+    port = parsed.port or 1234
+    status = await _run_process(["lms", "server", "status"], timeout_seconds=10)
+    status_text = f"{status['stdout']}\n{status['stderr']}".strip()
+    if status["returncode"] == 0 and "not running" not in status_text.lower():
+        logger.info("provider.auto_start_skipped", extra={"provider": "lmstudio", "detail": status_text})
+        return
+
+    started = await _run_process(["lms", "server", "start", "--port", str(port)], timeout_seconds=30)
+    output = f"{started['stdout']}\n{started['stderr']}".strip()
+    if started["returncode"] != 0:
+        logger.warning(
+            "provider.auto_start_failed",
+            extra={"provider": "lmstudio", "returncode": started["returncode"], "detail": output},
+        )
+        return
+    logger.info("provider.auto_started", extra={"provider": "lmstudio", "port": port, "detail": output})
+
+
+async def _run_process(args: list[str], *, timeout_seconds: float) -> dict[str, Any]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+        return {
+            "returncode": int(process.returncode or 0),
+            "stdout": stdout.decode(errors="replace"),
+            "stderr": stderr.decode(errors="replace"),
+        }
+    except FileNotFoundError:
+        return {"returncode": 127, "stdout": "", "stderr": f"No se encontro el ejecutable: {args[0]}"}
+    except TimeoutError:
+        return {"returncode": 124, "stdout": "", "stderr": "Timeout al ejecutar el comando"}
 
 
 async def _dispatcher_loop(

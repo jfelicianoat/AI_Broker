@@ -60,6 +60,63 @@ providers:
     trust_remote_code: false
     models: []
   custom:
+  - id: lmstudio
+    enabled: true
+    adapter: openai_compatible
+    display_name: LM Studio
+    base_url: http://127.0.0.1:1234/v1
+    timeout_seconds: 300.0
+    api_key_env: null
+    keyring_service: ai-broker
+    keyring_username: lmstudio_api_key
+    deployment: local
+    auto_start: true
+    sync_models: true
+    default_context_window: 32768
+    probe_max_output_tokens: 8
+    probe_delay_seconds: 0.0
+    probe_max_models: 20
+    probe_skip_compatible: true
+    probe_skip_checked: true
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+    models:
+    - name: google/gemma-4-31b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-29T21:13:09.917539+00:00'
+      compatibility_error: null
+    - name: nvidia/nemotron-3-nano-omni
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-29T21:13:11.182144+00:00'
+      compatibility_error: null
+    - name: nvidia/nemotron-3-super
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-29T21:13:33.930137+00:00'
+      compatibility_error: null
+    - name: text-embedding-nomic-embed-text-v1.5
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - embedding
+      compatibility: compatible
+      compatibility_checked_at: '2026-06-29T21:16:06.909813+00:00'
+      compatibility_error: null
   - id: nvidia
     enabled: true
     adapter: openai_compatible
@@ -70,6 +127,7 @@ providers:
     keyring_service: ai-broker
     keyring_username: nvidia_api_key
     deployment: api
+    auto_start: false
     sync_models: true
     default_context_window: 128000
     probe_max_output_tokens: 1

@@ -127,10 +127,11 @@ class OpenAICompatibleProviderConfig(BaseModel):
     display_name: str | None = Field(default=None, max_length=120)
     base_url: str = Field(min_length=1, max_length=512)
     timeout_seconds: float = Field(default=300, gt=0)
-    api_key_env: str = Field(default="NVIDIA_API_KEY", min_length=1, max_length=120)
+    api_key_env: str | None = Field(default="NVIDIA_API_KEY", max_length=120)
     keyring_service: str = Field(default="ai-broker", max_length=120)
     keyring_username: str | None = Field(default=None, max_length=120)
     deployment: Literal["cloud", "api", "local"] = "cloud"
+    auto_start: bool = False
     sync_models: bool = False
     default_context_window: int = Field(default=128_000, gt=0)
     probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
@@ -146,6 +147,8 @@ class OpenAICompatibleProviderConfig(BaseModel):
     def validate_provider_id(self) -> "OpenAICompatibleProviderConfig":
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.id):
             raise ValueError("provider id only allows letters, numbers, underscore and dash")
+        if self.api_key_env is not None and not self.api_key_env.strip():
+            self.api_key_env = None
         if self.keyring_username is None:
             self.keyring_username = f"{self.id}_api_key"
         return self

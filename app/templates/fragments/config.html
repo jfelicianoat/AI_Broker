@@ -129,7 +129,7 @@
     <div class="subsection-heading">
       <div>
         <h3>Proveedores API</h3>
-        <p>Adapters OpenAI-compatible. La API key se lee desde una variable de entorno, no desde este formulario.</p>
+        <p>Adapters OpenAI-compatible. Deja la variable API key vacia para endpoints locales sin autenticacion.</p>
       </div>
       <span class="badge badge-neutral">custom</span>
     </div>
@@ -159,7 +159,7 @@
             </label>
             <label class="field">
               <span>Variable API key</span>
-              <input name="custom_provider_{{ index }}_api_key_env" value="{{ provider.api_key_env if provider else ('NVIDIA_API_KEY' if index == 1 else '') }}" placeholder="NVIDIA_API_KEY">
+              <input name="custom_provider_{{ index }}_api_key_env" value="{{ provider.api_key_env if provider and provider.api_key_env else ('' if provider else ('NVIDIA_API_KEY' if index == 1 else '')) }}" placeholder="LMSTUDIO_API_KEY opcional">
             </label>
             <label class="field">
               <span>Deployment</span>
@@ -204,6 +204,10 @@
 {% endif %}{% endfor %}{% endif %}</textarea>
             </label>
             <div class="check-row provider-wide">
+              <label>
+                <input type="checkbox" name="custom_provider_{{ index }}_auto_start" {% if provider and provider.auto_start %}checked{% endif %}>
+                Arrancar servidor local al iniciar Broker
+              </label>
               <label>
                 <input type="checkbox" name="custom_provider_{{ index }}_sync_models" {% if provider and provider.sync_models %}checked{% endif %}>
                 Sincronizar catalogo desde /models
