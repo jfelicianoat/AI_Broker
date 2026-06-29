@@ -228,6 +228,46 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.content, "nvidia")
         self.assertEqual(output.cost_usd, 0.00002)
 
+    async def test_local_openai_compatible_provider_can_run_without_api_key(self) -> None:
+        seen_authorization = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_authorization.append(request.headers.get("authorization"))
+            if request.url.path == "/v1/models":
+                return httpx.Response(200, json={"data": [{"id": "local-model"}]})
+            self.assertEqual(request.url.path, "/v1/chat/completions")
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "local"}}],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+                },
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="lmstudio",
+            enabled=True,
+            display_name="LM Studio",
+            base_url="http://127.0.0.1:1234/v1",
+            api_key_env=None,
+            deployment="local",
+            sync_models=True,
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(
+            idempotency_key="lmstudio:test",
+            content={"prompt": "hola"},
+            model_requirements={"allowed_providers": ["lmstudio"]},
+        )
+        models = await provider.models()
+        output = await provider.generate(request, "local-model", "hola")
+        await provider.close()
+
+        self.assertEqual(models[0]["provider"], "lmstudio")
+        self.assertEqual(models[0]["deployment"], "local")
+        self.assertEqual(output.content, "local")
+        self.assertEqual(seen_authorization, [None, None, None])
+
     async def test_caps_max_tokens_to_model_context_window(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)

@@ -60,6 +60,29 @@ def test_local_only_forces_ollama_provider() -> None:
     assert payload.model_requirements.allowed_providers == ["ollama"]
 
 
+def test_local_only_allows_lmstudio_local_provider() -> None:
+    payload = TaskCreateRequest.model_validate(
+        {
+            "idempotency_key": "contract:local-lmstudio",
+            "content": {"prompt": "Privado"},
+            "model_requirements": {
+                "cloud_allowed": False,
+                "allowed_providers": ["lmstudio"],
+                "target_model": {
+                    "provider": "lmstudio",
+                    "deployment": "local",
+                    "model": "local-model",
+                },
+                "fallback_allowed": False,
+            },
+            "risk": {"data_classification": "local_only"},
+        }
+    )
+
+    assert payload.model_requirements.cloud_allowed is False
+    assert payload.model_requirements.allowed_providers == ["lmstudio"]
+
+
 def test_exact_target_must_respect_provider_and_local_only_boundaries() -> None:
     try:
         TaskCreateRequest.model_validate({

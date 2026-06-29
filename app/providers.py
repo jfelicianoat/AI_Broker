@@ -716,6 +716,8 @@ class OpenAICompatibleProvider:
         await self.client.aclose()
 
     def _headers(self) -> dict[str, str]:
+        if not self.config.api_key_env:
+            return {}
         key = CredentialResolver.get(self.config)
         if not key:
             label = self.config.display_name or self.config.id

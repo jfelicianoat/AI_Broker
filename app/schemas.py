@@ -228,9 +228,10 @@ class TaskCreateRequest(StrictBaseModel):
     @model_validator(mode="after")
     def enforce_data_boundary(self) -> "TaskCreateRequest":
         if self.risk.data_classification == DataClassification.local_only:
+            local_provider_names = {"ollama", "huggingface_local", "lmstudio"}
             target = self.model_requirements.target_model
             if target is not None and (
-                target.provider.lower() not in {"ollama", "huggingface_local"}
+                target.provider.lower() not in local_provider_names
                 or target.deployment.lower() == "cloud"
             ):
                 raise ValueError("local_only target_model must be a local deployment")
@@ -238,7 +239,7 @@ class TaskCreateRequest(StrictBaseModel):
             self.model_requirements.allowed_providers = [
                 provider
                 for provider in self.model_requirements.allowed_providers
-                if provider.lower() in {"ollama", "huggingface_local"}
+                if provider.lower() in local_provider_names
             ] or ["ollama"]
         if self.content.attachments:
             raise ValueError("attachments are not supported until a lossless provider mapping exists")

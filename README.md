@@ -126,6 +126,26 @@ hf download Qwen/Qwen2.5-7B-Instruct --local-dir C:\Procesos\AI_Broker\.local\mo
 
 La inferencia requiere instalar el extra opcional `hf-local`; si faltan `torch` o `transformers`, el health check de `huggingface_local` queda `unavailable`.
 
+Ejemplo minimo para LM Studio local:
+
+```yaml
+providers:
+  custom:
+    - id: lmstudio
+      enabled: true
+      adapter: openai_compatible
+      display_name: LM Studio
+      base_url: http://127.0.0.1:1234/v1
+      api_key_env: null
+      deployment: local
+      auto_start: true
+      sync_models: true
+      default_context_window: 32768
+      models: []
+```
+
+LM Studio debe tener activo su servidor local OpenAI-compatible. Con `auto_start: true`, el Broker ejecuta `lms server status` al arrancar y, si el servidor no esta corriendo, lanza `lms server start --port <puerto de base_url>`. Con `sync_models: true`, el Broker lee el catalogo desde `/v1/models`; si prefieres fijar ventanas de contexto por modelo, puedes desactivar `sync_models` y declarar `models` manualmente.
+
 ### 7. Health checks
 
 - Endpoints: `/health` (detallado), `/health/live` (liveness), `/health/ready` (readiness)
