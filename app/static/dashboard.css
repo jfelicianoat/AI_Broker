@@ -231,6 +231,11 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .models-side { display: grid; gap: 14px; }
 .models-catalog td strong { display: block; color: #dce6ef; max-width: 420px; overflow-wrap: anywhere; }
 .models-catalog td .badge { justify-content: center; }
+.compatibility-probe-form { margin: 0; }
+.compatibility-probe { cursor: pointer; font: inherit; }
+.compatibility-probe:hover { filter: brightness(1.1); }
+.compatibility-probe:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.compatibility-probe[aria-busy="true"] { opacity: .72; cursor: progress; }
 .provider-status-list small { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .comparison-grid { display: grid; grid-template-columns: minmax(280px, .35fr) minmax(680px, 1fr); gap: 14px; align-items: start; }

@@ -7,6 +7,7 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>AI Broker - Modelos</title>
   <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -50,6 +51,12 @@
             <p>{{ catalog_error }}</p>
           </div>
         {% endif %}
+        {% if model_probe %}
+          <div class="alert {{ model_probe.kind }}">
+            <strong>{{ model_probe.title }}</strong>
+            <p>{{ model_probe.message }}</p>
+          </div>
+        {% endif %}
 
         <section class="metric-grid models-overview" aria-label="Resumen de modelos">
           <div class="metric-card"><span class="metric-label">Modelos catalogados</span><strong>{{ model_stats.total }}</strong><small>{{ model_stats.providers }} proveedor(es), {{ model_stats.deployments }} deployment(s)</small></div>
@@ -84,12 +91,30 @@
                   <tbody>
                     {% for model in models %}
                       <tr>
-                        <td><strong>{{ model.name }}</strong>{% if model.compatibility_error %}<small>{{ model.compatibility_error }}</small>{% endif %}</td>
+                        <td>
+                          <strong>{{ model.name }}</strong>
+                          <small class="compatibility-error" {% if not model.compatibility_error %}hidden{% endif %}>{{ model.compatibility_error or '' }}</small>
+                        </td>
                         <td>{{ model.provider }}</td>
                         <td>{{ model.deployment }}</td>
                         <td>{{ model.context_window or 'N/D' }}</td>
                         <td>{{ (model.capabilities or [])|join(', ') if model.capabilities else 'N/D' }}</td>
-                        <td><span class="badge {{ model|model_compatibility_class }}">{{ model|model_compatibility_text }}</span></td>
+                        <td>
+                          {% if model.provider|lower in probeable_provider_ids %}
+                            <form class="compatibility-probe-form" method="post" action="/dashboard/actions/models/probe">
+                              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                              <input type="hidden" name="provider" value="{{ model.provider }}">
+                              <input type="hidden" name="model" value="{{ model.name }}">
+                              <button class="badge compatibility-probe {{ model|model_compatibility_class }}"
+                                      type="submit"
+                                      title="Comprobar compatibilidad de {{ model.provider }}/{{ model.name }}">
+                                {{ model|model_compatibility_text }}
+                              </button>
+                            </form>
+                          {% else %}
+                            <span class="badge {{ model|model_compatibility_class }}">{{ model|model_compatibility_text }}</span>
+                          {% endif %}
+                        </td>
                       </tr>
                     {% endfor %}
                   </tbody>
@@ -187,5 +212,6 @@
       </main>
     </div>
   </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

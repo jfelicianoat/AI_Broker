@@ -1,5 +1,7 @@
 (() => {
   const processed = new WeakSet();
+  const processedScroll = new WeakSet();
+  const scrollStorageKey = "ai-broker-dashboard-scroll";
   const refreshMap = {
     "#summary-panel": "/dashboard/fragments/summary",
     "#queue-panel": "/dashboard/fragments/queue",
@@ -20,6 +22,33 @@
   function csrfToken() {
     const meta = document.querySelector("meta[name='csrf-token']");
     return meta ? meta.getAttribute("content") : "";
+  }
+
+  function rememberScroll() {
+    try {
+      window.sessionStorage.setItem(scrollStorageKey, JSON.stringify({
+        path: window.location.pathname,
+        x: window.scrollX,
+        y: window.scrollY,
+        at: Date.now()
+      }));
+    } catch (_) {
+      // Session storage can be disabled; the action still works without scroll restore.
+    }
+  }
+
+  function restoreScroll() {
+    if (window.location.hash) return;
+    try {
+      const raw = window.sessionStorage.getItem(scrollStorageKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      window.sessionStorage.removeItem(scrollStorageKey);
+      if (saved.path !== window.location.pathname || Date.now() - Number(saved.at || 0) > 10 * 60 * 1000) return;
+      window.requestAnimationFrame(() => window.scrollTo(Number(saved.x || 0), Number(saved.y || 0)));
+    } catch (_) {
+      // Ignore stale or malformed scroll state.
+    }
   }
 
   function progressId() {
@@ -75,6 +104,48 @@
     return submitter ? submitter.getAttribute("data-provider-probe") : null;
   }
 
+  function formPayload(form, submitter) {
+    const data = new FormData(form);
+    if (submitter && submitter.name) data.set(submitter.name, submitter.value || "");
+    return new URLSearchParams(data);
+  }
+
+  async function submitHtmlForm(form, submitter, targetSelector, successMessage) {
+    const target = document.querySelector(targetSelector);
+    if (!target) return false;
+    if (submitter) {
+      submitter.disabled = true;
+      submitter.setAttribute("aria-busy", "true");
+    }
+    try {
+      const response = await fetch(submitter && submitter.getAttribute("formaction") || form.action, {
+        method: form.method || "POST",
+        body: formPayload(form, submitter),
+        headers: {
+          "Accept": "text/html",
+          "X-CSRF-Token": csrfToken()
+        }
+      });
+      if (!response.ok) throw new Error(`Error ${response.status}`);
+      const html = await response.text();
+      const next = new DOMParser().parseFromString(html, "text/html");
+      const nextTarget = next.querySelector(targetSelector);
+      if (!nextTarget) throw new Error("Respuesta sin fragmento actualizable");
+      target.outerHTML = nextTarget.outerHTML;
+      bind(document);
+      if (successMessage) toast(successMessage);
+      return true;
+    } catch (error) {
+      toast(error.message || "No se pudo actualizar");
+      return true;
+    } finally {
+      if (submitter) {
+        submitter.disabled = false;
+        submitter.removeAttribute("aria-busy");
+      }
+    }
+  }
+
   async function submitProbeForm(form, submitter) {
     const providerId = submitterProviderId(submitter);
     if (!providerId) return false;
@@ -101,9 +172,20 @@
       await poll;
       if (!response.ok) throw new Error(`Error ${response.status}`);
       const html = await response.text();
-      document.open();
-      document.write(html);
-      document.close();
+      const next = new DOMParser().parseFromString(html, "text/html");
+      const nextPanel = next.querySelector("#config-panel");
+      const panel = document.querySelector("#config-panel");
+      if (nextPanel && panel) {
+        panel.outerHTML = nextPanel.outerHTML;
+        bind(document);
+        await refreshDashboard();
+        toast("Compatibilidad actualizada");
+      } else {
+        rememberScroll();
+        document.open();
+        document.write(html);
+        document.close();
+      }
       return true;
     } catch (error) {
       stop.done = true;
@@ -149,6 +231,45 @@
     }
   }
 
+  async function submitCompatibilityProbe(form, submitter) {
+    const button = submitter || form.querySelector("button[type='submit']");
+    const row = form.closest("tr");
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+    }
+    try {
+      const response = await fetch(form.action, {
+        method: "POST",
+        body: new URLSearchParams(new FormData(form)),
+        headers: {
+          "Accept": "application/json",
+          "X-CSRF-Token": csrfToken()
+        }
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.message || `Error ${response.status}`);
+      if (button) {
+        button.classList.remove("model-compatible", "model-incompatible", "model-unknown");
+        button.classList.add(payload.compatibility_class || "model-unknown");
+        button.textContent = payload.compatibility_text || "Pendiente de analizar";
+      }
+      const errorNode = row ? row.querySelector(".compatibility-error") : null;
+      if (errorNode) {
+        errorNode.textContent = payload.compatibility_error || "";
+        errorNode.hidden = !payload.compatibility_error;
+      }
+      toast(payload.message || "Compatibilidad actualizada");
+    } catch (error) {
+      toast(error.message || "No se pudo comprobar el modelo");
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+      }
+    }
+  }
+
   function intervalFrom(trigger) {
     const match = /every\s+(\d+)s/.exec(trigger || "");
     return match ? Number(match[1]) * 1000 : null;
@@ -164,6 +285,14 @@
   }
 
   function bind(root) {
+    root.querySelectorAll("form").forEach((form) => {
+      if (processedScroll.has(form)) return;
+      processedScroll.add(form);
+      form.addEventListener("submit", () => {
+        if (form.classList.contains("compatibility-probe-form")) return;
+        rememberScroll();
+      }, {capture: true});
+    });
     root.querySelectorAll("[hx-get], [hx-post], [hx-delete]").forEach((element) => {
       if (processed.has(element)) return;
       processed.add(element);
@@ -199,13 +328,29 @@
       processed.add(button);
       button.addEventListener("click", () => refresh(button.dataset.refreshTarget));
     });
+    root.querySelectorAll("form.compatibility-probe-form").forEach((form) => {
+      if (processed.has(form)) return;
+      processed.add(form);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await submitCompatibilityProbe(form, event.submitter);
+      });
+    });
     root.querySelectorAll("form.config-form").forEach((form) => {
       if (processed.has(form)) return;
       processed.add(form);
       form.addEventListener("submit", async (event) => {
-        if (!submitterProviderId(event.submitter)) return;
         event.preventDefault();
-        await submitProbeForm(form, event.submitter);
+        if (submitterProviderId(event.submitter)) await submitProbeForm(form, event.submitter);
+        else await submitHtmlForm(form, event.submitter, "#config-panel", "Configuracion actualizada");
+      });
+    });
+    root.querySelectorAll("form.tester-grid").forEach((form) => {
+      if (processed.has(form)) return;
+      processed.add(form);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await submitHtmlForm(form, event.submitter, "main.content", "Probador actualizado");
       });
     });
   }
@@ -229,6 +374,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    restoreScroll();
     bind(document);
     document.querySelectorAll("[data-refresh-dashboard]").forEach((button) => {
       button.addEventListener("click", refreshDashboard);

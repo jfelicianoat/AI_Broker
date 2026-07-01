@@ -6,11 +6,11 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
@@ -138,7 +138,12 @@ def create_dashboard_router(
         )
 
     @router.get("/dashboard/models", response_class=HTMLResponse)
-    async def model_dashboard(request: Request):
+    async def model_dashboard(
+        request: Request,
+        model_probe: str | None = None,
+        model_name: str | None = None,
+        model_error: str | None = None,
+    ):
         catalog, catalog_error = await models()
         resource_snapshot = await resources()
         return _template_response(
@@ -150,6 +155,8 @@ def create_dashboard_router(
                 "resources": resource_snapshot,
                 "config": config,
                 "model_stats": _model_dashboard_stats(catalog, resource_snapshot),
+                "probeable_provider_ids": _probeable_provider_ids(config),
+                "model_probe": _model_probe_notice(model_probe, model_name, model_error),
             },
         )
 
@@ -408,6 +415,52 @@ def create_dashboard_router(
                 "updated_at": _utc_now().isoformat(),
             }
         return progress
+
+    @router.post("/dashboard/actions/models/probe", response_class=HTMLResponse)
+    async def probe_single_model(request: Request):
+        form = await _read_urlencoded_form(request)
+        _verify_dashboard_mutation(request, form)
+        provider_id = form.get("provider", "").strip()
+        model_name = form.get("model", "").strip()
+        query: dict[str, str] = {"model_name": model_name}
+        json_response = request.headers.get("accept", "").lower().find("application/json") >= 0
+        try:
+            if not provider_id or not model_name:
+                raise PromptTesterError("Referencia de modelo incompleta.")
+            updated = config.model_copy(deep=True)
+            provider_config = _find_custom_provider(updated, provider_id)
+            if provider_config is None:
+                raise PromptTesterError("Este modelo no admite analisis puntual desde el catalogo.")
+            if not provider_config.enabled:
+                raise PromptTesterError(f"Activa el proveedor {provider_id} antes de analizar modelos.")
+            result, catalog = await _probe_single_custom_model(provider_config, model_name)
+            _apply_probe_results(updated, provider_config.id, [result], catalog)
+            save_config(updated, config_path)
+            _apply_config_update(config, updated)
+            if hasattr(provider, "reload_config"):
+                provider.reload_config(config)
+            query["model_probe"] = str(result.get("compatibility") or "unknown")
+            if json_response:
+                return JSONResponse(_model_probe_payload(model_name, result))
+        except PromptTesterError as error:
+            query["model_probe"] = "error"
+            query["model_error"] = str(error)
+        except ProviderError as error:
+            query["model_probe"] = "error"
+            query["model_error"] = f"{error.code}: {error}"
+        except ValidationError as error:
+            query["model_probe"] = "error"
+            query["model_error"] = "; ".join(_validation_messages(error))
+        if json_response:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "model": model_name,
+                    "message": query.get("model_error") or "No se ha podido comprobar el modelo.",
+                },
+                status_code=422,
+            )
+        return RedirectResponse(f"/dashboard/models?{urlencode(query)}", status_code=303)
 
     @router.post("/dashboard/actions/prompt-tester", response_class=HTMLResponse)
     async def submit_prompt_tester(request: Request):
@@ -1074,6 +1127,82 @@ def _model_dashboard_stats(
         "unknown": unknown,
         "loaded": len(resources.loaded_models),
     }
+
+
+def _probeable_provider_ids(config: BrokerConfig) -> list[str]:
+    return [
+        item.id.lower()
+        for item in config.providers.custom
+        if item.enabled
+    ]
+
+
+def _model_probe_notice(
+    result: str | None,
+    model_name: str | None,
+    error: str | None,
+) -> dict[str, str] | None:
+    if result is None:
+        return None
+    if result == "error":
+        return {
+            "kind": "danger",
+            "title": "No se ha podido comprobar el modelo",
+            "message": error or "El proveedor no ha devuelto un resultado valido.",
+        }
+    label = {
+        "compatible": "compatible con mixture",
+        "incompatible": "no compatible con mixture",
+        "unknown": "pendiente de clasificar",
+    }.get(result, result)
+    return {
+        "kind": "success" if result == "compatible" else "warning",
+        "title": "Compatibilidad actualizada",
+        "message": f"{model_name or 'Modelo'} queda marcado como {label}.",
+    }
+
+
+def _model_probe_payload(model_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    compatibility = str(result.get("compatibility") or "unknown")
+    catalog_model = {
+        "compatibility": compatibility,
+        "compatibility_error": result.get("compatibility_error"),
+    }
+    return {
+        "ok": True,
+        "model": model_name,
+        "compatibility": compatibility,
+        "compatibility_text": templates.env.filters["model_compatibility_text"](catalog_model),
+        "compatibility_class": templates.env.filters["model_compatibility_class"](catalog_model),
+        "compatibility_error": result.get("compatibility_error"),
+        "checked_at": result.get("compatibility_checked_at"),
+        "message": _model_probe_notice(compatibility, model_name, None)["message"],
+    }
+
+
+async def _probe_single_custom_model(
+    provider_config: OpenAICompatibleProviderConfig,
+    model_name: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    probe = OpenAICompatibleProvider(provider_config)
+    try:
+        catalog = await probe.models()
+        entry = next((item for item in catalog if str(item.get("name") or "") == model_name), None)
+        if entry is None:
+            raise PromptTesterError(f"Modelo no encontrado en {provider_config.id}: {model_name}")
+        capabilities = {str(capability).lower() for capability in entry.get("capabilities") or []}
+        if "completion" in capabilities:
+            return await probe.probe_chat_compatibility(model_name), catalog
+        if "embedding" in capabilities:
+            return await probe.probe_embedding_compatibility(model_name), catalog
+        return {
+            "name": model_name,
+            "compatibility": "unknown",
+            "compatibility_checked_at": _utc_now().isoformat(),
+            "compatibility_error": "Capacidad no-chat catalogada; endpoint de ejecucion aun no soportado.",
+        }, catalog
+    finally:
+        await probe.close()
 
 
 def _parse_proposers(form: dict[str, str]) -> list[ModelReference]:
