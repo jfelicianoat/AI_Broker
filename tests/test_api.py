@@ -844,6 +844,15 @@ def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch
     assert by_name["leave-alone"].compatibility == "unknown"
 
 
+def test_dashboard_javascript_reads_form_action_attribute() -> None:
+    script = Path("app/static/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'form.getAttribute("action")' in script
+    assert "form.action" not in script
+    assert 'form.getAttribute("method")' in script
+    assert "form.method" not in script
+
+
 def test_dashboard_task_detail_renders_results_and_errors(tmp_path: Path) -> None:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker-detail.db")),
