@@ -113,13 +113,15 @@
   async function submitHtmlForm(form, submitter, targetSelector, successMessage) {
     const target = document.querySelector(targetSelector);
     if (!target) return false;
+    const action = (submitter && submitter.getAttribute("formaction")) || form.getAttribute("action") || window.location.href;
+    const method = (form.getAttribute("method") || "POST").toUpperCase();
     if (submitter) {
       submitter.disabled = true;
       submitter.setAttribute("aria-busy", "true");
     }
     try {
-      const response = await fetch(submitter && submitter.getAttribute("formaction") || form.action, {
-        method: form.method || "POST",
+      const response = await fetch(action, {
+        method,
         body: formPayload(form, submitter),
         headers: {
           "Accept": "text/html",
@@ -160,7 +162,7 @@
     setProbeProgress(panel, {phase: "preparing", completed: 0, total: null, current_model: null});
     const poll = pollProbeProgress(providerId, id, panel, stop);
     try {
-      const response = await fetch(submitter.getAttribute("formaction") || form.action, {
+      const response = await fetch(submitter.getAttribute("formaction") || form.getAttribute("action") || window.location.href, {
         method: "POST",
         body: new URLSearchParams(data),
         headers: {
@@ -239,7 +241,7 @@
       button.setAttribute("aria-busy", "true");
     }
     try {
-      const response = await fetch(form.action, {
+      const response = await fetch(form.getAttribute("action") || window.location.href, {
         method: "POST",
         body: new URLSearchParams(new FormData(form)),
         headers: {
