@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import app.dashboard_web as dashboard_web
 import app.main as main_module
+import app.providers as providers_module
 from app.config import (
     BrokerConfig,
     LoggingConfig,
@@ -695,6 +696,7 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
             return None
 
     monkeypatch.setattr(dashboard_web, "OpenAICompatibleProvider", FakeProbeProvider)
+    monkeypatch.setattr(providers_module, "OpenAICompatibleProvider", FakeProbeProvider)
     config_path = tmp_path / "broker_config.yaml"
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker-probe-provider.db")),
@@ -750,6 +752,96 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
     assert saved.providers.custom[0].probe_skip_compatible is True
     assert saved.providers.custom[0].probe_skip_checked is True
     assert "No compatible mixture" in response.text
+
+
+def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch) -> None:
+    class FakeProbeProvider:
+        def __init__(self, config):
+            self.config = config
+
+        async def models(self):
+            return [
+                {
+                    "name": item.name,
+                    "provider": self.config.id,
+                    "deployment": self.config.deployment,
+                    "context_window": item.context_window,
+                    "capabilities": list(item.capabilities),
+                    "compatibility": item.compatibility,
+                    "compatibility_checked_at": item.compatibility_checked_at,
+                    "compatibility_error": item.compatibility_error,
+                }
+                for item in self.config.models
+            ]
+
+        async def probe_chat_compatibility(self, model):
+            return {
+                "name": model,
+                "compatibility": "compatible",
+                "compatibility_checked_at": "2026-07-01T12:00:00+00:00",
+                "compatibility_error": None,
+            }
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(dashboard_web, "OpenAICompatibleProvider", FakeProbeProvider)
+    monkeypatch.setattr(providers_module, "OpenAICompatibleProvider", FakeProbeProvider)
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-model-probe.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="real"),
+        providers=ProvidersConfig(
+            ollama=OllamaConfig(enabled=False),
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="nvidia",
+                    enabled=True,
+                    base_url="https://integrate.api.nvidia.com/v1",
+                    deployment="api",
+                    probe_delay_seconds=0,
+                    models=[
+                        OpenAICompatibleModelConfig(
+                            name="chat-pending",
+                            context_window=128000,
+                            capabilities=["completion"],
+                            compatibility="unknown",
+                        ),
+                        OpenAICompatibleModelConfig(
+                            name="leave-alone",
+                            context_window=64000,
+                            capabilities=["completion"],
+                            compatibility="unknown",
+                        ),
+                    ],
+                )
+            ],
+        ),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client, "/dashboard/models")
+        page = client.get("/dashboard/models")
+        response = client.post(
+            "/dashboard/actions/models/probe",
+            headers={"Accept": "application/json"},
+            data={
+                "csrf_token": token,
+                "provider": "nvidia",
+                "model": "chat-pending",
+            },
+        )
+
+    saved = load_config(config_path)
+    by_name = {item.name: item for item in saved.providers.custom[0].models}
+    assert page.status_code == 200
+    assert 'action="/dashboard/actions/models/probe"' in page.text
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["compatibility"] == "compatible"
+    assert response.json()["compatibility_text"] == "Compatible mixture"
+    assert by_name["chat-pending"].compatibility == "compatible"
+    assert by_name["chat-pending"].compatibility_checked_at == "2026-07-01T12:00:00+00:00"
+    assert by_name["leave-alone"].compatibility == "unknown"
 
 
 def test_dashboard_task_detail_renders_results_and_errors(tmp_path: Path) -> None:

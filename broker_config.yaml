@@ -165,7 +165,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:40:07.371593+00:00'
+      compatibility_checked_at: '2026-07-01T18:15:21.875014+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''e598bfc1-b058-41af-869d-556d3c7e1b48'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'

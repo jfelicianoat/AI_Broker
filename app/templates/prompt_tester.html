@@ -7,6 +7,7 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>AI Broker — Probador de Prompts</title>
   <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -271,5 +272,6 @@
       </main>
     </div>
   </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>
