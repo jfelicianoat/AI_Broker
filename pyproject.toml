@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
 ]
 hf-local = [
     "accelerate>=0.31.0",
@@ -27,4 +29,38 @@ hf-local = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [".local", ".venv", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # líneas largas heredadas; el formateo no se fuerza retroactivamente
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["app"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# dashboard_web es codigo legacy de UI pendiente de refactor; se relajan los
+# codigos ruidosos hasta trocearlo en modulos tipados.
+[[tool.mypy.overrides]]
+module = "app.dashboard_web"
+disable_error_code = [
+    "arg-type",
+    "assignment",
+    "dict-item",
+    "index",
+    "operator",
+    "union-attr",
+    "var-annotated",
+]
 

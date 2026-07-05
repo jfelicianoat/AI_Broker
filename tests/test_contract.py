@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from app.schemas import (
     ExecutionStrategy,
     SelectionMode,
@@ -120,6 +123,3 @@ def test_shared_v2_single_fixture_matches_broker_schema() -> None:
     payload = TaskCreateRequest.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
     assert payload.execution.strategy == ExecutionStrategy.single
     assert payload.idempotency_key == "contract:capture-001:1:single"
-
-import json
-from pathlib import Path
