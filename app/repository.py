@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -153,8 +153,12 @@ class TaskRepository:
         if clear_queue_position:
             assignments.append("queue_position = NULL")
         params.append(task_id)
-        self.db.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", params)
-        self.add_event(task_id, "task.status_changed", {"status": status.value})
+        with self.db.transaction() as connection:
+            connection.execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?", params)
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.status_changed", dumps_json({"status": status.value}), now),
+            )
         return self.get_task(task_id)
 
     def is_cancel_requested(self, task_id: str) -> bool:
@@ -182,40 +186,45 @@ class TaskRepository:
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
         started_at, completed_at = _invocation_window(now, output.latency_ms)
-        self.db.execute(
-            """
-            INSERT INTO model_invocations (
-                id, task_id, run_id, role, provider, deployment, model,
-                output_json, tokens_input, tokens_output, cost_usd, latency_ms,
-                started_at, completed_at, status, created_at, updated_at
+        with self.db.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO model_invocations (
+                    id, task_id, run_id, role, provider, deployment, model,
+                    output_json, tokens_input, tokens_output, cost_usd, latency_ms,
+                    started_at, completed_at, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    invocation_id,
+                    task_id,
+                    run_id,
+                    role,
+                    model.provider,
+                    model.deployment,
+                    model.model,
+                    dumps_json(output.technical_output()),
+                    output.tokens_input,
+                    output.tokens_output,
+                    output.cost_usd,
+                    output.latency_ms,
+                    started_at,
+                    completed_at,
+                    status,
+                    now,
+                    now,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                invocation_id,
-                task_id,
-                run_id,
-                role,
-                model.provider,
-                model.deployment,
-                model.model,
-                dumps_json(output.technical_output()),
-                output.tokens_input,
-                output.tokens_output,
-                output.cost_usd,
-                output.latency_ms,
-                started_at,
-                completed_at,
-                status,
-                now,
-                now,
-            ),
-        )
-        self.add_event(
-            task_id,
-            "model_invocation.completed",
-            {"invocation_id": invocation_id, "role": role, "model": model.model},
-        )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    task_id,
+                    "model_invocation.completed",
+                    dumps_json({"invocation_id": invocation_id, "role": role, "model": model.model}),
+                    now,
+                ),
+            )
         return invocation_id
 
     def complete_single_task(
@@ -272,31 +281,37 @@ class TaskRepository:
         artifact: ArtifactRecord,
     ) -> str:
         artifact_id = f"art_{uuid4().hex}"
-        self.db.execute(
-            """
-            INSERT INTO artifacts (
-                id, task_id, run_id, invocation_id, artifact_type,
-                path, sha256, size_bytes, created_at
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO artifacts (
+                    id, task_id, run_id, invocation_id, artifact_type,
+                    path, sha256, size_bytes, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    task_id,
+                    run_id,
+                    invocation_id,
+                    artifact_type,
+                    artifact.path,
+                    artifact.sha256,
+                    artifact.size_bytes,
+                    now,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                artifact_id,
-                task_id,
-                run_id,
-                invocation_id,
-                artifact_type,
-                artifact.path,
-                artifact.sha256,
-                artifact.size_bytes,
-                _utc_now_iso(),
-            ),
-        )
-        self.add_event(
-            task_id,
-            "artifact.created",
-            {"artifact_id": artifact_id, "type": artifact_type, "path": artifact.path},
-        )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    task_id,
+                    "artifact.created",
+                    dumps_json({"artifact_id": artifact_id, "type": artifact_type, "path": artifact.path}),
+                    now,
+                ),
+            )
         return artifact_id
 
     def list_queue(self) -> QueueResponse:
@@ -344,29 +359,38 @@ class TaskRepository:
         now = _utc_now_iso()
         if task.status in {TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled}:
             return task
-        self.db.execute(
-            """
-            UPDATE tasks
-            SET cancel_requested = 1, status = ?, queue_position = NULL, updated_at = ?
-            WHERE id = ?
-            """,
-            (TaskStatus.cancelled.value, now, task_id),
-        )
-        self.add_event(task_id, "task.cancelled", {"requested": True})
+        with self.db.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET cancel_requested = 1, status = ?, queue_position = NULL, updated_at = ?
+                WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+                """,
+                (TaskStatus.cancelled.value, now, task_id),
+            )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                    (task_id, "task.cancelled", dumps_json({"requested": True}), now),
+                )
         return self.get_task(task_id)
 
     def reorder_queue(self, task_ids: list[str]) -> QueueResponse:
-        current = self.list_queue().pending
-        current_ids = [item.task_id for item in current]
-        if set(task_ids) != set(current_ids):
-            raise ValueError("task_ids must contain exactly all queued task ids")
         now = _utc_now_iso()
-        for position, task_id in enumerate(task_ids, start=1):
-            self.db.execute(
-                "UPDATE tasks SET queue_position = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
-                (position, now, task_id),
+        with self.db.transaction() as connection:
+            rows = connection.execute("SELECT id FROM tasks WHERE status = 'queued'").fetchall()
+            current_ids = {str(row["id"]) for row in rows}
+            if set(task_ids) != current_ids:
+                raise ValueError("task_ids must contain exactly all queued task ids")
+            for position, task_id in enumerate(task_ids, start=1):
+                connection.execute(
+                    "UPDATE tasks SET queue_position = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
+                    (position, now, task_id),
+                )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (None, "queue.reordered", dumps_json({"task_ids": task_ids}), now),
             )
-        self.add_event(None, "queue.reordered", {"task_ids": task_ids})
         return self.list_queue()
 
     def add_event(self, task_id: str | None, event_type: str, payload: dict[str, Any]) -> None:
@@ -375,7 +399,8 @@ class TaskRepository:
             (task_id, event_type, dumps_json(payload), _utc_now_iso()),
         )
 
-    def recover_interrupted_tasks(self) -> int:
+    def recover_interrupted_tasks(self, max_attempts: int | None = None) -> int:
+        """Re-encola tareas activas interrumpidas; supera max_attempts → failed."""
         active_statuses = (
             "routing",
             "planning",
@@ -390,24 +415,67 @@ class TaskRepository:
         )
         placeholders = ",".join("?" for _ in active_statuses)
         now = _utc_now_iso()
-        rows = self.db.query_all(
-            f"SELECT id FROM tasks WHERE status IN ({placeholders})",
-            active_statuses,
-        )
-        for index, row in enumerate(rows, start=1):
-            self.db.execute(
-                """
-                UPDATE tasks
-                SET status = 'queued',
-                    queue_position = COALESCE(queue_position, ?),
-                    attempt = attempt + 1,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (index, now, row["id"]),
-            )
-            self.add_event(row["id"], "task.recovered", {"status": "queued"})
-        return len(rows)
+        recovered = 0
+        with self.db.transaction() as connection:
+            rows = connection.execute(
+                f"SELECT id, attempt, progress_json FROM tasks WHERE status IN ({placeholders})",
+                active_statuses,
+            ).fetchall()
+            position = 0
+            for row in rows:
+                next_attempt = int(row["attempt"]) + 1
+                if max_attempts is not None and next_attempt >= max_attempts:
+                    progress = loads_json(row["progress_json"], {})
+                    progress["phase"] = TaskStatus.failed.value
+                    error = {
+                        "code": "TASK_RETRY_LIMIT_EXCEEDED",
+                        "message": (
+                            f"La tarea fue interrumpida {next_attempt} veces y alcanzó el límite "
+                            f"de {max_attempts} intentos"
+                        ),
+                        "retryable": False,
+                    }
+                    connection.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'failed',
+                            queue_position = NULL,
+                            attempt = ?,
+                            progress_json = ?,
+                            error_json = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (next_attempt, dumps_json(progress), dumps_json(error), now, row["id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                        (
+                            row["id"],
+                            "task.status_changed",
+                            dumps_json({"status": "failed", "code": "TASK_RETRY_LIMIT_EXCEEDED"}),
+                            now,
+                        ),
+                    )
+                    continue
+                position += 1
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'queued',
+                        queue_position = COALESCE(queue_position, ?),
+                        attempt = attempt + 1,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (position, now, row["id"]),
+                )
+                connection.execute(
+                    "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                    (row["id"], "task.recovered", dumps_json({"status": "queued"}), now),
+                )
+                recovered += 1
+        return recovered
 
     def _row_to_task_state(self, row: Any) -> TaskStateResponse:
         request = TaskCreateRequest.model_validate(loads_json(row["request_json"]))
