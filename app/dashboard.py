@@ -20,7 +20,6 @@ from app.schemas import (
     UsageResponse,
 )
 
-
 ACTIVE_STATUSES = (
     "routing",
     "planning",
