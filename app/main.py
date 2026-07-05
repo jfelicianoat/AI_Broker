@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -17,9 +17,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
-from app.db import Database
 from app.dashboard import DashboardQueryRepository
 from app.dashboard_web import create_dashboard_router, load_dashboard_resources
+from app.db import Database
 from app.logging_config import configure_logging
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
@@ -30,6 +30,8 @@ from app.schemas import (
     DashboardSummaryResponse,
     DashboardTaskDetail,
     DashboardTaskPage,
+    ExecutionPreset,
+    ExecutionStrategy,
     HealthDependency,
     HealthResponse,
     ModelAvailabilityItem,
@@ -37,6 +39,7 @@ from app.schemas import (
     ModelContextResponse,
     QueueReorderRequest,
     QueueResponse,
+    SchedulingPolicy,
     TaskAcceptedResponse,
     TaskCreateRequest,
     TaskStateResponse,
@@ -60,7 +63,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     async def lifespan(app: FastAPI):
         await _auto_start_local_provider_servers(broker_config, logger)
         db.init_schema()
-        repository.recover_interrupted_tasks()
+        repository.recover_interrupted_tasks(max_attempts=broker_config.processing.max_task_attempts)
         stop_dispatcher = asyncio.Event()
         dispatcher_task = None
         if broker_config.processing.auto_dispatch:
@@ -153,7 +156,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
-    async def create_task(payload: TaskCreateRequest, response: Response) -> TaskAcceptedResponse:
+    def create_task(payload: TaskCreateRequest, response: Response) -> TaskAcceptedResponse:
         try:
             task, created = repository.create_task(
                 payload, queue_max_size=broker_config.processing.queue_max_size
@@ -177,25 +180,25 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.get("/api/v1/tasks/{task_id}", response_model=TaskStateResponse)
-    async def get_task(task_id: str) -> TaskStateResponse:
+    def get_task(task_id: str) -> TaskStateResponse:
         try:
             return repository.get_task(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
 
     @app.delete("/api/v1/tasks/{task_id}", response_model=TaskStateResponse)
-    async def cancel_task(task_id: str) -> TaskStateResponse:
+    def cancel_task(task_id: str) -> TaskStateResponse:
         try:
             return repository.request_cancel(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
 
     @app.get("/api/v1/queue", response_model=QueueResponse)
-    async def get_queue() -> QueueResponse:
+    def get_queue() -> QueueResponse:
         return repository.list_queue()
 
     @app.patch("/api/v1/queue", response_model=QueueResponse)
-    async def reorder_queue(payload: QueueReorderRequest) -> QueueResponse:
+    def reorder_queue(payload: QueueReorderRequest) -> QueueResponse:
         try:
             return repository.reorder_queue(payload.task_ids)
         except ValueError as exc:
@@ -276,14 +279,19 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
             contract_version="2.1",
-            strategies=["single", "mixture_of_agents"],
+            strategies=[ExecutionStrategy.single, ExecutionStrategy.mixture_of_agents],
             presets={
-                "single": ["fast"],
-                "mixture_of_agents": ["fast", "slow"],
+                "single": [ExecutionPreset.fast],
+                "mixture_of_agents": [ExecutionPreset.fast, ExecutionPreset.slow],
             },
             scheduling_by_preset={
-                "fast": ["sequential"],
-                "slow": ["adaptive", "parallel", "waves", "sequential"],
+                "fast": [SchedulingPolicy.sequential],
+                "slow": [
+                    SchedulingPolicy.adaptive,
+                    SchedulingPolicy.parallel,
+                    SchedulingPolicy.waves,
+                    SchedulingPolicy.sequential,
+                ],
             },
             max_active_workflows=broker_config.processing.max_active_workflows,
             max_parallel_invocations=scheduler.max_parallel_invocations(),
@@ -292,7 +300,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
-    async def get_usage(month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$")) -> UsageResponse:
+    def get_usage(month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$")) -> UsageResponse:
         selected_month = month or datetime.now(timezone.utc).strftime("%Y-%m")
         try:
             return dashboard_queries.usage(selected_month)
@@ -300,13 +308,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             raise HTTPException(status_code=422, detail="INVALID_MONTH") from error
 
     @app.get("/api/v1/dashboard/summary", response_model=DashboardSummaryResponse)
-    async def dashboard_summary(
+    def dashboard_summary(
         window_hours: int = Query(default=24, ge=1, le=24 * 90),
     ) -> DashboardSummaryResponse:
         return dashboard_queries.summary(window_hours=window_hours)
 
     @app.get("/api/v1/dashboard/tasks", response_model=DashboardTaskPage)
-    async def dashboard_tasks(
+    def dashboard_tasks(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=50, ge=1, le=200),
         status: TaskStatus | None = None,
@@ -320,7 +328,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.get("/api/v1/dashboard/tasks/{task_id}", response_model=DashboardTaskDetail)
-    async def dashboard_task_detail(task_id: str) -> DashboardTaskDetail:
+    def dashboard_task_detail(task_id: str) -> DashboardTaskDetail:
         try:
             return dashboard_queries.task_detail(task_id)
         except KeyError as error:
@@ -413,7 +421,7 @@ async def _dispatcher_loop(
     interval_seconds: float,
 ) -> None:
     while not stop.is_set():
-        task_id = repository.claim_next_queued_task_id()
+        task_id = await asyncio.to_thread(repository.claim_next_queued_task_id)
         if task_id is not None:
             try:
                 await coordinator.process_task(repository, task_id)
@@ -441,6 +449,7 @@ async def _dispatcher_loop(
 
 async def _health_response(db: Database, provider) -> HealthResponse:
     checked_at = datetime.now(timezone.utc)
+    status: Literal["healthy", "degraded", "unavailable"]
     try:
         start = datetime.now(timezone.utc)
         db.query_one("SELECT 1")
@@ -478,7 +487,7 @@ async def _health_response(db: Database, provider) -> HealthResponse:
 def _model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, Any]]) -> ModelAvailabilityItem:
     provider_name = str(entry.get("provider") or "unknown")
     deployment_name = str(entry.get("deployment") or "unknown")
-    provider_status = str(
+    raw_provider_status = str(
         (
             health.get(provider_name.lower())
             or health.get(provider_name)
@@ -488,8 +497,10 @@ def _model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, 
         ).get("status")
         or "unknown"
     )
-    if provider_status not in {"healthy", "degraded", "unavailable"}:
-        provider_status = "unknown"
+    provider_status = cast(
+        'Literal["healthy", "degraded", "unavailable", "unknown"]',
+        raw_provider_status if raw_provider_status in {"healthy", "degraded", "unavailable"} else "unknown",
+    )
     model_status = str(entry.get("status") or "unknown")
     compatibility = str(entry.get("compatibility") or "unknown")
     capabilities = [str(item) for item in entry.get("capabilities") or []]
@@ -499,6 +510,7 @@ def _model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, 
     except (TypeError, ValueError):
         context_window = None
 
+    availability: Literal["online", "offline", "unknown", "incompatible"]
     if provider_status == "unavailable":
         availability = "offline"
         dispatchable = False
