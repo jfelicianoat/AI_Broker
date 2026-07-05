@@ -83,7 +83,7 @@ class ContentAttachment(StrictBaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def require_content_or_uri(self) -> "ContentAttachment":
+    def require_content_or_uri(self) -> ContentAttachment:
         if not self.content and not self.uri:
             raise ValueError("attachment requires content or uri")
         return self
@@ -101,7 +101,7 @@ class TaskOutput(StrictBaseModel):
     language: str = Field(default="es", min_length=2, max_length=16)
 
     @model_validator(mode="after")
-    def require_schema_for_json(self) -> "TaskOutput":
+    def require_schema_for_json(self) -> TaskOutput:
         if self.format == OutputFormat.json and self.json_schema is None:
             raise ValueError("output.json_schema is required when output.format is json")
         return self
@@ -136,7 +136,7 @@ class ModelRequirements(StrictBaseModel):
         return value
 
     @model_validator(mode="after")
-    def enforce_cloud_policy(self) -> "ModelRequirements":
+    def enforce_cloud_policy(self) -> ModelRequirements:
         allowed = {provider.lower() for provider in self.allowed_providers}
         if not self.cloud_allowed:
             cloudish = {"deepseek", "ollama_cloud", "openai", "anthropic", "google"}
@@ -169,7 +169,7 @@ class SelectionPolicy(StrictBaseModel):
     proposer_count: int = Field(default=3, ge=1, le=5)
 
     @model_validator(mode="after")
-    def validate_mode(self) -> "SelectionPolicy":
+    def validate_mode(self) -> SelectionPolicy:
         if self.mode == SelectionMode.manual:
             if not self.proposers:
                 raise ValueError("manual selection requires proposers")
@@ -200,7 +200,7 @@ class ExecutionConfig(StrictBaseModel):
         return data
 
     @model_validator(mode="after")
-    def validate_strategy(self) -> "ExecutionConfig":
+    def validate_strategy(self) -> ExecutionConfig:
         if self.strategy == ExecutionStrategy.single and self.preset != ExecutionPreset.fast:
             raise ValueError("single strategy only supports preset fast")
         if self.strategy == ExecutionStrategy.mixture_of_agents:
@@ -226,7 +226,7 @@ class TaskCreateRequest(StrictBaseModel):
     priority: int = Field(default=100, ge=0, le=1000)
 
     @model_validator(mode="after")
-    def enforce_data_boundary(self) -> "TaskCreateRequest":
+    def enforce_data_boundary(self) -> TaskCreateRequest:
         if self.risk.data_classification == DataClassification.local_only:
             local_provider_names = {"ollama", "huggingface_local", "lmstudio"}
             target = self.model_requirements.target_model

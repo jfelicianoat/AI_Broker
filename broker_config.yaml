@@ -1019,9 +1019,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-01T19:03:47.127280+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''c53ee0e9-bad9-4e09-b365-52c9d6b71254'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: nvidia/nemotron-content-safety-reasoning-4b
       context_window: 128000
       input_cost_per_million: 0.0
@@ -1073,9 +1075,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-01T19:04:02.398769+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''bc205f8e-1740-40df-8d32-c4321763498a'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: nvidia/nv-embed-v1
       context_window: 128000
       input_cost_per_million: 0.0
@@ -1172,8 +1176,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-01T19:04:27.338532+00:00'
       compatibility_error: null
     - name: qwen/qwen3-next-80b-a3b-instruct
       context_window: 128000
@@ -1199,8 +1203,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-01T19:04:46.492220+00:00'
       compatibility_error: null
     - name: sarvamai/sarvam-m
       context_window: 128000

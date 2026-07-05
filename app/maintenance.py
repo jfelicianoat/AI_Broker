@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 BACKUP_FORMAT_VERSION = "ai-broker-backup-v1"
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "broker.db"

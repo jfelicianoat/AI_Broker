@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 
