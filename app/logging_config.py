@@ -10,7 +10,6 @@ from typing import Any
 
 from app.config import LoggingConfig
 
-
 SENSITIVE_PATTERN = re.compile(
     r"(authorization|api[_-]?key|token|secret|password|credential)=([^,\s]+)",
     re.IGNORECASE,

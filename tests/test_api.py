@@ -1,7 +1,7 @@
 import asyncio
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -20,8 +20,8 @@ from app.config import (
     load_config,
 )
 from app.dashboard_web import load_dashboard_resources
-from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.main import create_app
+from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.resource_scheduler import ResourceScheduler
 
@@ -985,7 +985,7 @@ def test_operational_logging_rotates_and_does_not_log_prompt_body(tmp_path: Path
     )
     secret_prompt = "NO_DEBE_APARECER_EN_LOGS"
     with TestClient(create_app(config)) as client:
-        for index in range(40):
+        for _ in range(40):
             client.get("/health/live")
         client.post(
             "/api/v1/tasks",
@@ -1560,3 +1560,86 @@ def test_claim_is_atomic_and_never_activates_second_workflow(tmp_path: Path) -> 
         assert second is None
         assert len(queue["active"]) == 1
         assert len(queue["pending"]) == 1
+
+
+def test_recovery_respects_max_task_attempts(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        for ordinal in (1, 2):
+            response = client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": f"recover:{ordinal}", "content": {"prompt": f"Tarea {ordinal}"}},
+            )
+            assert response.status_code == 202
+        repository = client.app.state.repository
+        db = client.app.state.db
+        queue = client.get("/api/v1/queue").json()
+        fresh_id = queue["pending"][0]["task_id"]
+        exhausted_id = queue["pending"][1]["task_id"]
+        db.execute("UPDATE tasks SET status = 'generating', attempt = 0 WHERE id = ?", (fresh_id,))
+        db.execute("UPDATE tasks SET status = 'proposing', attempt = 2 WHERE id = ?", (exhausted_id,))
+
+        recovered = repository.recover_interrupted_tasks(max_attempts=3)
+
+        assert recovered == 1
+        fresh = client.get(f"/api/v1/tasks/{fresh_id}").json()
+        exhausted = client.get(f"/api/v1/tasks/{exhausted_id}").json()
+        assert fresh["status"] == "queued"
+        assert exhausted["status"] == "failed"
+        assert exhausted["error"]["code"] == "TASK_RETRY_LIMIT_EXCEEDED"
+        assert exhausted["error"]["retryable"] is False
+
+
+def test_dashboard_actions_require_admin_token_when_configured(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "admin:cancel", "content": {"prompt": "Tarea"}},
+        )
+        assert created.status_code == 202
+        task_id = created.json()["task_id"]
+        token = dashboard_csrf(client)
+
+        denied = client.post(
+            f"/dashboard/actions/tasks/{task_id}/cancel",
+            headers={"X-CSRF-Token": token},
+        )
+        assert denied.status_code == 403
+        assert denied.json()["detail"] == "ADMIN_AUTH_REQUIRED"
+
+        bad_login = client.post(
+            "/dashboard/actions/login",
+            data={"csrf_token": token, "admin_token": "incorrecto"},
+        )
+        assert bad_login.status_code == 403
+
+        good_login = client.post(
+            "/dashboard/actions/login",
+            data={"csrf_token": token, "admin_token": "secreto-admin"},
+            follow_redirects=False,
+        )
+        assert good_login.status_code == 303
+        assert "ai_broker_dashboard_admin" in good_login.cookies
+
+        allowed = client.post(
+            f"/dashboard/actions/tasks/{task_id}/cancel",
+            headers={"X-CSRF-Token": token},
+        )
+        assert allowed.status_code == 204
+        assert client.get(f"/api/v1/tasks/{task_id}").json()["status"] == "cancelled"
+
+
+def test_dashboard_actions_accept_admin_token_header(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "admin:header", "content": {"prompt": "Tarea"}},
+        )
+        task_id = created.json()["task_id"]
+        token = dashboard_csrf(client)
+        allowed = client.post(
+            f"/dashboard/actions/tasks/{task_id}/cancel",
+            headers={"X-CSRF-Token": token, "X-Admin-Token": "secreto-admin"},
+        )
+        assert allowed.status_code == 204
