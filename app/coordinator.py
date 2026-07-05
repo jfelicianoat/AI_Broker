@@ -13,7 +13,6 @@ from app.repository import _utc_now_iso
 from app.resource_scheduler import ResourcePlanningError, ResourceScheduler
 from app.schemas import ExecutionPreset, ExecutionStrategy, InferenceKind, ModelReference, TaskCreateRequest, TaskStatus
 
-
 logger = logging.getLogger("ai_broker.coordinator")
 
 
@@ -392,11 +391,11 @@ class ConsensusCoordinator:
             self._model_markdown(task_id, "arbiter", arbiter, synthesis),
         )
         repository.record_artifact(task_id, run_id, synthesis_invocation_id, "synthesis_output", synthesis_artifact)
-        final_artifact = self.artifacts.write_markdown(task_id, "synthesis/final.md", synthesis.content)
+        final_artifact = self.artifacts.write_markdown(task_id, "synthesis/final.md", synthesis.content or "")
         repository.record_artifact(task_id, run_id, None, "final_output", final_artifact)
 
         all_outputs = [output for _, output in proposals] + [synthesis]
-        result = {
+        result: dict[str, Any] = {
             "result_markdown": synthesis.content,
             "assistant_content": synthesis.content,
             "inference_kind": "chat",
@@ -591,7 +590,9 @@ class ConsensusCoordinator:
         try:
             while not task.done():
                 await asyncio.wait({task}, timeout=0.1)
-                if repository.is_cancel_requested(task_id):
+                if task.done():
+                    break
+                if await asyncio.to_thread(repository.is_cancel_requested, task_id):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     raise ProviderError("TASK_CANCELLED", "La inferencia fue cancelada")
@@ -615,7 +616,7 @@ class ConsensusCoordinator:
         model: ModelReference,
         output: ModelOutput,
     ) -> dict:
-        result = {
+        result: dict[str, Any] = {
             "inference_kind": request.inference_kind.value,
             "output_format": request.output.format.value,
             "usage": self._usage([output]),
@@ -677,11 +678,11 @@ class ConsensusCoordinator:
         model: ModelReference,
         role: str | None = None,
     ) -> None:
-        setattr(error, "stage", stage)
-        setattr(error, "role", role or model.role)
-        setattr(error, "provider", model.provider)
-        setattr(error, "deployment", model.deployment)
-        setattr(error, "model", model.model)
+        error.stage = stage
+        error.role = role or model.role
+        error.provider = model.provider
+        error.deployment = model.deployment
+        error.model = model.model
 
     def _error_context(self, error: ProviderError, progress: dict[str, Any]) -> dict[str, Any]:
         context = {

@@ -266,12 +266,14 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(models[0]["provider"], "lmstudio")
         self.assertEqual(models[0]["deployment"], "local")
         self.assertEqual(output.content, "local")
-        self.assertEqual(seen_authorization, [None, None, None])
+        # Dos peticiones: /models se cachea (TTL) y generate reutiliza el catálogo.
+        self.assertEqual(seen_authorization, [None, None])
 
     async def test_caps_max_tokens_to_model_context_window(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            self.assertEqual(body["max_tokens"], 84)
+            # window 600 - estimacion de prompt (4 bytes / 2 bytes por token = 2) - reserva 512 = 86
+            self.assertEqual(body["max_tokens"], 86)
             return httpx.Response(
                 200,
                 json={
@@ -572,7 +574,7 @@ class HuggingFaceLocalProviderTests(unittest.IsolatedAsyncioTestCase):
             return object(), object()
 
         provider._load = fake_load  # type: ignore[method-assign]
-        provider._generate_sync = lambda model, tokenizer, prompt, temperature, max_tokens: ("respuesta local", 7, 3)  # type: ignore[method-assign]
+        provider._generate_sync = lambda model, tokenizer, prompt, temperature, max_tokens, system=None: ("respuesta local", 7, 3)  # type: ignore[method-assign]
         request = TaskCreateRequest.model_validate({
             "idempotency_key": "hf-local:generate",
             "content": {"prompt": "hola"},
@@ -684,7 +686,7 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
             async def models(self):
                 return [{"name": "model", "provider": "ollama", "deployment": "local", "context_window": 100000}]
 
-            async def generate(self, request, model, prompt):
+            async def generate(self, request, model, prompt, system=None):
                 from app.providers import ModelOutput
 
                 self.active += 1
@@ -748,7 +750,7 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-            async def generate(self, request, model, prompt):
+            async def generate(self, request, model, prompt, system=None):
                 from app.providers import ModelOutput
 
                 return ModelOutput("custom", 1, 1, 0.0, 1.0)
@@ -886,7 +888,7 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ]
 
-            async def generate(self, request, model, prompt):
+            async def generate(self, request, model, prompt, system=None):
                 from app.providers import ModelOutput
 
                 return ModelOutput("hf local", 1, 1, 0.0, 1.0)
@@ -925,6 +927,79 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected[0].provider, "huggingface_local")
         self.assertEqual(output.content, "hf local")
+
+
+class RoleSystemPromptTests(unittest.IsolatedAsyncioTestCase):
+    class RecordingStub:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str | None]] = []
+
+        async def models(self):
+            return [
+                {
+                    "name": "model",
+                    "provider": "ollama",
+                    "deployment": "local",
+                    "context_window": 100000,
+                    "capabilities": ["completion"],
+                }
+            ]
+
+        async def generate(self, request, model, prompt, system=None):
+            from app.providers import ModelOutput
+
+            self.calls.append((model, prompt, system))
+            return ModelOutput("ok", 1, 1, 0.0, 1.0)
+
+        async def close(self):
+            return None
+
+    async def test_single_strategy_has_no_system_prompt(self) -> None:
+        stub = self.RecordingStub()
+        router = RoutedModelProvider(BrokerConfig(), ollama=stub, deepseek=self.RecordingStub())
+        request = TaskCreateRequest(idempotency_key="role:single", content={"prompt": "hola"})
+        model = (await router.select(request, 1, ["single"]))[0]
+        await router.propose(request, model, 1)
+        await router.close()
+        self.assertIsNone(stub.calls[0][2])
+
+    async def test_mixture_proposers_receive_role_system_prompts(self) -> None:
+        from app.providers import ROLE_SYSTEM_PROMPTS
+
+        stub = self.RecordingStub()
+        router = RoutedModelProvider(BrokerConfig(), ollama=stub, deepseek=self.RecordingStub())
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "role:mixture",
+            "content": {"prompt": "hola"},
+            "execution": {"strategy": "mixture_of_agents", "preset": "fast"},
+        })
+        skeptic = ModelReference(provider="ollama", deployment="local", model="model", role="skeptic")
+        unknown_role = ModelReference(provider="ollama", deployment="local", model="model", role="custom-role")
+        await router.propose(request, skeptic, 1)
+        await router.propose(request, unknown_role, 2)
+        await router.close()
+        self.assertEqual(stub.calls[0][2], ROLE_SYSTEM_PROMPTS["skeptic"])
+        self.assertEqual(stub.calls[1][2], ROLE_SYSTEM_PROMPTS["proposer"])
+
+    async def test_synthesize_uses_arbiter_system_and_delimits_candidates(self) -> None:
+        from app.providers import ROLE_SYSTEM_PROMPTS, ModelOutput
+
+        stub = self.RecordingStub()
+        router = RoutedModelProvider(BrokerConfig(), ollama=stub, deepseek=self.RecordingStub())
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "role:arbiter",
+            "content": {"prompt": "pregunta original"},
+            "execution": {"strategy": "mixture_of_agents", "preset": "fast"},
+        })
+        arbiter = ModelReference(provider="ollama", deployment="local", model="model", role="arbiter")
+        proposals = [ModelOutput("respuesta A", 1, 1, 0.0, 1.0), ModelOutput("respuesta B", 1, 1, 0.0, 1.0)]
+        await router.synthesize(request, arbiter, proposals)
+        await router.close()
+        model_name, prompt, system = stub.calls[0]
+        self.assertEqual(system, ROLE_SYSTEM_PROMPTS["arbiter"])
+        self.assertIn("<original_request>\npregunta original\n</original_request>", prompt)
+        self.assertIn("<candidate_1>\nrespuesta A\n</candidate_1>", prompt)
+        self.assertIn("<candidate_2>\nrespuesta B\n</candidate_2>", prompt)
 
 
 if __name__ == "__main__":
