@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -24,6 +26,7 @@ from app.config import (
 )
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository
+from app.dashboard_filters import register_filters
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
@@ -37,47 +40,46 @@ from app.schemas import (
     TaskStatus,
 )
 
-
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
+ADMIN_COOKIE_NAME = "ai_broker_dashboard_admin"
+ADMIN_SESSION_SECONDS = 60 * 60 * 8
 templates = Jinja2Templates(directory=TEMPLATES_ROOT)
-templates.env.filters["gb"] = lambda value: f"{float(value or 0) / 1024**3:.1f} GB"
-templates.env.filters["short_time"] = lambda value: value.astimezone().strftime("%H:%M:%S") if value else "—"
-templates.env.filters["short_date"] = lambda value: value.astimezone().strftime("%d/%m %H:%M") if value else "—"
-templates.env.filters["ms"] = lambda value: f"{float(value):.0f} ms" if value is not None else "N/D"
-templates.env.filters["model_value"] = lambda value: json.dumps({
-    "provider": value["provider"],
-    "deployment": value["deployment"],
-    "model": value["name"],
-}, ensure_ascii=False, separators=(",", ":"))
-templates.env.filters["model_compatibility_label"] = lambda value: {
-    "compatible": "[OK]",
-    "incompatible": "[NO MIX]",
-    "unknown": "[PENDIENTE]",
-}.get(str((value or {}).get("compatibility") or "unknown"), "[PENDIENTE]")
-templates.env.filters["model_compatibility_text"] = lambda value: {
-    "compatible": "Compatible mixture",
-    "incompatible": "No compatible mixture",
-    "unknown": "Pendiente de analizar",
-}.get(str((value or {}).get("compatibility") or "unknown"), "Pendiente de analizar")
-templates.env.filters["model_compatibility_class"] = lambda value: (
-    "model-compatible"
-    if str((value or {}).get("compatibility") or "unknown") == "compatible"
-    else "model-incompatible"
-    if str((value or {}).get("compatibility") or "unknown") == "incompatible"
-    else "model-unknown"
-)
-templates.env.filters["status_label"] = lambda value: {
-    "queued": "En cola",
-    "routing": "Enrutando",
-    "resource_planning": "Planificando",
-    "generating": "Generando",
-    "proposing": "Proponiendo",
-    "synthesizing": "Sintetizando",
-    "completed": "Completada",
-    "failed": "Fallida",
-    "cancelled": "Cancelada",
-}.get(getattr(value, "value", value), str(getattr(value, "value", value)))
+register_filters(templates.env)
+
+
+def _expected_admin_token(config: BrokerConfig) -> str | None:
+    if config.server.admin_token_env:
+        value = os.environ.get(config.server.admin_token_env)
+        if value:
+            return value
+    try:
+        import keyring
+
+        return keyring.get_password(
+            config.server.admin_keyring_service,
+            config.server.admin_keyring_username,
+        )
+    except Exception:
+        return None
+
+
+def _admin_cookie_value(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _verify_admin_access(request: Request, config: BrokerConfig) -> None:
+    """Exige sesión admin solo cuando hay token configurado (env o keyring)."""
+    expected = _expected_admin_token(config)
+    if not expected:
+        return
+    header_token = request.headers.get("x-admin-token")
+    if header_token and secrets.compare_digest(header_token, expected):
+        return
+    cookie = request.cookies.get(ADMIN_COOKIE_NAME)
+    if cookie and secrets.compare_digest(cookie, _admin_cookie_value(expected)):
+        return
+    raise HTTPException(status_code=403, detail="ADMIN_AUTH_REQUIRED")
 
 PROBE_PROGRESS: dict[str, dict[str, Any]] = {}
 
@@ -274,6 +276,7 @@ def create_dashboard_router(
     async def update_config(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
+        _verify_admin_access(request, config)
         errors: list[str] = []
         try:
             updated = _build_dashboard_config(config, form)
@@ -319,6 +322,7 @@ def create_dashboard_router(
     async def probe_provider_models(request: Request, provider_id: str):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
+        _verify_admin_access(request, config)
         errors: list[str] = []
         progress_id = form.get("probe_progress_id", "").strip()
         if progress_id:
@@ -420,6 +424,7 @@ def create_dashboard_router(
     async def probe_single_model(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
+        _verify_admin_access(request, config)
         provider_id = form.get("provider", "").strip()
         model_name = form.get("model", "").strip()
         query: dict[str, str] = {"model_name": model_name}
@@ -466,6 +471,7 @@ def create_dashboard_router(
     async def submit_prompt_tester(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
+        _verify_admin_access(request, config)
         action = form.get("action", "validate")
         errors: list[str] = []
         accepted = None
@@ -511,9 +517,49 @@ def create_dashboard_router(
             },
         )
 
+    @router.get("/dashboard/login", response_class=HTMLResponse)
+    async def dashboard_login(request: Request):
+        return _template_response(
+            request,
+            "login.html",
+            {
+                "admin_enabled": _expected_admin_token(config) is not None,
+                "admin_error": None,
+            },
+        )
+
+    @router.post("/dashboard/actions/login", response_class=HTMLResponse)
+    async def dashboard_login_action(request: Request):
+        form = await _read_urlencoded_form(request)
+        _verify_dashboard_mutation(request, form)
+        expected = _expected_admin_token(config)
+        if not expected:
+            return RedirectResponse("/dashboard", status_code=303)
+        supplied = form.get("admin_token") or ""
+        if not secrets.compare_digest(supplied, expected):
+            response = _template_response(
+                request,
+                "login.html",
+                {"admin_enabled": True, "admin_error": "Token de administración incorrecto."},
+            )
+            response.status_code = 403
+            return response
+        response = RedirectResponse("/dashboard", status_code=303)
+        response.set_cookie(
+            ADMIN_COOKIE_NAME,
+            _admin_cookie_value(expected),
+            httponly=True,
+            samesite="strict",
+            secure=False,
+            path="/dashboard",
+            max_age=ADMIN_SESSION_SECONDS,
+        )
+        return response
+
     @router.post("/dashboard/actions/tasks/{task_id}/cancel", status_code=204)
     async def cancel_task(request: Request, task_id: str) -> Response:
         _verify_dashboard_mutation(request)
+        _verify_admin_access(request, config)
         try:
             repository.request_cancel(task_id)
         except KeyError as error:
@@ -523,6 +569,7 @@ def create_dashboard_router(
     @router.post("/dashboard/actions/queue/{task_id}/{direction}", status_code=204)
     async def move_task(request: Request, task_id: str, direction: str) -> Response:
         _verify_dashboard_mutation(request)
+        _verify_admin_access(request, config)
         if direction not in {"up", "down"}:
             raise HTTPException(status_code=422, detail="INVALID_DIRECTION")
         ids = [item.task_id for item in repository.list_queue().pending]

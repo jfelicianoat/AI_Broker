@@ -32,7 +32,13 @@ Pendiente del comparador: filtros/paginacion completos, detalles por candidato, 
 
 La base de seguridad del dashboard esta implementada: las acciones mutables bajo `/dashboard/actions/*` validan token CSRF de doble envio y `Origin`/`Referer` frente a `Host`. Las paginas HTML sirven token en meta/formulario y el runtime local lo envia como `X-CSRF-Token`. La app añade cabeceras `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` y `Referrer-Policy`.
 
-Pendiente de 5.5: autenticacion administrativa real, CSP sin `unsafe-inline` cuando los carriles no dependan de estilos inline, QA visual automatizada y auditoria persistente de acciones administrativas.
+Autenticacion administrativa: si existe un token (variable `AI_BROKER_ADMIN_TOKEN` o keyring `ai-broker/dashboard_admin_token`), las acciones mutables exigen sesion admin. El operador inicia sesion en `GET /dashboard/login` (cookie HttpOnly con hash del token) o envia el token en la cabecera `X-Admin-Token`. Sin token configurado, el panel queda abierto (modo LAN privada original).
+
+```powershell
+python -c "import getpass,keyring; keyring.set_password('ai-broker','dashboard_admin_token',getpass.getpass('Admin token: '))"
+```
+
+Pendiente de 5.5: CSP sin `unsafe-inline` cuando los carriles no dependan de estilos inline, QA visual automatizada y auditoria persistente de acciones administrativas.
 
 ## Estado de fase 6
 
@@ -51,6 +57,7 @@ Tercer bloque operativo implementado: runner de produccion, scripts de servicio 
 - **Estrategia `mixture_of_agents/slow`**: proponentes paralelos o por oleadas y árbitro posterior
 - **Presets implementados**: `fast` y base funcional de `slow`; su activación productiva requiere todavía smoke tests con providers reales y telemetría completa de recursos
 - Pipeline implementado: `resource_planning → proposing → synthesizing`
+- **Roles con system prompt real**: cada proponente recibe un system prompt según su rol (`generalist`, `specialist`, `skeptic`, `analyst`, `reviewer`) y el árbitro sintetiza con la petición original y los candidatos delimitados (`<original_request>`, `<candidate_N>`), tratándolos como datos y no como instrucciones. La estrategia `single` sigue siendo transparente, sin system prompt
 - Trazabilidad total: cada invocación individual queda registrada con tokens, coste y latencia
 
 ### 2. Planificación de recursos
@@ -294,6 +301,7 @@ El Broker recibe inferencias ya preparadas. Su responsabilidad termina en valida
 ### Recuperación
 
 - Al arrancar: tareas en estado activo se devuelven a `queued` con `attempt + 1`
+- Límite de reintentos: al superar `processing.max_task_attempts` (3 por defecto), la tarea interrumpida pasa a `failed` con `TASK_RETRY_LIMIT_EXCEEDED` en lugar de re-encolarse indefinidamente
 - Reconciliación de artefactos huérfanos
 - Integridad referencial vía foreign keys con `ON DELETE CASCADE`
 
@@ -367,9 +375,11 @@ python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --tim
 │   ├── coordinator.py      # Orquestador de consenso multi-LLM
 │   ├── db.py               # SQLite con WAL, schema y event sourcing
 │   ├── dashboard.py        # Read models paginados y métricas operativas
+│   ├── dashboard_filters.py # Filtros Jinja2 del panel
 │   ├── dashboard_web.py    # Rutas HTML, fragmentos y acciones del panel
 │   ├── main.py             # FastAPI app + endpoints
-│   ├── providers.py        # Ollama, Hugging Face local, DeepSeek, routing, secretos y ciclo de VRAM
+│   ├── providers/          # Paquete de proveedores: base, ollama, deepseek,
+│   │                       # huggingface, openai_compatible, routing, bootstrap
 │   ├── repository.py       # Capa de acceso a datos
 │   ├── resource_scheduler.py  # Planificador adaptativo de recursos
 │   ├── schemas.py          # Modelos Pydantic (contrato completo)
