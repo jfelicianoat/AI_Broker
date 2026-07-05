@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any, Literal
 
 import yaml
@@ -13,6 +13,11 @@ class ServerConfig(BaseModel):
     port: int = 8080
     workers: int = 1
     cors_enabled: bool = False
+    # Token de administración del dashboard: si existe (env o keyring), las
+    # acciones mutables de /dashboard/actions/* exigen sesión admin.
+    admin_token_env: str | None = Field(default="AI_BROKER_ADMIN_TOKEN", max_length=120)
+    admin_keyring_service: str = Field(default="ai-broker", max_length=120)
+    admin_keyring_username: str = Field(default="dashboard_admin_token", max_length=120)
 
 
 class PersistenceConfig(BaseModel):
@@ -25,13 +30,14 @@ class ProcessingConfig(BaseModel):
     max_parallel_invocations: int | str = "auto"
     queue_max_size: int = 1000
     task_timeout_seconds: int = 300
+    max_task_attempts: int = Field(default=3, ge=1, le=100)
     unload_after_task: bool = True
     auto_dispatch: bool = True
     dispatcher_interval_seconds: float = Field(default=0.1, gt=0, le=60)
     provider_mode: Literal["real", "bootstrap"] = "real"
 
     @model_validator(mode="after")
-    def validate_single_workflow(self) -> "ProcessingConfig":
+    def validate_single_workflow(self) -> ProcessingConfig:
         if self.max_active_workflows != 1:
             raise ValueError("MVP requires processing.max_active_workflows to be 1")
         if isinstance(self.max_parallel_invocations, int) and self.max_parallel_invocations < 1:
@@ -70,6 +76,7 @@ class OllamaConfig(BaseModel):
     base_url: str = "http://127.0.0.1:11434"
     timeout_seconds: float = Field(default=300, gt=0)
     unload_timeout_seconds: float = Field(default=10, gt=0)
+    catalog_cache_seconds: float = Field(default=5.0, ge=0)
 
 
 class DeepSeekConfig(BaseModel):
@@ -83,6 +90,7 @@ class DeepSeekConfig(BaseModel):
     context_window: int = Field(default=64_000, gt=0)
     input_cost_per_million: float = Field(default=0.0, ge=0)
     output_cost_per_million: float = Field(default=0.0, ge=0)
+    catalog_cache_seconds: float = Field(default=30.0, ge=0)
 
 
 class HuggingFaceLocalModelConfig(BaseModel):
@@ -133,6 +141,7 @@ class OpenAICompatibleProviderConfig(BaseModel):
     deployment: Literal["cloud", "api", "local"] = "cloud"
     auto_start: bool = False
     sync_models: bool = False
+    catalog_cache_seconds: float = Field(default=5.0, ge=0)
     default_context_window: int = Field(default=128_000, gt=0)
     probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
     probe_delay_seconds: float = Field(default=1.0, ge=0, le=60)
@@ -144,7 +153,7 @@ class OpenAICompatibleProviderConfig(BaseModel):
     models: list[OpenAICompatibleModelConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_provider_id(self) -> "OpenAICompatibleProviderConfig":
+    def validate_provider_id(self) -> OpenAICompatibleProviderConfig:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.id):
             raise ValueError("provider id only allows letters, numbers, underscore and dash")
         if self.api_key_env is not None and not self.api_key_env.strip():
@@ -161,7 +170,7 @@ class ProvidersConfig(BaseModel):
     custom: list[OpenAICompatibleProviderConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_unique_custom_ids(self) -> "ProvidersConfig":
+    def validate_unique_custom_ids(self) -> ProvidersConfig:
         ids = [item.id.lower() for item in self.custom]
         if len(ids) != len(set(ids)):
             raise ValueError("custom provider ids must be unique")
