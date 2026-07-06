@@ -75,6 +75,35 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
+        <h3>Compresion de prompts</h3>
+        <p>Reduce tokens del prompt (cortesias, muletillas, relleno) antes de enviarlo a los LLMs. El codigo y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
+      </div>
+      <span class="badge badge-neutral">prompt_compression</span>
+    </div>
+    <div class="form-body config-grid">
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="prompt_compression_enabled" {% if config.prompt_compression.enabled %}checked{% endif %}>
+          Activar compresion de prompts
+        </label>
+      </div>
+      <label class="field">
+        <span>Nivel de compresion</span>
+        <select name="prompt_compression_level">
+          <option value="light" {% if config.prompt_compression.level == 'light' %}selected{% endif %}>light (solo cortesias)</option>
+          <option value="medium" {% if config.prompt_compression.level == 'medium' %}selected{% endif %}>medium (+ muletillas y relleno)</option>
+          <option value="aggressive" {% if config.prompt_compression.level == 'aggressive' %}selected{% endif %}>aggressive (+ articulos, estilo caveman)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Minimo de caracteres para comprimir</span>
+        <input name="prompt_compression_min_chars" value="{{ config.prompt_compression.min_chars }}" inputmode="numeric">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
         <h3>Hugging Face local</h3>
         <p>Modelos descargados en disco y ejecutados dentro del proceso del Broker.</p>
       </div>

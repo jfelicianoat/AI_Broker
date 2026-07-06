@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from app.config import BrokerConfig
+from app.prompt_compressor import PromptCompressor
 from app.providers.base import (
     ROLE_SYSTEM_PROMPTS,
     ModelOutput,
@@ -49,6 +50,25 @@ class RoutedModelProvider:
             parallel_limit = max(1, min(3, int(usable_vram // 18)))
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(parallel_limit)
+        self.prompt_compressor = self._build_prompt_compressor(config)
+
+    @staticmethod
+    def _build_prompt_compressor(config: BrokerConfig) -> PromptCompressor:
+        settings = config.prompt_compression
+        return PromptCompressor(
+            enabled=settings.enabled,
+            level=settings.level,
+            min_chars=settings.min_chars,
+        )
+
+    def _user_prompt(self, request: TaskCreateRequest) -> str:
+        """Prompt que viaja al proveedor; el original persiste intacto en la tarea.
+
+        Los embeddings nunca se comprimen: alterar el texto altera el vector.
+        """
+        if request.inference_kind == InferenceKind.embedding:
+            return request.content.prompt
+        return self.prompt_compressor.compress_text(request.content.prompt)
 
     @staticmethod
     def _build_custom_providers(config: BrokerConfig) -> dict[str, OpenAICompatibleProvider]:
@@ -68,6 +88,7 @@ class RoutedModelProvider:
             ollama_cache.clear()
         self.huggingface_local.reload_config(config.providers.huggingface_local)
         self.custom = self._build_custom_providers(config)
+        self.prompt_compressor = self._build_prompt_compressor(config)
 
     async def close(self) -> None:
         await self.ollama.close()
@@ -233,7 +254,7 @@ class RoutedModelProvider:
         system = None
         if request.execution.strategy == ExecutionStrategy.mixture_of_agents:
             system = role_system_prompt(model.role) or ROLE_SYSTEM_PROMPTS["proposer"]
-        return await self._generate(request, model, request.content.prompt, system=system)
+        return await self._generate(request, model, self._user_prompt(request), system=system)
 
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:
         candidates = "\n\n".join(
@@ -241,7 +262,7 @@ class RoutedModelProvider:
             for i, o in enumerate(proposals)
         )
         prompt = (
-            f"<original_request>\n{neutralize_consensus_delimiters(request.content.prompt)}\n</original_request>\n\n"
+            f"<original_request>\n{neutralize_consensus_delimiters(self._user_prompt(request))}\n</original_request>\n\n"
             f"<candidates>\n{candidates}\n</candidates>"
         )
         return await self._generate(request, model, prompt, system=ROLE_SYSTEM_PROMPTS["arbiter"])

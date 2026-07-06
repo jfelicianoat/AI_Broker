@@ -662,6 +662,9 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("resources.vram_safety_margin_gb", "Margen seguridad VRAM"),
         ("resources.max_loaded_local_models", "Max. modelos locales cargados"),
         ("resources.allow_execution_waves", "Permitir waves"),
+        ("prompt_compression.enabled", "Compresion de prompts activa"),
+        ("prompt_compression.level", "Nivel de compresion de prompts"),
+        ("prompt_compression.min_chars", "Minimo de caracteres para comprimir"),
         ("providers.huggingface_local.enabled", "Hugging Face local activo"),
         ("providers.huggingface_local.models_dir", "Directorio HF local"),
         ("providers.huggingface_local.timeout_seconds", "Timeout HF local"),
@@ -782,6 +785,14 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
     resources["allow_execution_waves"] = _checked(form, "allow_execution_waves")
     if resources["vram_safety_margin_gb"] >= resources["local_vram_budget_gb"]:
         raise PromptTesterError("El margen de VRAM debe ser menor que el presupuesto total de VRAM.")
+    level = form.get("prompt_compression_level", "medium").strip().lower() or "medium"
+    if level not in {"light", "medium", "aggressive"}:
+        raise PromptTesterError("prompt_compression_level debe ser light, medium o aggressive.")
+    payload["prompt_compression"] = {
+        "enabled": _checked(form, "prompt_compression_enabled"),
+        "level": level,
+        "min_chars": _int_range_field(form, "prompt_compression_min_chars", minimum=0, maximum=100000),
+    }
     payload["processing"] = processing
     payload["resources"] = resources
     payload["providers"]["huggingface_local"] = _parse_huggingface_local_provider(current, form)
@@ -791,6 +802,7 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
 
 def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     target.processing = updated.processing
+    target.prompt_compression = updated.prompt_compression
     target.resources = updated.resources
     target.providers = updated.providers
 
