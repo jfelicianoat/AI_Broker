@@ -104,7 +104,7 @@ Tercer bloque operativo implementado: runner de produccion, scripts de servicio 
 ### 6. Configuración declarativa
 
 - Archivo YAML (`broker_config.yaml`) con merge profundo sobre defaults
-- Secciones: `server`, `persistence`, `processing`, `resources`, `health`, `providers`
+- Secciones: `server`, `persistence`, `processing`, `prompt_compression`, `resources`, `health`, `logging`, `providers`
 - Validación en arranque via Pydantic
 
 Ejemplo minimo para modelos Hugging Face locales:
@@ -164,7 +164,7 @@ LM Studio debe tener activo su servidor local OpenAI-compatible. Con `auto_start
 
 - `inference_kind`: `chat` por defecto o `embedding` local con estrategia `single`
 - Preflight conservador de contexto; nunca trunca, divide o sintetiza silenciosamente
-- Traducción lossless del prompt/input a Ollama o DeepSeek
+- Traducción lossless del prompt/input al proveedor; con `prompt_compression` activo, el prompt de chat se comprime antes del envío (los embeddings nunca se comprimen y el original persiste intacto)
 - JSON y Markdown permanecen opacos para el Broker
 - Resultado con contenido/vector, uso, modelo y fallback
 - Invocación y resultado terminal `single` confirmados en una transacción SQLite
@@ -191,6 +191,24 @@ Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase
 - Las cifras proceden de SQLite, del health check actual o del snapshot de recursos con timestamp.
 - Un fallo del snapshot de Ollama degrada el bloque de recursos a `N/D` sin inutilizar el panel.
 - El historial proactivo de salud y la medición temporal de solapamiento de `slow` siguen pendientes.
+
+### 11. Compresión de prompts
+
+- Servicio determinista por reglas que reduce los tokens del prompt antes de enviarlo a los LLMs, adaptando a español las técnicas de [caveman](https://github.com/JuliusBrussee/caveman), [caveman-micro](https://github.com/kuba-guzik/caveman-micro) y [ponytail](https://github.com/DietrichGebert/ponytail)
+- Tres niveles: `light` (cortesías y aperturas sociales), `medium` (además muletillas, relleno y envoltorios de petición) y `aggressive` (además artículos, estilo caveman)
+- El código (fences e inline), las URLs y los correos se preservan byte a byte; los embeddings nunca se comprimen; si la compresión dejara menos del 20% del texto, se envía el original
+- El prompt original persiste intacto en la base de datos y los artefactos; solo se comprime lo que viaja al proveedor
+- Desactivable desde el panel de configuración del dashboard o desde `broker_config.yaml`; los cambios aplican en caliente
+- Cada compresión efectiva se registra en el log (`prompt.compressed` con caracteres antes/después y ratio)
+
+```yaml
+prompt_compression:
+  enabled: true        # false para desactivar el servicio
+  level: medium        # light | medium | aggressive
+  min_chars: 40        # prompts más cortos se envían tal cual
+```
+
+Especificación completa: [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md).
 
 ## API
 
@@ -378,6 +396,7 @@ python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --tim
 │   ├── dashboard_filters.py # Filtros Jinja2 del panel
 │   ├── dashboard_web.py    # Rutas HTML, fragmentos y acciones del panel
 │   ├── main.py             # FastAPI app + endpoints
+│   ├── prompt_compressor.py # Compresión de prompts antes de la inferencia
 │   ├── providers/          # Paquete de proveedores: base, ollama, deepseek,
 │   │                       # huggingface, openai_compatible, routing, bootstrap
 │   ├── repository.py       # Capa de acceso a datos
@@ -390,6 +409,7 @@ python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --tim
 ├── tests/
 │   ├── test_api.py         # Tests de integración de API
 │   ├── test_contract.py    # Tests de validación de contrato
+│   ├── test_prompt_compressor.py # Tests del servicio de compresión de prompts
 │   ├── test_providers.py   # Tests de proveedores, routing, VRAM y presupuesto
 │   └── test_phase_four_inference.py  # Contexto, embeddings y resultados opacos
 ├── broker_config.yaml      # Configuración del broker

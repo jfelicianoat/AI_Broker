@@ -60,6 +60,15 @@ class ProcessingConfig(BaseModel):
         return self
 
 
+class PromptCompressionConfig(BaseModel):
+    # Reduce tokens del prompt antes de enviarlo a los LLMs (técnica caveman
+    # adaptada a español). Desactivable desde el dashboard o este YAML.
+    enabled: bool = True
+    level: Literal["light", "medium", "aggressive"] = "medium"
+    # Prompts más cortos que esto se envían tal cual: cada palabra cuenta.
+    min_chars: int = Field(default=40, ge=0)
+
+
 class ResourceConfig(BaseModel):
     local_vram_budget_gb: float = 64.0
     vram_safety_margin_gb: float = 6.0
@@ -197,6 +206,7 @@ class BrokerConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
+    prompt_compression: PromptCompressionConfig = Field(default_factory=PromptCompressionConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

@@ -21,6 +21,10 @@ processing:
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
   provider_mode: real
+prompt_compression:
+  enabled: true
+  level: medium
+  min_chars: 40
 resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0
