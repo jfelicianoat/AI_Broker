@@ -14,11 +14,15 @@ class Database:
         self.path = Path(path)
         self.journal_mode = journal_mode
         self._lock = threading.RLock()
+        self._in_transaction = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute(f"PRAGMA journal_mode = {journal_mode}")
+        # Procesos externos (backups, herramientas) pueden mantener locks breves:
+        # mejor esperar unos segundos que fallar con "database is locked".
+        self._conn.execute("PRAGMA busy_timeout = 5000")
 
     def close(self) -> None:
         with self._lock:
@@ -164,6 +168,13 @@ class Database:
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
+            if self._in_transaction:
+                # El RLock es reentrante: sin este guard, un execute() dentro de
+                # db.transaction() commitearía la transacción exterior a mitad.
+                raise RuntimeError(
+                    "Database.execute() dentro de una transacción abierta: "
+                    "usa la conexión que expone db.transaction()"
+                )
             cursor = self._conn.execute(sql, tuple(params))
             self._conn.commit()
             return cursor
@@ -179,6 +190,9 @@ class Database:
     @contextmanager
     def transaction(self):
         with self._lock:
+            if self._in_transaction:
+                raise RuntimeError("Transacción anidada no soportada en Database.transaction()")
+            self._in_transaction = True
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 yield self._conn
@@ -186,6 +200,8 @@ class Database:
             except BaseException:
                 self._conn.rollback()
                 raise
+            finally:
+                self._in_transaction = False
 
 
 def dumps_json(value: Any) -> str:

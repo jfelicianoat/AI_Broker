@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,7 @@ class HuggingFaceLocalProvider:
             "status": "available" if path.exists() else "offline",
             "path": str(path),
             "context_window": item.context_window,
+            "context_window_source": "configured",
             "capabilities": list(item.capabilities),
             "family": "huggingface_local",
             "compatibility": compatible,
@@ -160,6 +162,10 @@ class HuggingFaceLocalProvider:
         )
         started = datetime.now(timezone.utc)
         loaded_model, tokenizer = await self._load(item)
+        # La generación corre en un thread que task.cancel() no puede matar:
+        # el stop_event permite que el thread pare en pocos tokens y no siga
+        # consumiendo GPU tras un timeout o una cancelación.
+        stop_event = threading.Event()
         try:
             generated_text, input_tokens, output_tokens = await asyncio.to_thread(
                 self._generate_sync,
@@ -169,7 +175,11 @@ class HuggingFaceLocalProvider:
                 inference_request.generation.temperature,
                 inference_request.generation.max_output_tokens,
                 system,
+                stop_event,
             )
+        except asyncio.CancelledError:
+            stop_event.set()
+            raise
         except ProviderError:
             raise
         except Exception as error:
@@ -185,6 +195,22 @@ class HuggingFaceLocalProvider:
         )
 
     @staticmethod
+    def _cancellation_criteria(stop_event: threading.Event | None) -> Any | None:
+        if stop_event is None:
+            return None
+        event = stop_event
+        try:
+            from transformers import StoppingCriteria, StoppingCriteriaList
+        except ImportError:
+            return None
+
+        class _CancelledByBroker(StoppingCriteria):
+            def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+                return event.is_set()
+
+        return StoppingCriteriaList([_CancelledByBroker()])
+
+    @staticmethod
     def _generate_sync(
         model: Any,
         tokenizer: Any,
@@ -192,6 +218,7 @@ class HuggingFaceLocalProvider:
         temperature: float,
         max_output_tokens: int,
         system: str | None = None,
+        stop_event: threading.Event | None = None,
     ) -> tuple[str, int, int]:
         messages = [{"role": "user", "content": prompt}]
         if system:
@@ -208,14 +235,19 @@ class HuggingFaceLocalProvider:
         device = getattr(model, "device", None)
         if device is not None and hasattr(input_ids, "to"):
             input_ids = input_ids.to(device)
-        generated = model.generate(
-            input_ids,
-            max_new_tokens=max_output_tokens,
-            do_sample=temperature > 0,
-            temperature=max(temperature, 0.01),
-            pad_token_id=getattr(tokenizer, "pad_token_id", None),
-            eos_token_id=getattr(tokenizer, "eos_token_id", None),
-        )
+        generate_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_output_tokens,
+            "do_sample": temperature > 0,
+            "temperature": max(temperature, 0.01),
+            "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+            "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        }
+        criteria = HuggingFaceLocalProvider._cancellation_criteria(stop_event)
+        if criteria is not None:
+            generate_kwargs["stopping_criteria"] = criteria
+        generated = model.generate(input_ids, **generate_kwargs)
+        if stop_event is not None and stop_event.is_set():
+            raise ProviderError("TASK_CANCELLED", "Generación local detenida por cancelación", retryable=False)
         output_ids = generated[0][input_ids.shape[-1]:]
         text = tokenizer.decode(output_ids, skip_special_tokens=True)
         return text, int(input_ids.shape[-1]), int(output_ids.shape[-1])

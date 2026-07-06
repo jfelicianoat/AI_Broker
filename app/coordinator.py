@@ -186,15 +186,38 @@ class ConsensusCoordinator:
             },
             clear_queue_position=True,
         )
-        try:
-            output = await self._run_cancellable(
-                repository,
-                task_id,
-                self.provider.propose(request, model, 1),
-            )
-        except ProviderError as error:
-            self._attach_error_context(error, "generating", model)
-            raise
+        # Un blip transitorio del provider (429/5xx) no debe tirar la tarea:
+        # el campo retryable del error deja de ser una promesa vacía al cliente.
+        retry_delays = (0.5, 1.0)
+        output: ModelOutput | None = None
+        for attempt_index in range(len(retry_delays) + 1):
+            try:
+                output = await self._run_cancellable(
+                    repository,
+                    task_id,
+                    self.provider.propose(request, model, 1),
+                )
+                break
+            except ProviderError as error:
+                self._attach_error_context(error, "generating", model)
+                if (
+                    not error.retryable
+                    or error.code == "TASK_CANCELLED"
+                    or attempt_index >= len(retry_delays)
+                    or repository.is_cancel_requested(task_id)
+                ):
+                    raise
+                logger.warning(
+                    "task.single_retry",
+                    extra={
+                        "event": "task.single_retry",
+                        "task_id": task_id,
+                        "code": error.code,
+                        "attempt": attempt_index + 1,
+                    },
+                )
+                await asyncio.sleep(retry_delays[attempt_index])
+        assert output is not None
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
@@ -318,12 +341,14 @@ class ConsensusCoordinator:
                 ordinal = len(proposals) + 1
                 role = model.role or "proposer"
                 invocation_id = repository.record_invocation(task_id, run_id, role, model, output)
-                artifact = self.artifacts.write_markdown(
-                    task_id,
-                    f"proposers/{ordinal:02d}_{self._safe_name(role)}_{self._safe_name(model.model)}.md",
-                    self._model_markdown(task_id, role, model, output),
+                self._record_artifact_safely(
+                    repository, task_id, run_id, invocation_id, "proposer_output",
+                    lambda o=ordinal, r=role, m=model, out=output: self.artifacts.write_markdown(
+                        task_id,
+                        f"proposers/{o:02d}_{self._safe_name(r)}_{self._safe_name(m.model)}.md",
+                        self._model_markdown(task_id, r, m, out),
+                    ),
                 )
-                repository.record_artifact(task_id, run_id, invocation_id, "proposer_output", artifact)
                 proposals.append((model, output))
                 completed += 1
                 self._enforce_budget(request, [item for _, item in proposals])
@@ -385,14 +410,18 @@ class ConsensusCoordinator:
             return
         self._enforce_budget(request, [output for _, output in proposals] + [synthesis])
         synthesis_invocation_id = repository.record_invocation(task_id, run_id, "arbiter", arbiter, synthesis)
-        synthesis_artifact = self.artifacts.write_markdown(
-            task_id,
-            f"synthesis/arbiter_{self._safe_name(arbiter.model)}.md",
-            self._model_markdown(task_id, "arbiter", arbiter, synthesis),
+        self._record_artifact_safely(
+            repository, task_id, run_id, synthesis_invocation_id, "synthesis_output",
+            lambda: self.artifacts.write_markdown(
+                task_id,
+                f"synthesis/arbiter_{self._safe_name(arbiter.model)}.md",
+                self._model_markdown(task_id, "arbiter", arbiter, synthesis),
+            ),
         )
-        repository.record_artifact(task_id, run_id, synthesis_invocation_id, "synthesis_output", synthesis_artifact)
-        final_artifact = self.artifacts.write_markdown(task_id, "synthesis/final.md", synthesis.content or "")
-        repository.record_artifact(task_id, run_id, None, "final_output", final_artifact)
+        self._record_artifact_safely(
+            repository, task_id, run_id, None, "final_output",
+            lambda: self.artifacts.write_markdown(task_id, "synthesis/final.md", synthesis.content or ""),
+        )
 
         all_outputs = [output for _, output in proposals] + [synthesis]
         result: dict[str, Any] = {
@@ -517,6 +546,36 @@ class ConsensusCoordinator:
         )
         return invocation_request.model_copy(update={"model_requirements": requirements})
 
+    def _record_artifact_safely(
+        self,
+        repository,
+        task_id: str,
+        run_id: str | None,
+        invocation_id: str | None,
+        artifact_type: str,
+        write,
+    ) -> None:
+        """Un fallo de disco al persistir un artefacto no debe tirar una tarea ya pagada."""
+        try:
+            artifact = write()
+            repository.record_artifact(task_id, run_id, invocation_id, artifact_type, artifact)
+        except Exception as error:
+            logger.warning(
+                "artifact.failed",
+                extra={
+                    "event": "artifact.failed",
+                    "task_id": task_id,
+                    "artifact_type": artifact_type,
+                    "detail": str(error),
+                },
+            )
+            try:
+                repository.add_event(
+                    task_id, "artifact.failed", {"artifact_type": artifact_type, "message": str(error)}
+                )
+            except Exception:
+                pass
+
     def _write_request_artifacts(
         self,
         repository,
@@ -525,12 +584,14 @@ class ConsensusCoordinator:
         request: TaskCreateRequest,
         resource_plan: dict,
     ) -> None:
-        request_artifact = self.artifacts.write_markdown(
-            task_id,
-            "request.md",
-            f"# Request\n\n{request.content.prompt}\n",
+        self._record_artifact_safely(
+            repository, task_id, run_id, None, "request",
+            lambda: self.artifacts.write_markdown(
+                task_id,
+                "request.md",
+                f"# Request\n\n{request.content.prompt}\n",
+            ),
         )
-        repository.record_artifact(task_id, run_id, None, "request", request_artifact)
         manifest = {
             "task_id": task_id,
             "run_id": run_id,
@@ -538,8 +599,10 @@ class ConsensusCoordinator:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "resource_plan": resource_plan,
         }
-        manifest_artifact = self.artifacts.write_text(task_id, "manifest.json", dumps_json(manifest))
-        repository.record_artifact(task_id, run_id, None, "manifest", manifest_artifact)
+        self._record_artifact_safely(
+            repository, task_id, run_id, None, "manifest",
+            lambda: self.artifacts.write_text(task_id, "manifest.json", dumps_json(manifest)),
+        )
 
     async def _select_proposers(self, request: TaskCreateRequest) -> list[ModelReference]:
         selection = request.execution.selection

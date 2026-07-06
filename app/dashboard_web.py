@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -16,6 +14,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
+from app.admin_auth import (
+    ADMIN_COOKIE_NAME,
+    ADMIN_SESSION_SECONDS,
+    LoginThrottle,
+    admin_cookie_value,
+    resolve_admin_token,
+    verify_admin_access,
+)
 from app.config import (
     BrokerConfig,
     HuggingFaceLocalConfig,
@@ -42,44 +48,8 @@ from app.schemas import (
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
-ADMIN_COOKIE_NAME = "ai_broker_dashboard_admin"
-ADMIN_SESSION_SECONDS = 60 * 60 * 8
 templates = Jinja2Templates(directory=TEMPLATES_ROOT)
 register_filters(templates.env)
-
-
-def _expected_admin_token(config: BrokerConfig) -> str | None:
-    if config.server.admin_token_env:
-        value = os.environ.get(config.server.admin_token_env)
-        if value:
-            return value
-    try:
-        import keyring
-
-        return keyring.get_password(
-            config.server.admin_keyring_service,
-            config.server.admin_keyring_username,
-        )
-    except Exception:
-        return None
-
-
-def _admin_cookie_value(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _verify_admin_access(request: Request, config: BrokerConfig) -> None:
-    """Exige sesión admin solo cuando hay token configurado (env o keyring)."""
-    expected = _expected_admin_token(config)
-    if not expected:
-        return
-    header_token = request.headers.get("x-admin-token")
-    if header_token and secrets.compare_digest(header_token, expected):
-        return
-    cookie = request.cookies.get(ADMIN_COOKIE_NAME)
-    if cookie and secrets.compare_digest(cookie, _admin_cookie_value(expected)):
-        return
-    raise HTTPException(status_code=403, detail="ADMIN_AUTH_REQUIRED")
 
 PROBE_PROGRESS: dict[str, dict[str, Any]] = {}
 
@@ -96,6 +66,7 @@ def create_dashboard_router(
     health_loader: Callable[[], Awaitable[HealthResponse]],
 ) -> APIRouter:
     router = APIRouter()
+    login_throttle = LoginThrottle()
 
     async def resources() -> DashboardResourcesResponse:
         return await load_dashboard_resources(provider, scheduler, config)
@@ -276,7 +247,7 @@ def create_dashboard_router(
     async def update_config(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
-        _verify_admin_access(request, config)
+        verify_admin_access(request, config)
         errors: list[str] = []
         try:
             updated = _build_dashboard_config(config, form)
@@ -322,7 +293,7 @@ def create_dashboard_router(
     async def probe_provider_models(request: Request, provider_id: str):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
-        _verify_admin_access(request, config)
+        verify_admin_access(request, config)
         errors: list[str] = []
         progress_id = form.get("probe_progress_id", "").strip()
         if progress_id:
@@ -424,7 +395,7 @@ def create_dashboard_router(
     async def probe_single_model(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
-        _verify_admin_access(request, config)
+        verify_admin_access(request, config)
         provider_id = form.get("provider", "").strip()
         model_name = form.get("model", "").strip()
         query: dict[str, str] = {"model_name": model_name}
@@ -471,7 +442,7 @@ def create_dashboard_router(
     async def submit_prompt_tester(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
-        _verify_admin_access(request, config)
+        verify_admin_access(request, config)
         action = form.get("action", "validate")
         errors: list[str] = []
         accepted = None
@@ -523,7 +494,7 @@ def create_dashboard_router(
             request,
             "login.html",
             {
-                "admin_enabled": _expected_admin_token(config) is not None,
+                "admin_enabled": resolve_admin_token(config) is not None,
                 "admin_error": None,
             },
         )
@@ -532,11 +503,15 @@ def create_dashboard_router(
     async def dashboard_login_action(request: Request):
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
-        expected = _expected_admin_token(config)
+        throttle_key = request.client.host if request.client else "unknown"
+        if login_throttle.blocked_for(throttle_key) > 0:
+            raise HTTPException(status_code=429, detail="ADMIN_LOGIN_RATE_LIMITED")
+        expected = resolve_admin_token(config)
         if not expected:
             return RedirectResponse("/dashboard", status_code=303)
         supplied = form.get("admin_token") or ""
         if not secrets.compare_digest(supplied, expected):
+            login_throttle.record_failure(throttle_key)
             response = _template_response(
                 request,
                 "login.html",
@@ -544,10 +519,11 @@ def create_dashboard_router(
             )
             response.status_code = 403
             return response
+        login_throttle.reset(throttle_key)
         response = RedirectResponse("/dashboard", status_code=303)
         response.set_cookie(
             ADMIN_COOKIE_NAME,
-            _admin_cookie_value(expected),
+            admin_cookie_value(expected),
             httponly=True,
             samesite="strict",
             secure=False,
@@ -559,7 +535,7 @@ def create_dashboard_router(
     @router.post("/dashboard/actions/tasks/{task_id}/cancel", status_code=204)
     async def cancel_task(request: Request, task_id: str) -> Response:
         _verify_dashboard_mutation(request)
-        _verify_admin_access(request, config)
+        verify_admin_access(request, config)
         try:
             repository.request_cancel(task_id)
         except KeyError as error:
@@ -569,7 +545,7 @@ def create_dashboard_router(
     @router.post("/dashboard/actions/queue/{task_id}/{direction}", status_code=204)
     async def move_task(request: Request, task_id: str, direction: str) -> Response:
         _verify_dashboard_mutation(request)
-        _verify_admin_access(request, config)
+        verify_admin_access(request, config)
         if direction not in {"up", "down"}:
             raise HTTPException(status_code=422, detail="INVALID_DIRECTION")
         ids = [item.task_id for item in repository.list_queue().pending]
