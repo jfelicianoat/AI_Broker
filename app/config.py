@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -19,10 +20,22 @@ class ServerConfig(BaseModel):
     admin_keyring_service: str = Field(default="ai-broker", max_length=120)
     admin_keyring_username: str = Field(default="dashboard_admin_token", max_length=120)
 
+    @model_validator(mode="after")
+    def validate_single_worker(self) -> ServerConfig:
+        # Con N workers habría N dispatchers y N recuperaciones de arranque sobre la
+        # misma SQLite: re-encolado de tareas en ejecución y gasto duplicado.
+        if self.workers != 1:
+            raise ValueError("MVP requires server.workers to be 1 (multi-worker duplicates the dispatcher)")
+        return self
+
 
 class PersistenceConfig(BaseModel):
     database: str = "state/broker.db"
     journal_mode: str = "WAL"
+    # Días que se conservan los eventos de tareas terminales (0 = sin poda).
+    events_retention_days: int = Field(default=30, ge=0)
+    # Días que se conservan los artefactos de tareas terminales (0 = nunca borrar).
+    artifacts_retention_days: int = Field(default=0, ge=0)
 
 
 class ProcessingConfig(BaseModel):
@@ -214,14 +227,21 @@ def load_config(path: str | Path = "broker_config.yaml") -> BrokerConfig:
 
 
 def save_config(config: BrokerConfig, path: str | Path = "broker_config.yaml") -> None:
+    """Escritura atómica: un crash a mitad no puede dejar un YAML truncado que impida arrancar."""
     config_path = Path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        yaml.safe_dump(
-            config.model_dump(mode="json"),
-            sort_keys=False,
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
+    payload = yaml.safe_dump(
+        config.model_dump(mode="json"),
+        sort_keys=False,
+        allow_unicode=True,
     )
+    temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    temp_path.write_text(payload, encoding="utf-8")
+    if config_path.exists():
+        backup_path = config_path.with_suffix(config_path.suffix + ".bak")
+        try:
+            os.replace(config_path, backup_path)
+        except OSError:
+            pass
+    os.replace(temp_path, config_path)
 

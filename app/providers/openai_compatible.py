@@ -93,6 +93,9 @@ class OpenAICompatibleProvider:
             "context_window": (
                 model_config.context_window if model_config is not None else self.config.default_context_window
             ),
+            # "default" = heredado de default_context_window sin verificar: puede no
+            # corresponder al contexto real del modelo y producir errores 4xx tardíos.
+            "context_window_source": "configured" if model_config is not None else "default",
             "capabilities": capabilities,
             "family": self.config.display_name or self.config.id,
             "compatibility": (
