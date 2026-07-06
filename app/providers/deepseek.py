@@ -45,6 +45,7 @@ class DeepSeekProvider:
             response.raise_for_status()
             result = [{"name": item["id"], "provider": "deepseek", "deployment": "api", "status": "online",
                        "context_window": self.config.context_window, "capabilities": ["completion"],
+                       "context_window_source": "configured",
                        "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None}
                       for item in response.json().get("data") or []]
             self._catalog_cache.set(result)

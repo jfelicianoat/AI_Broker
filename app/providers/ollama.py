@@ -150,6 +150,7 @@ class OllamaProvider:
                     "deployment": "cloud" if item.get("remote_host") else "local",
                     "status": "available", "size_bytes": item.get("size", 0),
                     "context_window": context_window, "capabilities": capabilities,
+                    "context_window_source": "reported",
                     "family": details.get("family"),
                     "parameter_size": details.get("parameter_size"), "quantization": details.get("quantization_level"),
                     "compatibility": "compatible",

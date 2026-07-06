@@ -11,6 +11,7 @@ from app.providers.base import (
     _CatalogCache,
     context_fits_with_capped_output,
     estimate_required_context,
+    neutralize_consensus_delimiters,
     role_system_prompt,
 )
 from app.providers.bootstrap import BootstrapModelProvider
@@ -235,9 +236,12 @@ class RoutedModelProvider:
         return await self._generate(request, model, request.content.prompt, system=system)
 
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:
-        candidates = "\n\n".join(f"<candidate_{i+1}>\n{o.content}\n</candidate_{i+1}>" for i, o in enumerate(proposals))
+        candidates = "\n\n".join(
+            f"<candidate_{i+1}>\n{neutralize_consensus_delimiters(o.content or '')}\n</candidate_{i+1}>"
+            for i, o in enumerate(proposals)
+        )
         prompt = (
-            f"<original_request>\n{request.content.prompt}\n</original_request>\n\n"
+            f"<original_request>\n{neutralize_consensus_delimiters(request.content.prompt)}\n</original_request>\n\n"
             f"<candidates>\n{candidates}\n</candidates>"
         )
         return await self._generate(request, model, prompt, system=ROLE_SYSTEM_PROMPTS["arbiter"])

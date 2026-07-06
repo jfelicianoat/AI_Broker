@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -69,6 +70,20 @@ def role_system_prompt(role: str | None) -> str | None:
 
 def _estimation_text(prompt: str, system: str | None) -> str:
     return prompt if not system else f"{system}\n\n{prompt}"
+
+
+_CONSENSUS_DELIMITER_PATTERN = re.compile(
+    r"<(/?)(candidate(?:s|_\d+)?|original_request)\b", re.IGNORECASE
+)
+
+
+def neutralize_consensus_delimiters(text: str) -> str:
+    """Impide que el contenido de un candidato cierre/abra los tags del árbitro.
+
+    Sin esto, un proposer que emita `</candidate_1>` escapa del sandboxing XML
+    de synthesize() y puede inyectar instrucciones al árbitro.
+    """
+    return _CONSENSUS_DELIMITER_PATTERN.sub(lambda m: f"&lt;{m.group(1)}{m.group(2)}", text)
 
 
 class _CatalogCache:

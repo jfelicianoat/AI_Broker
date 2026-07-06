@@ -192,3 +192,58 @@ def _cleanup_empty_dirs(root: Path) -> None:
             path.rmdir()
         except OSError:
             pass
+
+
+def prune_terminal_task_events(db: Any, *, older_than_days: int) -> int:
+    """Borra eventos de tareas terminales antiguas para acotar el crecimiento de la tabla.
+
+    El flujo de consenso genera decenas de eventos de progreso por tarea; sin poda,
+    `events` degrada progresivamente todas las consultas (conexión SQLite única).
+    Devuelve el número de filas eliminadas. `older_than_days <= 0` desactiva la poda.
+    """
+    if older_than_days <= 0:
+        return 0
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    cursor = db.execute(
+        "DELETE FROM events WHERE task_id IN ("
+        "SELECT id FROM tasks WHERE status IN ('completed', 'failed', 'cancelled') "
+        "AND updated_at < ?)",
+        (cutoff,),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def prune_terminal_task_artifacts(db: Any, artifacts_root: str | Path, *, older_than_days: int) -> int:
+    """Borra artefactos en disco (y sus filas) de tareas terminales antiguas.
+
+    Sin retención el directorio de artefactos crece sin límite hasta llenar el disco.
+    Desactivada por defecto (older_than_days <= 0): borrar salidas del usuario debe
+    ser una decisión explícita del operador.
+    """
+    if older_than_days <= 0:
+        return 0
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    rows = db.query_all(
+        "SELECT id, path FROM artifacts WHERE task_id IN ("
+        "SELECT id FROM tasks WHERE status IN ('completed', 'failed', 'cancelled') "
+        "AND updated_at < ?)",
+        (cutoff,),
+    )
+    removed = 0
+    for row in rows:
+        artifact_path = Path(row["path"])
+        try:
+            if artifact_path.exists():
+                artifact_path.unlink()
+        except OSError:
+            continue
+        db.execute("DELETE FROM artifacts WHERE id = ?", (row["id"],))
+        removed += 1
+    root = Path(artifacts_root)
+    if root.exists():
+        _cleanup_empty_dirs(root)
+    return removed
