@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.dashboard_web as dashboard_web
@@ -17,6 +18,7 @@ from app.config import (
     PersistenceConfig,
     ProcessingConfig,
     ProvidersConfig,
+    ServerConfig,
     load_config,
 )
 from app.dashboard_web import load_dashboard_resources
@@ -1592,9 +1594,17 @@ def test_recovery_respects_max_task_attempts(tmp_path: Path) -> None:
 def test_dashboard_actions_require_admin_token_when_configured(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
     with make_client(tmp_path) as client:
+        anonymous = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "admin:cancel", "content": {"prompt": "Tarea"}},
+        )
+        assert anonymous.status_code == 403
+        assert anonymous.json()["detail"] == "ADMIN_AUTH_REQUIRED"
+
         created = client.post(
             "/api/v1/tasks",
             json={"idempotency_key": "admin:cancel", "content": {"prompt": "Tarea"}},
+            headers={"X-Admin-Token": "secreto-admin"},
         )
         assert created.status_code == 202
         task_id = created.json()["task_id"]
@@ -1635,11 +1645,321 @@ def test_dashboard_actions_accept_admin_token_header(tmp_path: Path, monkeypatch
         created = client.post(
             "/api/v1/tasks",
             json={"idempotency_key": "admin:header", "content": {"prompt": "Tarea"}},
+            headers={"X-Admin-Token": "secreto-admin"},
         )
         task_id = created.json()["task_id"]
+
+        api_denied = client.patch("/api/v1/queue", json={"task_ids": [task_id]})
+        assert api_denied.status_code == 403
+
+        api_allowed = client.patch(
+            "/api/v1/queue",
+            json={"task_ids": [task_id]},
+            headers={"X-Admin-Token": "secreto-admin"},
+        )
+        assert api_allowed.status_code == 200
         token = dashboard_csrf(client)
         allowed = client.post(
             f"/dashboard/actions/tasks/{task_id}/cancel",
             headers={"X-CSRF-Token": token, "X-Admin-Token": "secreto-admin"},
         )
         assert allowed.status_code == 204
+
+
+def test_health_reports_dispatcher_state(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=True, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config)) as client:
+        healthy = client.get("/health").json()
+        assert healthy["dependencies"]["dispatcher"]["status"] == "healthy"
+
+        # Simula la muerte del bucle: el estado global debe pasar a degraded.
+        task = client.app.state.dispatcher_task
+        task.get_loop().call_soon_threadsafe(task.cancel)
+        for _ in range(50):
+            report = client.get("/health").json()
+            if report["dependencies"]["dispatcher"]["status"] == "unavailable":
+                break
+        else:
+            raise AssertionError("dispatcher dependency never became unavailable")
+        assert report["status"] == "degraded"
+        client.app.state.dispatcher_task = None
+
+
+def test_health_omits_dispatcher_when_auto_dispatch_disabled(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        report = client.get("/health").json()
+        assert "dispatcher" not in report["dependencies"]
+
+
+def test_zero_cost_cloud_providers_detection() -> None:
+    from app.config import DeepSeekConfig, OpenAICompatibleProviderConfig, ProvidersConfig
+    from app.main import _zero_cost_cloud_providers
+
+    config = BrokerConfig(
+        providers=ProvidersConfig(
+            deepseek=DeepSeekConfig(enabled=True),
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="nvidia", enabled=True, base_url="https://example", deployment="cloud"
+                ),
+                OpenAICompatibleProviderConfig(
+                    id="paid", enabled=True, base_url="https://example", deployment="cloud",
+                    input_cost_per_million=0.5,
+                ),
+                OpenAICompatibleProviderConfig(
+                    id="lmstudio", enabled=True, base_url="http://localhost:1234", deployment="local"
+                ),
+            ],
+        )
+    )
+    assert _zero_cost_cloud_providers(config) == ["deepseek", "nvidia"]
+
+    config.providers.deepseek.input_cost_per_million = 0.27
+    assert _zero_cost_cloud_providers(config) == ["nvidia"]
+
+
+def test_database_rejects_execute_inside_transaction(tmp_path: Path) -> None:
+    from app.db import Database
+
+    db = Database(tmp_path / "guard.db")
+    db.init_schema()
+    with pytest.raises(RuntimeError):
+        with db.transaction():
+            db.execute("INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (NULL, 'x', '{}', 'now')")
+    with pytest.raises(RuntimeError):
+        with db.transaction():
+            with db.transaction():
+                pass
+    # Tras el fallo, la conexión queda utilizable y sin transacción colgada.
+    db.execute("INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (NULL, 'ok', '{}', 'now')")
+    assert db.query_one("SELECT COUNT(*) AS n FROM events")["n"] == 1
+    db.close()
+
+
+def test_prune_terminal_task_events(tmp_path: Path) -> None:
+    from app.db import Database, dumps_json
+    from app.maintenance import prune_terminal_task_events
+
+    db = Database(tmp_path / "prune.db")
+    db.init_schema()
+    old, recent = "2024-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"
+    for task_id, status, stamp in (
+        ("t-old-done", "completed", old),
+        ("t-old-live", "queued", old),
+        ("t-new-done", "completed", recent),
+    ):
+        db.execute(
+            "INSERT INTO tasks(id, request_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (task_id, dumps_json({}), status, stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, 'x', '{}', ?)",
+            (task_id, stamp),
+        )
+
+    assert prune_terminal_task_events(db, older_than_days=30) == 1
+    remaining = {row["task_id"] for row in db.query_all("SELECT task_id FROM events")}
+    # Solo cae el evento de la tarea terminal antigua; la viva y la reciente se conservan.
+    assert remaining == {"t-old-live", "t-new-done"}
+    assert prune_terminal_task_events(db, older_than_days=0) == 0
+    db.close()
+
+
+def test_vram_budget_mismatch_detection() -> None:
+    from app.main import _vram_budget_mismatch
+
+    assert _vram_budget_mismatch(64.0, 8.0) is not None
+    assert _vram_budget_mismatch(10.0, 8.0) is None
+    assert _vram_budget_mismatch(64.0, None) is None
+    assert _vram_budget_mismatch(64.0, 64.0) is None
+
+
+def test_save_config_is_atomic_and_keeps_backup(tmp_path: Path) -> None:
+    from app.config import save_config
+
+    target = tmp_path / "broker_config.yaml"
+    first = BrokerConfig()
+    save_config(first, target)
+    assert target.exists()
+    assert not (tmp_path / "broker_config.yaml.tmp").exists()
+
+    second = BrokerConfig(server=ServerConfig(port=9999))
+    save_config(second, target)
+    backup = tmp_path / "broker_config.yaml.bak"
+    assert backup.exists()
+    assert load_config(target).server.port == 9999
+    # El .bak conserva la versión anterior íntegra y parseable.
+    assert load_config(backup).server.port == 8080
+
+
+def test_server_config_rejects_multiple_workers() -> None:
+    with pytest.raises(ValueError):
+        ServerConfig(workers=2)
+    assert ServerConfig(workers=1).workers == 1
+
+
+def test_admin_cookie_expires_server_side(tmp_path: Path, monkeypatch) -> None:
+    from app.admin_auth import ADMIN_SESSION_SECONDS, admin_cookie_value
+
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "admin:expiry", "content": {"prompt": "Tarea"}},
+            headers={"X-Admin-Token": "secreto-admin"},
+        )
+        task_id = created.json()["task_id"]
+        token = dashboard_csrf(client)
+
+        stale = admin_cookie_value("secreto-admin", timestamp=time.time() - ADMIN_SESSION_SECONDS - 60)
+        client.cookies.set("ai_broker_dashboard_admin", stale)
+        expired = client.post(
+            f"/dashboard/actions/tasks/{task_id}/cancel",
+            headers={"X-CSRF-Token": token},
+        )
+        assert expired.status_code == 403
+
+        fresh = admin_cookie_value("secreto-admin")
+        client.cookies.set("ai_broker_dashboard_admin", fresh)
+        allowed = client.post(
+            f"/dashboard/actions/tasks/{task_id}/cancel",
+            headers={"X-CSRF-Token": token},
+        )
+        assert allowed.status_code == 204
+
+
+def test_admin_login_rate_limited_after_repeated_failures(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
+    with make_client(tmp_path) as client:
+        token = dashboard_csrf(client)
+        for _ in range(5):
+            attempt = client.post(
+                "/dashboard/actions/login",
+                data={"csrf_token": token, "admin_token": "incorrecto"},
+            )
+            assert attempt.status_code == 403
+        blocked = client.post(
+            "/dashboard/actions/login",
+            data={"csrf_token": token, "admin_token": "incorrecto"},
+        )
+        assert blocked.status_code == 429
+        # Incluso con el token correcto sigue bloqueado hasta que pase el backoff.
+        still_blocked = client.post(
+            "/dashboard/actions/login",
+            data={"csrf_token": token, "admin_token": "secreto-admin"},
+        )
+        assert still_blocked.status_code == 429
+
+
+def test_single_strategy_retries_transient_provider_errors(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        provider = client.app.state.provider
+        original_propose = provider.propose
+        calls = {"count": 0}
+
+        async def flaky_propose(request, model, ordinal):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise providers_module.ProviderError("PROVIDER_UNAVAILABLE", "blip transitorio", retryable=True)
+            return await original_propose(request, model, ordinal)
+
+        provider.propose = flaky_propose
+        try:
+            created = client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": "retry:single", "content": {"prompt": "Hola"}},
+            )
+            task_id = created.json()["task_id"]
+            client.post("/api/v1/dispatcher/tick")
+            final = client.get(f"/api/v1/tasks/{task_id}").json()
+            assert final["status"] == "completed"
+            assert calls["count"] == 2
+        finally:
+            provider.propose = original_propose
+
+
+def test_single_strategy_does_not_retry_permanent_errors(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        provider = client.app.state.provider
+        original_propose = provider.propose
+        calls = {"count": 0}
+
+        async def broken_propose(request, model, ordinal):
+            calls["count"] += 1
+            raise providers_module.ProviderError("MODEL_UNAVAILABLE", "no existe", retryable=False)
+
+        provider.propose = broken_propose
+        try:
+            created = client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": "retry:permanent", "content": {"prompt": "Hola"}},
+            )
+            task_id = created.json()["task_id"]
+            client.post("/api/v1/dispatcher/tick")
+            final = client.get(f"/api/v1/tasks/{task_id}").json()
+            assert final["status"] == "failed"
+            assert calls["count"] == 1
+        finally:
+            provider.propose = original_propose
+
+
+def test_consensus_completes_even_if_artifact_writes_fail(tmp_path: Path) -> None:
+    payload = {
+        "idempotency_key": "artifacts:fail",
+        "content": {"prompt": "Compara dos enfoques"},
+        "execution": {
+            "strategy": "mixture_of_agents",
+            "preset": "fast",
+            "max_proposers": 3,
+            "selection": {"mode": "auto", "proposer_count": 3},
+        },
+    }
+    with make_client(tmp_path) as client:
+        coordinator = client.app.state.coordinator
+
+        def broken_write(*args, **kwargs):
+            raise OSError("disco lleno")
+
+        coordinator.artifacts.write_markdown = broken_write  # type: ignore[method-assign]
+        coordinator.artifacts.write_text = broken_write  # type: ignore[method-assign]
+
+        created = client.post("/api/v1/tasks", json=payload).json()
+        client.post("/api/v1/dispatcher/tick")
+        task = client.get(created["status_url"]).json()
+
+        # La inferencia ya está pagada: el resultado se persiste en BD aunque el disco falle.
+        assert task["status"] == "completed"
+        assert task["result"]["result_markdown"]
+        assert task["result"]["consensus"]["proposers_completed"] == 3
+
+
+def test_prune_terminal_task_artifacts(tmp_path: Path) -> None:
+    from app.db import Database, dumps_json
+    from app.maintenance import prune_terminal_task_artifacts
+
+    db = Database(tmp_path / "artifacts.db")
+    db.init_schema()
+    artifacts_root = tmp_path / "tasks"
+    old_file = artifacts_root / "t-old" / "final.md"
+    old_file.parent.mkdir(parents=True)
+    old_file.write_text("resultado", encoding="utf-8")
+
+    old = "2024-01-01T00:00:00+00:00"
+    db.execute(
+        "INSERT INTO tasks(id, request_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        ("t-old", dumps_json({}), "completed", old, old),
+    )
+    db.execute(
+        "INSERT INTO artifacts(id, task_id, artifact_type, path, sha256, size_bytes, created_at) "
+        "VALUES ('a1', 't-old', 'final_output', ?, 'x', 9, ?)",
+        (str(old_file), old),
+    )
+
+    assert prune_terminal_task_artifacts(db, artifacts_root, older_than_days=30) == 1
+    assert not old_file.exists()
+    assert db.query_one("SELECT COUNT(*) AS n FROM artifacts")["n"] == 0
+    assert prune_terminal_task_artifacts(db, artifacts_root, older_than_days=0) == 0
+    db.close()

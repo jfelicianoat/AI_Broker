@@ -15,12 +15,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.admin_auth import resolve_admin_token, verify_admin_access
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository
 from app.dashboard_web import create_dashboard_router, load_dashboard_resources
 from app.db import Database
 from app.logging_config import configure_logging
+from app.maintenance import prune_terminal_task_artifacts, prune_terminal_task_events
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
@@ -61,9 +63,61 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if broker_config.server.host not in {"127.0.0.1", "localhost", "::1"} and not resolve_admin_token(broker_config):
+            logger.warning(
+                "security.exposed_without_token",
+                extra={
+                    "event": "security.exposed_without_token",
+                    "host": broker_config.server.host,
+                    "detail": "El servidor escucha fuera de loopback sin token admin: la API mutable queda abierta a la red",
+                },
+            )
+        for provider_id in _zero_cost_cloud_providers(broker_config):
+            logger.warning(
+                "providers.cloud_zero_cost",
+                extra={
+                    "event": "providers.cloud_zero_cost",
+                    "provider": provider_id,
+                    "detail": (
+                        f"El proveedor cloud '{provider_id}' no tiene precios configurados: "
+                        "el coste reportado será 0 y el presupuesto (max_cost_usd) nunca cortará"
+                    ),
+                },
+            )
+        if broker_config.providers.ollama.enabled or broker_config.providers.huggingface_local.enabled:
+            detected_vram = await asyncio.to_thread(_detect_total_vram_gb)
+            vram_alert = _vram_budget_mismatch(broker_config.resources.local_vram_budget_gb, detected_vram)
+            if vram_alert:
+                logger.warning(
+                    "resources.vram_budget_mismatch",
+                    extra={
+                        "event": "resources.vram_budget_mismatch",
+                        "budget_gb": broker_config.resources.local_vram_budget_gb,
+                        "detected_gb": detected_vram,
+                        "detail": vram_alert,
+                    },
+                )
         await _auto_start_local_provider_servers(broker_config, logger)
         db.init_schema()
         repository.recover_interrupted_tasks(max_attempts=broker_config.processing.max_task_attempts)
+        pruned_events = prune_terminal_task_events(
+            db, older_than_days=broker_config.persistence.events_retention_days
+        )
+        if pruned_events:
+            logger.info(
+                "maintenance.events_pruned",
+                extra={"event": "maintenance.events_pruned", "removed": pruned_events},
+            )
+        pruned_artifacts = prune_terminal_task_artifacts(
+            db,
+            coordinator.artifacts.root,
+            older_than_days=broker_config.persistence.artifacts_retention_days,
+        )
+        if pruned_artifacts:
+            logger.info(
+                "maintenance.artifacts_pruned",
+                extra={"event": "maintenance.artifacts_pruned", "removed": pruned_artifacts},
+            )
         stop_dispatcher = asyncio.Event()
         dispatcher_task = None
         if broker_config.processing.auto_dispatch:
@@ -75,12 +129,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                     broker_config.processing.dispatcher_interval_seconds,
                 )
             )
+        app.state.dispatcher_task = dispatcher_task
         try:
             yield
         finally:
             stop_dispatcher.set()
             if dispatcher_task is not None:
-                await dispatcher_task
+                await asyncio.gather(dispatcher_task, return_exceptions=True)
             await provider.close()
             db.close()
 
@@ -92,6 +147,14 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     app.state.scheduler = scheduler
     app.state.coordinator = coordinator
     app.state.provider = provider
+
+    def _dispatcher_state() -> str | None:
+        if not broker_config.processing.auto_dispatch:
+            return None
+        task = getattr(app.state, "dispatcher_task", None)
+        if task is None or task.done():
+            return "stopped"
+        return "running"
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -140,7 +203,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             scheduler=scheduler,
             config=broker_config,
             config_path=Path(config_path),
-            health_loader=lambda: _health_response(db, provider),
+            health_loader=lambda: _health_response(db, provider, _dispatcher_state()),
         )
     )
 
@@ -156,7 +219,8 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
-    def create_task(payload: TaskCreateRequest, response: Response) -> TaskAcceptedResponse:
+    def create_task(payload: TaskCreateRequest, response: Response, request: Request) -> TaskAcceptedResponse:
+        verify_admin_access(request, broker_config)
         try:
             task, created = repository.create_task(
                 payload, queue_max_size=broker_config.processing.queue_max_size
@@ -187,7 +251,8 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
 
     @app.delete("/api/v1/tasks/{task_id}", response_model=TaskStateResponse)
-    def cancel_task(task_id: str) -> TaskStateResponse:
+    def cancel_task(task_id: str, request: Request) -> TaskStateResponse:
+        verify_admin_access(request, broker_config)
         try:
             return repository.request_cancel(task_id)
         except KeyError as exc:
@@ -198,14 +263,16 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         return repository.list_queue()
 
     @app.patch("/api/v1/queue", response_model=QueueResponse)
-    def reorder_queue(payload: QueueReorderRequest) -> QueueResponse:
+    def reorder_queue(payload: QueueReorderRequest, request: Request) -> QueueResponse:
+        verify_admin_access(request, broker_config)
         try:
             return repository.reorder_queue(payload.task_ids)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/v1/dispatcher/tick")
-    async def dispatcher_tick() -> dict[str, str | None]:
+    async def dispatcher_tick(request: Request) -> dict[str, str | None]:
+        verify_admin_access(request, broker_config)
         task_id = await coordinator.process_next(repository)
         return {"task_id": task_id}
 
@@ -340,7 +407,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
-        return await _health_response(db, provider)
+        return await _health_response(db, provider, _dispatcher_state())
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:
@@ -348,12 +415,68 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/health/ready", response_model=HealthResponse)
     async def ready(response: Response) -> HealthResponse:
-        health_response = await _health_response(db, provider)
+        health_response = await _health_response(db, provider, _dispatcher_state())
         if health_response.dependencies["sqlite"].status == "unavailable":
             response.status_code = 503
         return health_response
 
     return app
+
+
+_VRAM_DETECTION_CACHE: dict[str, float | None] = {}
+
+
+def _detect_total_vram_gb() -> float | None:
+    """VRAM total de las GPU NVIDIA visibles, o None si no se puede detectar (cacheado)."""
+    import subprocess
+
+    if "value" in _VRAM_DETECTION_CACHE:
+        return _VRAM_DETECTION_CACHE["value"]
+    _VRAM_DETECTION_CACHE["value"] = None
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            totals = [float(line.strip()) for line in proc.stdout.splitlines() if line.strip()]
+            if totals:
+                _VRAM_DETECTION_CACHE["value"] = sum(totals) / 1024
+    except Exception:
+        pass
+    return _VRAM_DETECTION_CACHE["value"]
+
+
+def _vram_budget_mismatch(budget_gb: float, detected_gb: float | None) -> str | None:
+    """Mensaje de alerta si el presupuesto configurado no cabe en la VRAM real."""
+    if detected_gb is None or detected_gb <= 0:
+        return None
+    if budget_gb > detected_gb * 1.5:
+        return (
+            f"resources.local_vram_budget_gb={budget_gb:.0f} GB pero la VRAM detectada es "
+            f"{detected_gb:.1f} GB: el planificador sobresuscribirá la GPU (olas paralelas "
+            "imposibles, OOM y timeouts en cascada). Ajusta el presupuesto a la VRAM real."
+        )
+    return None
+
+
+def _zero_cost_cloud_providers(config: BrokerConfig) -> list[str]:
+    """Providers cloud habilitados sin precios: su gasto real será invisible (coste 0)."""
+    zero: list[str] = []
+    deepseek = config.providers.deepseek
+    if deepseek.enabled and not deepseek.input_cost_per_million and not deepseek.output_cost_per_million:
+        zero.append("deepseek")
+    for item in config.providers.custom:
+        if not item.enabled or item.deployment != "cloud":
+            continue
+        model_costs = any(
+            model.input_cost_per_million or model.output_cost_per_million for model in item.models
+        )
+        if not item.input_cost_per_million and not item.output_cost_per_million and not model_costs:
+            zero.append(item.id)
+    return zero
 
 
 async def _auto_start_local_provider_servers(config: BrokerConfig, logger: logging.Logger) -> None:
@@ -420,34 +543,45 @@ async def _dispatcher_loop(
     stop: asyncio.Event,
     interval_seconds: float,
 ) -> None:
+    logger = logging.getLogger("ai_broker.dispatcher")
     while not stop.is_set():
-        task_id = await asyncio.to_thread(repository.claim_next_queued_task_id)
-        if task_id is not None:
+        # Ningún fallo de una iteración puede matar el bucle: sin dispatcher
+        # las tareas se acumularían en cola con el servidor aparentemente sano.
+        try:
+            task_id = await asyncio.to_thread(repository.claim_next_queued_task_id)
+            if task_id is not None:
+                try:
+                    await coordinator.process_task(repository, task_id)
+                except Exception as error:
+                    current = repository.get_task(task_id)
+                    if current.status in {TaskStatus.completed, TaskStatus.cancelled}:
+                        continue
+                    repository.update_task(
+                        task_id,
+                        TaskStatus.failed,
+                        progress={"phase": TaskStatus.failed.value},
+                        error={
+                            "code": "INTERNAL_ERROR",
+                            "message": f"Dispatcher failure: {type(error).__name__}",
+                            "retryable": False,
+                        },
+                        clear_queue_position=True,
+                    )
+                continue
+        except Exception:
+            logger.exception("dispatcher.iteration_failed", extra={"event": "dispatcher.iteration_failed"})
             try:
-                await coordinator.process_task(repository, task_id)
-            except Exception as error:
-                current = repository.get_task(task_id)
-                if current.status in {TaskStatus.completed, TaskStatus.cancelled}:
-                    continue
-                repository.update_task(
-                    task_id,
-                    TaskStatus.failed,
-                    progress={"phase": TaskStatus.failed.value},
-                    error={
-                        "code": "INTERNAL_ERROR",
-                        "message": f"Dispatcher failure: {type(error).__name__}",
-                        "retryable": False,
-                    },
-                    clear_queue_position=True,
-                )
-        else:
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+                await asyncio.wait_for(stop.wait(), timeout=max(interval_seconds, 1.0))
             except TimeoutError:
                 pass
+            continue
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            pass
 
 
-async def _health_response(db: Database, provider) -> HealthResponse:
+async def _health_response(db: Database, provider, dispatcher_state: str | None = None) -> HealthResponse:
     checked_at = datetime.now(timezone.utc)
     status: Literal["healthy", "degraded", "unavailable"]
     try:
@@ -469,6 +603,13 @@ async def _health_response(db: Database, provider) -> HealthResponse:
         )
         status = "unavailable"
     dependencies = {"sqlite": sqlite}
+    if dispatcher_state is not None:
+        running = dispatcher_state == "running"
+        dependencies["dispatcher"] = HealthDependency(
+            status="healthy" if running else "unavailable",
+            checked_at=datetime.now(timezone.utc),
+            detail="Bucle de despacho activo" if running else "El bucle de despacho no está en ejecución",
+        )
     for name, check in (await provider.health()).items():
         dependencies[name] = HealthDependency(
             status=check["status"],
