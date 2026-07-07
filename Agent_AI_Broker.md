@@ -575,7 +575,7 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 
 ### Enrutamiento y contexto
 
-**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt`, rechaza attachments sin mapeo lossless, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio.
+**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt` en persistencia, rechaza attachments sin mapeo lossless, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio. Con el servicio opcional de compresión de prompts activo (`prompt_compression` en `broker_config.yaml`, ver [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md)), la copia del prompt de chat que viaja al proveedor se comprime; los embeddings nunca se comprimen.
 
 1. Respetar `preferred_model` cuando esté disponible y soporte la ventana necesaria.
 2. Si no está disponible y `fallback_allowed` es falso, terminar con `MODEL_UNAVAILABLE`.
