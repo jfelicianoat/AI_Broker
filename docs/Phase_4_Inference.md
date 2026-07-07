@@ -10,6 +10,8 @@ Implementada y verificada el 2026-06-24.
 
 El input es `content.prompt`. El Broker lo transmite como un único mensaje `user` o como `input` de `/api/embed`, sin reescribirlo. Los attachments se rechazan mientras no exista un mapeo lossless; nunca se ignoran silenciosamente.
 
+Desde la incorporación del servicio de compresión de prompts ([`Prompt_Compression.md`](Prompt_Compression.md)), la transmisión sin reescritura aplica cuando `prompt_compression.enabled` es `false`. Con el servicio activo, el prompt de chat se comprime antes del envío al proveedor; `content.prompt` persiste intacto y los embeddings nunca se comprimen.
+
 ## Traducción
 
 - Ollama chat usa `/api/chat`, conserva el prompt y traduce temperatura/límite de salida. Para JSON pasa el schema mediante `format`.
