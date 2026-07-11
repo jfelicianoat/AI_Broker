@@ -121,6 +121,12 @@ class ConsensusCoordinator:
                 return
             current = repository.get_task(task_id)
             context = self._error_context(error, current.progress)
+            stage = context.get("stage")
+            if stage in {"resource_planning", "proposing", "evaluating", "synthesizing"}:
+                # Deja constancia en el checkpoint de etapa de dónde murió el run.
+                repository.set_stage_status(
+                    task_id, repository.get_consensus_run_id(task_id), str(stage), "failed"
+                )
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
@@ -190,7 +196,12 @@ class ConsensusCoordinator:
         # el campo retryable del error deja de ser una promesa vacía al cliente.
         retry_delays = (0.5, 1.0)
         output: ModelOutput | None = None
+        invocation_id: str | None = None
         for attempt_index in range(len(retry_delays) + 1):
+            # Checkpoint pre-vuelo: cada intento tiene su propia fila de
+            # invocación; si el proceso muere con la llamada en el aire, la
+            # recuperación la encontrará en 'started' y la tratará como ambigua.
+            invocation_id = repository.start_invocation(task_id, None, "single", model)
             try:
                 output = await self._run_cancellable(
                     repository,
@@ -200,6 +211,7 @@ class ConsensusCoordinator:
                 break
             except ProviderError as error:
                 self._attach_error_context(error, "generating", model)
+                repository.fail_invocation(invocation_id, task_id, error.code, str(error))
                 if (
                     not error.retryable
                     or error.code == "TASK_CANCELLED"
@@ -218,7 +230,11 @@ class ConsensusCoordinator:
                 )
                 await asyncio.sleep(retry_delays[attempt_index])
         assert output is not None
+        assert invocation_id is not None
         if repository.is_cancel_requested(task_id):
+            # La inferencia sí ocurrió: se cierra el checkpoint con su coste
+            # real antes de registrar la cancelación.
+            repository.complete_invocation(invocation_id, task_id, output)
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
         progress = {
@@ -230,8 +246,8 @@ class ConsensusCoordinator:
             "cost_actual_usd": output.cost_usd,
         }
         result = self._technical_result(request, model, output)
-        invocation_id = repository.complete_single_task(
-            task_id, model, output, progress=progress, result=result,
+        repository.complete_single_task(
+            task_id, invocation_id, model, output, progress=progress, result=result,
         )
         try:
             if output.embedding is not None:
@@ -253,6 +269,7 @@ class ConsensusCoordinator:
     async def _process_consensus(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         run_id = repository.get_consensus_run_id(task_id) or self.initialize_run(task_id, request)
         assert run_id is not None
+        repository.set_stage_status(task_id, run_id, "resource_planning", "running")
         proposers = await self._select_proposers(request)
         arbiter = await self._select_arbiter(request)
         plan_execution = request.execution.model_copy(update={"max_proposers": len(proposers)})
@@ -260,6 +277,7 @@ class ConsensusCoordinator:
         try:
             resource_plan = self.scheduler.plan(plan_request)
         except ResourcePlanningError as error:
+            repository.set_stage_status(task_id, run_id, "resource_planning", "failed")
             raise ProviderError("PARALLEL_CAPACITY_INSUFFICIENT", str(error)) from error
         progress = {
             "phase": TaskStatus.resource_planning.value,
@@ -283,6 +301,8 @@ class ConsensusCoordinator:
         completed = 0
         attempted = 0
         max_parallel_launched = 0
+        repository.set_stage_status(task_id, run_id, "resource_planning", "completed")
+        repository.set_stage_status(task_id, run_id, "proposing", "running")
         repository.update_task(task_id, TaskStatus.proposing, progress={**progress, "phase": TaskStatus.proposing.value})
         for wave_index, labels in enumerate(resource_plan.waves, start=1):
             active_models = proposers[attempted : attempted + len(labels)]
@@ -312,6 +332,7 @@ class ConsensusCoordinator:
             wave_outputs, wave_skipped = await self._run_proposer_wave(
                 repository,
                 task_id,
+                run_id,
                 request,
                 active_models,
                 proposals,
@@ -337,10 +358,9 @@ class ConsensusCoordinator:
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return
 
-            for model, output in wave_outputs:
+            for model, output, invocation_id in wave_outputs:
                 ordinal = len(proposals) + 1
                 role = model.role or "proposer"
-                invocation_id = repository.record_invocation(task_id, run_id, role, model, output)
                 self._record_artifact_safely(
                     repository, task_id, run_id, invocation_id, "proposer_output",
                     lambda o=ordinal, r=role, m=model, out=output: self.artifacts.write_markdown(
@@ -369,6 +389,7 @@ class ConsensusCoordinator:
 
         quorum = min(2, len(proposers))
         if len(proposals) < quorum:
+            repository.set_stage_status(task_id, run_id, "proposing", "failed")
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
@@ -381,6 +402,8 @@ class ConsensusCoordinator:
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
 
+        repository.set_stage_status(task_id, run_id, "proposing", "completed")
+        repository.set_stage_status(task_id, run_id, "synthesizing", "running")
         repository.update_task(
             task_id,
             TaskStatus.synthesizing,
@@ -396,6 +419,7 @@ class ConsensusCoordinator:
             },
         )
         synthesis_request = self._with_remaining_budget(request, [output for _, output in proposals])
+        synthesis_invocation_id = repository.start_invocation(task_id, run_id, "arbiter", arbiter)
         try:
             synthesis = await self._run_cancellable(
                 repository,
@@ -404,12 +428,15 @@ class ConsensusCoordinator:
             )
         except ProviderError as error:
             self._attach_error_context(error, "synthesizing", arbiter, role="arbiter")
+            repository.fail_invocation(synthesis_invocation_id, task_id, error.code, str(error))
             raise
+        # El checkpoint se cierra en cuanto hay respuesta: cancelación o
+        # presupuesto excedido no deben dejar la fila en 'started'.
+        repository.complete_invocation(synthesis_invocation_id, task_id, synthesis)
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
         self._enforce_budget(request, [output for _, output in proposals] + [synthesis])
-        synthesis_invocation_id = repository.record_invocation(task_id, run_id, "arbiter", arbiter, synthesis)
         self._record_artifact_safely(
             repository, task_id, run_id, synthesis_invocation_id, "synthesis_output",
             lambda: self.artifacts.write_markdown(
@@ -454,6 +481,7 @@ class ConsensusCoordinator:
             "fallback_used": self._fallback_used(request, arbiter),
             "artifacts_root": str(self.artifacts.root / task_id),
         }
+        repository.set_stage_status(task_id, run_id, "synthesizing", "completed")
         repository.update_task(
             task_id,
             TaskStatus.completed,
@@ -473,24 +501,32 @@ class ConsensusCoordinator:
         self,
         repository,
         task_id: str,
+        run_id: str | None,
         request: TaskCreateRequest,
         active_models: list[ModelReference],
         completed_proposals: list[tuple[ModelReference, ModelOutput]],
-    ) -> tuple[list[tuple[ModelReference, ModelOutput]], list[dict[str, Any]]]:
+    ) -> tuple[list[tuple[ModelReference, ModelOutput, str]], list[dict[str, Any]]]:
         completed_outputs = [output for _, output in completed_proposals]
         invocation_request = self._with_wave_budget(request, completed_outputs, len(active_models))
 
         async def invoke(ordinal: int, model: ModelReference):
+            role = model.role or "proposer"
+            # Checkpoint pre-vuelo (véase start_invocation): la respuesta se
+            # persiste aquí mismo al llegar, no al final de la ola, para que
+            # un crash a mitad de ola no pierda las propuestas ya cobradas.
+            invocation_id = repository.start_invocation(task_id, run_id, role, model)
             try:
                 output = await self._run_cancellable(
                     repository,
                     task_id,
                     self.provider.propose(invocation_request, model, len(completed_proposals) + ordinal),
                 )
-                return model, output, None
+                repository.complete_invocation(invocation_id, task_id, output)
+                return model, output, invocation_id, None
             except ProviderError as error:
                 self._attach_error_context(error, "proposing", model)
-                return model, None, error
+                repository.fail_invocation(invocation_id, task_id, error.code, str(error))
+                return model, None, invocation_id, error
 
         if request.execution.preset == ExecutionPreset.slow and len(active_models) > 1:
             results = await asyncio.gather(
@@ -501,9 +537,9 @@ class ConsensusCoordinator:
             for ordinal, model in enumerate(active_models, start=1):
                 results.append(await invoke(ordinal, model))
 
-        outputs: list[tuple[ModelReference, ModelOutput]] = []
+        outputs: list[tuple[ModelReference, ModelOutput, str]] = []
         skipped: list[dict[str, Any]] = []
-        for model, output, error in results:
+        for model, output, invocation_id, error in results:
             if error is not None:
                 if not error.retryable:
                     raise error
@@ -512,7 +548,7 @@ class ConsensusCoordinator:
                 skipped.append(skipped_item)
                 continue
             assert output is not None
-            outputs.append((model, output))
+            outputs.append((model, output, invocation_id))
         return outputs, skipped
 
     def _skipped_proposer_detail(self, model: ModelReference, error: ProviderError) -> dict[str, Any]:

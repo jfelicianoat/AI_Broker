@@ -1345,15 +1345,23 @@ def test_slow_waves_do_not_repeat_models_after_retryable_proposer_failure(tmp_pa
         detail = client.get(f"/api/v1/dashboard/tasks/{created['task_id']}").json()
         page = client.get(f"/dashboard/tasks/{created['task_id']}")
 
+    # Con los checkpoints de invocación, el intento fallido de m1 también deja
+    # su fila (status='failed'); las completadas siguen siendo m2..m5 sin repetir.
     invoked_proposers = [
         item["model"]
         for item in detail["invocations"]
-        if item["role"] != "arbiter"
+        if item["role"] != "arbiter" and item["status"] == "completed"
+    ]
+    failed_proposers = [
+        item["model"]
+        for item in detail["invocations"]
+        if item["role"] != "arbiter" and item["status"] == "failed"
     ]
     skipped = detail["result"]["skipped_proposers"]
     assert detail["task"]["status"] == "completed"
     assert invoked_proposers == ["m2", "m3", "m4", "m5"]
     assert len(invoked_proposers) == len(set(invoked_proposers))
+    assert failed_proposers == ["m1"]
     assert detail["result"]["consensus"]["proposers_failed"] == 1
     assert skipped[0]["model"] == "m1"
     assert skipped[0]["role"] == "generalist"
@@ -1594,6 +1602,86 @@ def test_recovery_respects_max_task_attempts(tmp_path: Path) -> None:
         assert exhausted["status"] == "failed"
         assert exhausted["error"]["code"] == "TASK_RETRY_LIMIT_EXCEEDED"
         assert exhausted["error"]["retryable"] is False
+
+
+def test_recovery_distinguishes_local_and_remote_in_flight_calls(tmp_path: Path) -> None:
+    from app.schemas import ModelReference
+
+    with make_client(tmp_path) as client:
+        for ordinal in (1, 2):
+            response = client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": f"crash:{ordinal}", "content": {"prompt": f"Tarea {ordinal}"}},
+            )
+            assert response.status_code == 202
+        repository = client.app.state.repository
+        db = client.app.state.db
+        queue = client.get("/api/v1/queue").json()
+        local_id = queue["pending"][0]["task_id"]
+        remote_id = queue["pending"][1]["task_id"]
+        # Simula un crash con una llamada en vuelo en cada tarea: el checkpoint
+        # 'started' existe pero nunca llegó la respuesta.
+        db.execute("UPDATE tasks SET status = 'generating' WHERE id = ?", (local_id,))
+        db.execute("UPDATE tasks SET status = 'proposing' WHERE id = ?", (remote_id,))
+        local_inv = repository.start_invocation(
+            local_id, None, "single", ModelReference(provider="ollama", deployment="local", model="llama3")
+        )
+        remote_inv = repository.start_invocation(
+            remote_id, None, "proposer", ModelReference(provider="nvidia", deployment="api", model="yi-large")
+        )
+
+        recovered = repository.recover_interrupted_tasks(max_attempts=3)
+
+        # Solo la tarea con llamada local en vuelo se reintenta: repetirla
+        # cuesta cómputo, no dinero.
+        assert recovered == 1
+        assert client.get(f"/api/v1/tasks/{local_id}").json()["status"] == "queued"
+        # La llamada remota pudo facturarse: la tarea no se reintenta sola.
+        remote_task = client.get(f"/api/v1/tasks/{remote_id}").json()
+        assert remote_task["status"] == "failed"
+        assert remote_task["error"]["code"] == "RECOVERY_AMBIGUOUS_REMOTE_CALL"
+        assert remote_task["error"]["retryable"] is False
+        assert "nvidia/api/yi-large" in remote_task["error"]["ambiguous_invocations"]
+        # Ambas invocaciones en vuelo quedaron marcadas como ambiguas.
+        for invocation_id in (local_inv, remote_inv):
+            row = db.query_one("SELECT status FROM model_invocations WHERE id = ?", (invocation_id,))
+            assert row["status"] == "ambiguous"
+
+
+def test_consensus_stages_record_checkpoints(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "stages:checkpoints",
+                "content": {"prompt": "Consenso"},
+                "execution": {"strategy": "mixture_of_agents", "preset": "fast"},
+            },
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+
+        db = client.app.state.db
+        rows = db.query_all(
+            "SELECT stage_type, status, attempts FROM stages WHERE task_id = ? ORDER BY ordinal",
+            (created["task_id"],),
+        )
+        # Las etapas dejan de ser filas inertes: avanzan con el run y cada
+        # 'running' incrementa attempts.
+        assert [(row["stage_type"], row["status"]) for row in rows] == [
+            ("resource_planning", "completed"),
+            ("proposing", "completed"),
+            ("synthesizing", "completed"),
+        ]
+        assert all(row["attempts"] == 1 for row in rows)
+        invocations = db.query_all(
+            "SELECT status, started_at, completed_at FROM model_invocations WHERE task_id = ?",
+            (created["task_id"],),
+        )
+        assert invocations
+        assert all(
+            row["status"] == "completed" and row["started_at"] and row["completed_at"]
+            for row in invocations
+        )
 
 
 def test_dashboard_actions_require_admin_token_when_configured(tmp_path: Path, monkeypatch) -> None:
