@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from app.admin_auth import (
     ADMIN_COOKIE_NAME,
     ADMIN_SESSION_SECONDS,
+    AdminTokenLookupError,
     LoginThrottle,
     admin_cookie_value,
     resolve_admin_token,
@@ -44,6 +45,7 @@ from app.schemas import (
     ModelReference,
     TaskCreateRequest,
     TaskStatus,
+    is_local_deployment,
 )
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
@@ -68,6 +70,19 @@ def create_dashboard_router(
     router = APIRouter()
     login_throttle = LoginThrottle()
 
+    def _login_redirect_or_none(request: Request) -> RedirectResponse | None:
+        """Guard de las páginas HTML del panel: muestran prompts y resultados
+        completos, así que con token configurado exigen la misma sesión que
+        las mutaciones. Devuelve la redirección al login (el cliente es un
+        navegador) o None si el acceso es válido. Los fragmentos HTMX llaman
+        a verify_admin_access directamente y responden 403: solo se cargan
+        desde una página completa ya autenticada."""
+        try:
+            verify_admin_access(request, config)
+        except HTTPException:
+            return RedirectResponse("/dashboard/login", status_code=303)
+        return None
+
     async def resources() -> DashboardResourcesResponse:
         return await load_dashboard_resources(provider, scheduler, config)
 
@@ -79,6 +94,9 @@ def create_dashboard_router(
 
     @router.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request, config_saved: bool = False):
+        redirect = _login_redirect_or_none(request)
+        if redirect:
+            return redirect
         context = {
             "summary": queries.summary(window_hours=24),
             "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
@@ -95,6 +113,9 @@ def create_dashboard_router(
 
     @router.get("/dashboard/prompt-tester", response_class=HTMLResponse)
     async def prompt_tester(request: Request):
+        redirect = _login_redirect_or_none(request)
+        if redirect:
+            return redirect
         catalog, catalog_error = await models()
         return _template_response(
             request,
@@ -117,6 +138,9 @@ def create_dashboard_router(
         model_name: str | None = None,
         model_error: str | None = None,
     ):
+        redirect = _login_redirect_or_none(request)
+        if redirect:
+            return redirect
         catalog, catalog_error = await models()
         resource_snapshot = await resources()
         return _template_response(
@@ -135,6 +159,9 @@ def create_dashboard_router(
 
     @router.get("/dashboard/comparison", response_class=HTMLResponse)
     async def comparison(request: Request, task_id: str | None = None):
+        redirect = _login_redirect_or_none(request)
+        if redirect:
+            return redirect
         tasks = queries.list_comparison_tasks(page_size=25)
         selected = None
         comparison_view = None
@@ -161,6 +188,9 @@ def create_dashboard_router(
 
     @router.get("/dashboard/tasks/{task_id}", response_class=HTMLResponse)
     async def task_view(request: Request, task_id: str):
+        redirect = _login_redirect_or_none(request)
+        if redirect:
+            return redirect
         try:
             detail = queries.task_detail(task_id)
         except KeyError as error:
@@ -176,6 +206,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/summary", response_class=HTMLResponse)
     async def summary_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/summary.html",
@@ -184,6 +215,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/queue", response_class=HTMLResponse)
     async def queue_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/queue.html",
@@ -199,6 +231,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/active", response_class=HTMLResponse)
     async def active_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/active.html",
@@ -207,6 +240,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/health", response_class=HTMLResponse)
     async def health_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/health.html",
@@ -215,6 +249,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/resources", response_class=HTMLResponse)
     async def resources_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/resources.html",
@@ -223,6 +258,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/history", response_class=HTMLResponse)
     async def history_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/history.html",
@@ -231,6 +267,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/fragments/config", response_class=HTMLResponse)
     async def config_fragment(request: Request):
+        verify_admin_access(request, config)
         return templates.TemplateResponse(
             request=request,
             name="fragments/config.html",
@@ -268,7 +305,7 @@ def create_dashboard_router(
             save_config(updated, config_path)
             _apply_config_update(config, updated)
             if hasattr(provider, "reload_config"):
-                provider.reload_config(config)
+                await provider.reload_config(config)
         except PromptTesterError as error:
             errors.append(str(error))
         except ValidationError as error:
@@ -335,7 +372,7 @@ def create_dashboard_router(
             save_config(updated, config_path)
             _apply_config_update(config, updated)
             if hasattr(provider, "reload_config"):
-                provider.reload_config(config)
+                await provider.reload_config(config)
             if progress_id:
                 PROBE_PROGRESS[progress_id] = {
                     **PROBE_PROGRESS.get(progress_id, {}),
@@ -376,7 +413,8 @@ def create_dashboard_router(
         return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
 
     @router.get("/dashboard/actions/providers/{provider_id}/probe/progress")
-    async def probe_provider_progress(provider_id: str, progress_id: str) -> dict[str, Any]:
+    async def probe_provider_progress(request: Request, provider_id: str, progress_id: str) -> dict[str, Any]:
+        verify_admin_access(request, config)
         progress = PROBE_PROGRESS.get(progress_id)
         if progress is None or str(progress.get("provider_id") or "").lower() != provider_id.lower():
             return {
@@ -414,7 +452,7 @@ def create_dashboard_router(
             save_config(updated, config_path)
             _apply_config_update(config, updated)
             if hasattr(provider, "reload_config"):
-                provider.reload_config(config)
+                await provider.reload_config(config)
             query["model_probe"] = str(result.get("compatibility") or "unknown")
             if json_response:
                 return JSONResponse(_model_probe_payload(model_name, result))
@@ -490,11 +528,18 @@ def create_dashboard_router(
 
     @router.get("/dashboard/login", response_class=HTMLResponse)
     async def dashboard_login(request: Request):
+        try:
+            admin_enabled = resolve_admin_token(config) is not None
+        except AdminTokenLookupError:
+            # Fail-closed: si el backend de credenciales falla, la página se
+            # comporta como si hubiera token (pide credencial) en vez de
+            # anunciar que la auth está desactivada.
+            admin_enabled = True
         return _template_response(
             request,
             "login.html",
             {
-                "admin_enabled": resolve_admin_token(config) is not None,
+                "admin_enabled": admin_enabled,
                 "admin_error": None,
             },
         )
@@ -506,7 +551,11 @@ def create_dashboard_router(
         throttle_key = request.client.host if request.client else "unknown"
         if login_throttle.blocked_for(throttle_key) > 0:
             raise HTTPException(status_code=429, detail="ADMIN_LOGIN_RATE_LIMITED")
-        expected = resolve_admin_token(config)
+        try:
+            expected = resolve_admin_token(config)
+        except AdminTokenLookupError as error:
+            # Sin backend no se puede validar ninguna credencial: 503, no login abierto.
+            raise HTTPException(status_code=503, detail="ADMIN_AUTH_BACKEND_UNAVAILABLE") from error
         if not expected:
             return RedirectResponse("/dashboard", status_code=303)
         supplied = form.get("admin_token") or ""
@@ -1273,7 +1322,7 @@ def _ensure_cloud_allowed(models: list[ModelReference], cloud_allowed: bool) -> 
     blocked = [
         f"{item.provider}/{item.deployment}/{item.model}"
         for item in models
-        if item.deployment.lower() == "cloud"
+        if not is_local_deployment(item.deployment)
     ]
     if blocked:
         raise PromptTesterError(

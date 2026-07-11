@@ -351,7 +351,14 @@ Cada tarea puede terminal en `completed`, `failed` o `cancelled` desde cualquier
 
 ```bash
 pip install -e .[dev]
-uvicorn app.main:app --reload --port 8080 --workers 1
+python scripts/run_broker.py --config broker_config.yaml
+```
+
+Para desarrollo con autoreload (la app se construye con la factory; no existe
+una instancia global `app.main:app`):
+
+```bash
+uvicorn app.main:create_app --factory --reload --port 8080
 ```
 
 Abre `http://127.0.0.1:8080/dashboard` para usar el panel operativo. Para una previsualización aislada con SQLite temporal y provider de prueba:

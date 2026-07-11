@@ -16,6 +16,19 @@ ADMIN_COOKIE_NAME = "ai_broker_dashboard_admin"
 ADMIN_SESSION_SECONDS = 60 * 60 * 8
 _KEYRING_CACHE_SECONDS = 30.0
 
+# Hosts en los que la API solo es alcanzable desde la propia máquina; fuera de
+# esta lista el broker exige token admin (véase create_app) y un fallo del
+# backend de credenciales deniega el acceso en vez de desactivar la auth.
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class AdminTokenLookupError(RuntimeError):
+    """El backend de credenciales (keyring) falló: no se sabe si hay token.
+
+    Distinto de "no hay token configurado" (None). Quien la reciba debe
+    fallar cerrado, nunca tratar el error como autenticación desactivada.
+    """
+
 
 class _KeyringTokenCache:
     """Evita consultar el backend de credenciales del SO en cada mutación."""
@@ -50,7 +63,12 @@ _keyring_cache = _KeyringTokenCache()
 
 
 def resolve_admin_token(config: BrokerConfig) -> str | None:
-    """Devuelve el token admin desde env (siempre fresco) o keyring (con caché TTL)."""
+    """Devuelve el token admin desde env (siempre fresco) o keyring (con caché TTL).
+
+    None significa "no hay token configurado" (decisión deliberada, válida en
+    loopback). Si el backend de credenciales falla se lanza
+    AdminTokenLookupError: un keyring roto no equivale a "sin token".
+    """
     if config.server.admin_token_env:
         value = os.environ.get(config.server.admin_token_env)
         if value:
@@ -65,8 +83,10 @@ def resolve_admin_token(config: BrokerConfig) -> str | None:
             config.server.admin_keyring_service,
             config.server.admin_keyring_username,
         ) or None
-    except Exception:
-        token = None
+    except Exception as error:
+        # El fallo no se cachea: el siguiente intento vuelve a consultar el
+        # backend por si se recupera.
+        raise AdminTokenLookupError(f"backend de credenciales no disponible: {error}") from error
     _keyring_cache.set(token)
     return token
 
@@ -91,10 +111,22 @@ def _verify_admin_cookie(cookie: str, token: str) -> bool:
 
 
 def verify_admin_access(request: Request, config: BrokerConfig) -> None:
-    """Exige credencial admin solo cuando hay token configurado (env o keyring)."""
+    """Exige credencial admin cuando hay token configurado (env o keyring).
+
+    Si el backend de credenciales falla: en loopback (o con el opt-out LAN
+    explícito) se degrada a "sin token" porque la API solo es alcanzable
+    localmente; en cualquier otro host se responde 503 — denegar es preferible
+    a exponer la API sin auth por un keyring roto.
+    """
     import secrets
 
-    expected = resolve_admin_token(config)
+    try:
+        expected = resolve_admin_token(config)
+    except AdminTokenLookupError as error:
+        if config.server.host in LOOPBACK_HOSTS or config.server.allow_unauthenticated_lan:
+            expected = None
+        else:
+            raise HTTPException(status_code=503, detail="ADMIN_AUTH_BACKEND_UNAVAILABLE") from error
     if not expected:
         return
     header_token = request.headers.get("x-admin-token")

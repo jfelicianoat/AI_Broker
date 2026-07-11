@@ -1019,7 +1019,12 @@ def test_windows_service_and_readiness_scripts_are_present() -> None:
     assert "nssm" in install.read_text(encoding="utf-8").lower()
     assert "SupportsShouldProcess" in firewall.read_text(encoding="utf-8")
     assert "/health/ready" in readiness.read_text(encoding="utf-8")
-    assert "workers=1" in runner.read_text(encoding="utf-8")
+    runner_source = runner.read_text(encoding="utf-8")
+    # El runner debe construir la app con el mismo --config (antes el factory
+    # de Uvicorn recargaba la config por defecto e ignoraba el path) y pasar
+    # la instancia a uvicorn.run: proceso único sin necesitar workers=1.
+    assert "config_path=args.config" in runner_source
+    assert '"app.main:create_app"' not in runner_source
 
 
 def test_dashboard_resources_degrade_without_breaking_the_panel() -> None:
@@ -1636,7 +1641,9 @@ def test_dashboard_actions_require_admin_token_when_configured(tmp_path: Path, m
             headers={"X-CSRF-Token": token},
         )
         assert allowed.status_code == 204
-        assert client.get(f"/api/v1/tasks/{task_id}").json()["status"] == "cancelled"
+        # La lectura del estado también exige credencial: incluye result/progress.
+        state = client.get(f"/api/v1/tasks/{task_id}", headers={"X-Admin-Token": "secreto-admin"})
+        assert state.json()["status"] == "cancelled"
 
 
 def test_dashboard_actions_accept_admin_token_header(tmp_path: Path, monkeypatch) -> None:
@@ -1666,6 +1673,111 @@ def test_dashboard_actions_accept_admin_token_header(tmp_path: Path, monkeypatch
         assert allowed.status_code == 204
 
 
+def _fresh_keyring(monkeypatch, fake_get_password) -> None:
+    """Limpia la caché del token y sustituye el backend de credenciales."""
+    import keyring
+
+    from app import admin_auth
+
+    admin_auth._keyring_cache.clear()
+    monkeypatch.setattr(keyring, "get_password", fake_get_password)
+
+
+def test_sensitive_reads_require_admin_token_when_configured(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
+    with make_client(tmp_path) as client:
+        admin = {"X-Admin-Token": "secreto-admin"}
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "admin:reads", "content": {"prompt": "Contenido privado"}},
+            headers=admin,
+        )
+        task_id = created.json()["task_id"]
+
+        # Lecturas con prompts/resultados: cerradas sin credencial.
+        assert client.get(f"/api/v1/tasks/{task_id}").status_code == 403
+        assert client.get("/api/v1/dashboard/tasks").status_code == 403
+        assert client.get(f"/api/v1/dashboard/tasks/{task_id}").status_code == 403
+        # Con credencial siguen funcionando.
+        assert client.get(f"/api/v1/tasks/{task_id}", headers=admin).status_code == 200
+        assert client.get("/api/v1/dashboard/tasks", headers=admin).status_code == 200
+        assert client.get(f"/api/v1/dashboard/tasks/{task_id}", headers=admin).status_code == 200
+        # La cola solo expone ids/estados (sin contenido): sigue abierta.
+        assert client.get("/api/v1/queue").status_code == 200
+
+        # Las páginas del panel redirigen al login; los fragmentos responden 403.
+        page = client.get("/dashboard", follow_redirects=False)
+        assert page.status_code == 303
+        assert page.headers["location"] == "/dashboard/login"
+        assert client.get("/dashboard/login").status_code == 200
+        assert client.get("/dashboard/fragments/active").status_code == 403
+        assert client.get(f"/dashboard/tasks/{task_id}", follow_redirects=False).status_code == 303
+        # Con la cabecera admin las vistas cargan.
+        assert client.get("/dashboard", headers=admin).status_code == 200
+
+
+def test_startup_refuses_lan_exposure_without_admin_token(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AI_BROKER_ADMIN_TOKEN", raising=False)
+    config = BrokerConfig(
+        server=ServerConfig(host="0.0.0.0"),
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+
+    # Sin token (keyring responde pero no hay credencial guardada): no arranca.
+    _fresh_keyring(monkeypatch, lambda service, username: None)
+    with pytest.raises(RuntimeError, match="sin token admin"):
+        create_app(config)
+
+    # Backend de credenciales roto: tampoco arranca (no verificable != sin token).
+    def broken_backend(service, username):
+        raise RuntimeError("keyring roto")
+
+    _fresh_keyring(monkeypatch, broken_backend)
+    with pytest.raises(RuntimeError, match="backend de credenciales"):
+        create_app(config)
+
+    # Con token por variable de entorno arranca con normalidad.
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto")
+    with TestClient(create_app(config)) as client:
+        assert client.get("/health/live").status_code == 200
+
+    # Opt-out explícito: arranca sin token (queda solo el warning de exposición).
+    monkeypatch.delenv("AI_BROKER_ADMIN_TOKEN", raising=False)
+    _fresh_keyring(monkeypatch, lambda service, username: None)
+    exposed = BrokerConfig(
+        server=ServerConfig(host="0.0.0.0", allow_unauthenticated_lan=True),
+        persistence=PersistenceConfig(database=str(tmp_path / "optout.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(exposed)) as client:
+        assert client.get("/health/live").status_code == 200
+
+
+def test_admin_verification_fails_closed_when_keyring_breaks(monkeypatch) -> None:
+    from fastapi import HTTPException
+
+    from app.admin_auth import verify_admin_access
+
+    monkeypatch.delenv("AI_BROKER_ADMIN_TOKEN", raising=False)
+
+    def broken_backend(service, username):
+        raise RuntimeError("keyring roto")
+
+    _fresh_keyring(monkeypatch, broken_backend)
+
+    # Fuera de loopback un keyring roto deniega el acceso (503), no lo abre.
+    exposed = BrokerConfig(server=ServerConfig(host="0.0.0.0", allow_unauthenticated_lan=False))
+    with pytest.raises(HTTPException) as raised:
+        verify_admin_access(None, exposed)
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "ADMIN_AUTH_BACKEND_UNAVAILABLE"
+
+    # En loopback se degrada a "sin token": la API solo es alcanzable localmente.
+    _fresh_keyring(monkeypatch, broken_backend)
+    verify_admin_access(None, BrokerConfig())
+
+
 def test_health_reports_dispatcher_state(tmp_path: Path) -> None:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
@@ -1692,6 +1804,50 @@ def test_health_omits_dispatcher_when_auto_dispatch_disabled(tmp_path: Path) -> 
     with make_client(tmp_path) as client:
         report = client.get("/health").json()
         assert "dispatcher" not in report["dependencies"]
+
+
+def test_ready_returns_503_when_dispatcher_stops(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=True, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config)) as client:
+        ready = client.get("/health/ready")
+        assert ready.status_code == 200
+
+        # Con el bucle de despacho muerto el servicio acepta tareas que nadie
+        # despachará: /health/ready debe dejar de responder 200.
+        task = client.app.state.dispatcher_task
+        task.get_loop().call_soon_threadsafe(task.cancel)
+        for _ in range(50):
+            not_ready = client.get("/health/ready")
+            if not_ready.status_code == 503:
+                break
+        else:
+            raise AssertionError("/health/ready never returned 503 after dispatcher death")
+        assert not_ready.json()["dependencies"]["dispatcher"]["status"] == "unavailable"
+        client.app.state.dispatcher_task = None
+
+
+def test_health_reports_disk_dependency(tmp_path: Path) -> None:
+    from app.config import HealthConfig
+
+    with make_client(tmp_path) as client:
+        report = client.get("/health").json()
+        assert report["dependencies"]["disk"]["status"] == "healthy"
+
+    # Con un umbral imposible (1 PB libre) el mismo volumen pasa a degraded.
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "alert.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        health=HealthConfig(disk_free_alert_gb=1_000_000),
+    )
+    with TestClient(create_app(config)) as client:
+        report = client.get("/health").json()
+        assert report["dependencies"]["disk"]["status"] == "degraded"
+        assert report["status"] == "degraded"
+        # El disco degradado no tumba la readiness: solo sqlite o dispatcher.
+        assert client.get("/health/ready").status_code == 200
 
 
 def test_zero_cost_cloud_providers_detection() -> None:

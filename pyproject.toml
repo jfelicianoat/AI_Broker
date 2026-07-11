@@ -26,6 +26,12 @@ hf-local = [
     "transformers>=4.42.0",
 ]
 
+# Sin esta lista setuptools intenta auto-descubrir paquetes y aborta porque la
+# raíz tiene varios directorios candidatos (graphify-out, state, logs, docs...):
+# `pip install -e .` fallaba con "Multiple top-level packages discovered".
+[tool.setuptools.packages.find]
+include = ["app", "app.*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -33,7 +39,9 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = [".local", ".venv", "docs"]
+# "deprecated" guarda código legado fuera de uso (p. ej. el antiguo
+# app/providers.py monolítico): no se lintéa ni se importa.
+extend-exclude = [".local", ".venv", "docs", "deprecated"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from app.config import BrokerConfig
+from app.config import BrokerConfig, effective_max_parallel_invocations
 from app.prompt_compressor import PromptCompressor
 from app.providers.base import (
     ROLE_SYSTEM_PROMPTS,
     ModelOutput,
     ProviderError,
-    _CatalogCache,
     context_fits_with_capped_output,
     estimate_required_context,
     neutralize_consensus_delimiters,
@@ -26,6 +25,7 @@ from app.schemas import (
     InferenceKind,
     ModelReference,
     TaskCreateRequest,
+    is_local_deployment,
 )
 
 
@@ -39,18 +39,12 @@ class RoutedModelProvider:
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
         self.huggingface_local = huggingface_local or HuggingFaceLocalProvider(config.providers.huggingface_local)
         self.custom = custom if custom is not None else self._build_custom_providers(config)
-        configured = config.processing.max_parallel_invocations
-        if isinstance(configured, int):
-            parallel_limit = configured
-        else:
-            usable_vram = max(
-                1.0,
-                config.resources.local_vram_budget_gb - config.resources.vram_safety_margin_gb,
-            )
-            parallel_limit = max(1, min(3, int(usable_vram // 18)))
+        self._parallel_limit = effective_max_parallel_invocations(config)
         self._serial_inference_slot = asyncio.Semaphore(1)
-        self._parallel_inference_slot = asyncio.Semaphore(parallel_limit)
+        self._parallel_inference_slot = asyncio.Semaphore(self._parallel_limit)
         self.prompt_compressor = self._build_prompt_compressor(config)
+        # Caché de sondas de salud: provider_id -> (expira_en_monotonic, resultado).
+        self._health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     @staticmethod
     def _build_prompt_compressor(config: BrokerConfig) -> PromptCompressor:
@@ -78,17 +72,41 @@ class RoutedModelProvider:
             if item.enabled
         }
 
-    def reload_config(self, config: BrokerConfig) -> None:
+    async def reload_config(self, config: BrokerConfig) -> None:
+        """Recarga transaccional: se construye lo nuevo, se intercambia y se
+        cierra lo antiguo.
+
+        Antes los custom reemplazados quedaban sin cerrar (fuga de clientes
+        HTTP), el semáforo conservaba el límite calculado en el arranque y los
+        cambios de base_url/timeout nunca llegaban a los clientes ya creados.
+        """
+        # Construir primero: si la construcción falla, lo antiguo sigue intacto.
+        new_custom = self._build_custom_providers(config)
+        old_custom = self.custom
+
         self.config = config
-        self.deepseek.config = config.providers.deepseek
-        if hasattr(self.deepseek, "_catalog_cache"):
-            self.deepseek._catalog_cache = _CatalogCache(config.providers.deepseek.catalog_cache_seconds)
-        ollama_cache = getattr(self.ollama, "_catalog_cache", None)
-        if ollama_cache is not None:
-            ollama_cache.clear()
+        await self.ollama.reload_config(config)
+        await self.deepseek.reload_config(config.providers.deepseek)
         self.huggingface_local.reload_config(config.providers.huggingface_local)
-        self.custom = self._build_custom_providers(config)
+        self.custom = new_custom
         self.prompt_compressor = self._build_prompt_compressor(config)
+        self._rebuild_inference_slots(config)
+        # El conjunto de proveedores puede haber cambiado: las sondas cacheadas
+        # dejan de ser representativas.
+        self._health_cache.clear()
+
+        # Con lo nuevo ya en su sitio, cerrar los clientes reemplazados.
+        for provider in old_custom.values():
+            await provider.close()
+
+    def _rebuild_inference_slots(self, config: BrokerConfig) -> None:
+        limit = effective_max_parallel_invocations(config)
+        if limit == self._parallel_limit:
+            return
+        # Las inferencias en vuelo liberan el semáforo antiguo al terminar;
+        # las adquisiciones nuevas ya entran con el límite recién configurado.
+        self._parallel_limit = limit
+        self._parallel_inference_slot = asyncio.Semaphore(limit)
 
     async def close(self) -> None:
         await self.ollama.close()
@@ -115,16 +133,63 @@ class RoutedModelProvider:
         return result
 
     async def health(self) -> dict[str, dict[str, Any]]:
-        checks: dict[str, dict[str, Any]] = {}
+        """Sondas de salud concurrentes, con deadline corto y caché por proveedor.
+
+        Antes las sondas eran secuenciales y sin límite propio: un proveedor
+        colgado podía bloquear /health durante minutos (timeout de inferencia).
+        La caché usa los intervalos de config.health: las dependencias locales
+        se revalidan a menudo y los proveedores externos con mucha menos
+        frecuencia (cada sonda externa es una llamada a un tercero).
+        """
+        sources: list[tuple[str, Any, bool]] = []
         if self.config.providers.ollama.enabled:
-            checks["ollama"] = await self._provider_health(self.ollama)
+            sources.append(("ollama", self.ollama, False))
         if self.config.providers.deepseek.enabled:
-            checks["deepseek"] = await self._provider_health(self.deepseek)
+            sources.append(("deepseek", self.deepseek, True))
         if self.config.providers.huggingface_local.enabled:
-            checks["huggingface_local"] = await self._provider_health(self.huggingface_local)
+            sources.append(("huggingface_local", self.huggingface_local, False))
         for provider_id, provider in self.custom.items():
-            checks[provider_id] = await self._provider_health(provider)
+            item = next(
+                (c for c in self.config.providers.custom if c.id.lower() == provider_id),
+                None,
+            )
+            external = item is None or not is_local_deployment(item.deployment)
+            sources.append((provider_id, provider, external))
+
+        now = asyncio.get_running_loop().time()
+        checks: dict[str, dict[str, Any]] = {}
+        pending: list[tuple[str, Any, bool]] = []
+        for provider_id, provider, external in sources:
+            cached = self._health_cache.get(provider_id)
+            if cached is not None and cached[0] > now:
+                checks[provider_id] = cached[1]
+            else:
+                pending.append((provider_id, provider, external))
+        if pending:
+            results = await asyncio.gather(
+                *(self._probe_health(provider) for _, provider, _ in pending)
+            )
+            health_config = self.config.health
+            for (provider_id, _, external), result in zip(pending, results, strict=True):
+                ttl = (
+                    health_config.external_providers_interval_seconds
+                    if external
+                    else health_config.local_dependencies_interval_seconds
+                )
+                self._health_cache[provider_id] = (now + ttl, result)
+                checks[provider_id] = result
         return checks
+
+    async def _probe_health(self, provider: Any) -> dict[str, Any]:
+        timeout = self.config.health.probe_timeout_seconds
+        try:
+            return await asyncio.wait_for(self._provider_health(provider), timeout)
+        except asyncio.TimeoutError:
+            return {
+                "status": "unavailable",
+                "detail": f"la sonda de salud superó el deadline de {timeout:g}s",
+                "latency_ms": timeout * 1000,
+            }
 
     async def resource_snapshot(self) -> dict[str, Any]:
         if not self.config.providers.ollama.enabled:
@@ -160,7 +225,9 @@ class RoutedModelProvider:
         allowed = {item.lower() for item in request.model_requirements.allowed_providers}
         catalog = [item for item in await self.models() if item["provider"].lower() in allowed]
         if not request.model_requirements.cloud_allowed:
-            catalog = [item for item in catalog if item.get("deployment") != "cloud"]
+            # Fail-closed: sin cloud_allowed solo entran deployments locales;
+            # "api" o valores desconocidos se tratan como externos.
+            catalog = [item for item in catalog if is_local_deployment(item.get("deployment"))]
         catalog = [item for item in catalog if item.get("compatibility") != "incompatible"]
         required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
         capability_catalog = [
@@ -319,7 +386,7 @@ class RoutedModelProvider:
                 if not self.config.providers.ollama.enabled:
                     raise ProviderError("PROVIDER_UNAVAILABLE", "Ollama está deshabilitado")
                 entry = self._resolve_catalog_entry(await self.ollama.models(), model, "Ollama")
-                if entry.get("deployment") == "cloud" and not request.model_requirements.cloud_allowed:
+                if not is_local_deployment(entry.get("deployment")) and not request.model_requirements.cloud_allowed:
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"El modelo {model.model} requiere cloud")
                 if embedding:
                     return await self.ollama.embed(request, model.model, prompt)
@@ -351,7 +418,7 @@ class RoutedModelProvider:
                 )
                 return await self.huggingface_local.generate(request, model.model, prompt, system=system)
             if provider_name in self.custom:
-                if not request.model_requirements.cloud_allowed and model.deployment.lower() == "cloud":
+                if not request.model_requirements.cloud_allowed and not is_local_deployment(model.deployment):
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"{model.provider} requiere cloud_allowed=true")
                 provider = self.custom[provider_name]
                 entry = self._resolve_catalog_entry(await provider.models(), model, model.provider)

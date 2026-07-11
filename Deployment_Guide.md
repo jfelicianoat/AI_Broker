@@ -192,6 +192,11 @@ server:
 
   port: 8080
 
+# Fuera de loopback el broker NO arranca sin token admin (fail-closed).
+# Define AI_BROKER_ADMIN_TOKEN (o guarda el token en el keyring) antes de
+# arrancar. Para una demo en LAN aislada existe el opt-out explícito:
+#   server.allow_unauthenticated_lan: true
+
 
 
 ollama:
@@ -216,15 +221,15 @@ external_apis:
 
 ```bash
 
-# Desde la carpeta del Broker
+# Desde la carpeta del Broker (host/puerto y config salen del mismo YAML)
 
-python -m app.main
+python scripts/run_broker.py --config broker_config.yaml
 
 
 
-# O usando uvicorn directamente
+# O usando uvicorn directamente (--factory: no existe app global app.main:app)
 
-uvicorn app.main:app --host IP_LAN_DEL_BROKER --port 8080 --workers 1
+uvicorn app.main:create_app --factory --host IP_LAN_DEL_BROKER --port 8080
 
 ```
 
@@ -671,7 +676,7 @@ El Broker consulta primero `DEEPSEEK_API_KEY` y después Credential Manager. Si 
 - Instalarlo como servicio de Windows con inicio automático y recuperación tras fallo; el servicio no se considera listo hasta que `/health/ready` responda `200`.
 - Permitir TCP 8080 exclusivamente desde la subred privada o desde la IP de la máquina principal.
 - No configurar redirección de puertos en el router.
-- El MVP mantiene la decisión de no usar autenticación; si el servicio sale de la LAN, TLS y autenticación pasan a ser obligatorios antes del despliegue.
+- Escuchar fuera de loopback exige token admin (env `AI_BROKER_ADMIN_TOKEN` o keyring): sin credencial el broker rechaza el arranque. Con token configurado, las mutaciones y las lecturas que contienen prompts/resultados (API y dashboard) piden credencial; `server.allow_unauthenticated_lan: true` es el único opt-out y queda registrado con warning. Si el servicio sale de la LAN, TLS pasa a ser obligatorio antes del despliegue.
 
 ### Pruebas de aceptación previas al uso
 
