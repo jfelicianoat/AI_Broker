@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -17,6 +17,7 @@ from app.schemas import (
     TaskCreateRequest,
     TaskStateResponse,
     TaskStatus,
+    is_local_deployment,
 )
 
 
@@ -174,85 +175,125 @@ class TaskRepository:
         )
         return str(row["id"]) if row else None
 
-    def record_invocation(
-        self,
-        task_id: str,
-        run_id: str | None,
-        role: str,
-        model: ModelReference,
-        output: ModelOutput,
-        status: str = "completed",
-    ) -> str:
+    def start_invocation(self, task_id: str, run_id: str | None, role: str, model: ModelReference) -> str:
+        """Checkpoint pre-vuelo: la fila existe ANTES de llamar al proveedor.
+
+        Si el proceso muere con la llamada en el aire, la recuperación
+        encontrará esta fila en 'started' y sabrá que la inferencia pudo
+        llegar a ejecutarse (y facturarse) aunque no haya respuesta persistida.
+        """
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
-        started_at, completed_at = _invocation_window(now, output.latency_ms)
         with self.db.transaction() as connection:
             connection.execute(
-                """
-                INSERT INTO model_invocations (
-                    id, task_id, run_id, role, provider, deployment, model,
-                    output_json, tokens_input, tokens_output, cost_usd, latency_ms,
-                    started_at, completed_at, status, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+                "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
+                "tokens_input, tokens_output, cost_usd, started_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
                 (
-                    invocation_id,
-                    task_id,
-                    run_id,
-                    role,
-                    model.provider,
-                    model.deployment,
-                    model.model,
-                    dumps_json(output.technical_output()),
-                    output.tokens_input,
-                    output.tokens_output,
-                    output.cost_usd,
-                    output.latency_ms,
-                    started_at,
-                    completed_at,
-                    status,
-                    now,
-                    now,
+                    invocation_id, task_id, run_id, role,
+                    model.provider, model.deployment, model.model,
+                    now, now, now,
                 ),
             )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (
                     task_id,
-                    "model_invocation.completed",
-                    dumps_json({"invocation_id": invocation_id, "role": role, "model": model.model}),
+                    "model_invocation.started",
+                    dumps_json({
+                        "invocation_id": invocation_id,
+                        "role": role,
+                        "provider": model.provider,
+                        "deployment": model.deployment,
+                        "model": model.model,
+                    }),
                     now,
                 ),
             )
         return invocation_id
 
+    def complete_invocation(self, invocation_id: str, task_id: str, output: ModelOutput) -> None:
+        """Cierra el checkpoint con la respuesta real (tokens, coste, latencia)."""
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE model_invocations SET output_json = ?, tokens_input = ?, tokens_output = ?, "
+                "cost_usd = ?, latency_ms = ?, completed_at = ?, status = 'completed', updated_at = ? "
+                "WHERE id = ?",
+                (
+                    dumps_json(output.technical_output()),
+                    output.tokens_input,
+                    output.tokens_output,
+                    output.cost_usd,
+                    output.latency_ms,
+                    now,
+                    now,
+                    invocation_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "model_invocation.completed", dumps_json({"invocation_id": invocation_id}), now),
+            )
+
+    def fail_invocation(self, invocation_id: str, task_id: str, code: str, message: str) -> None:
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE model_invocations SET completed_at = ?, status = 'failed', updated_at = ? WHERE id = ?",
+                (now, now, invocation_id),
+            )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    task_id,
+                    "model_invocation.failed",
+                    dumps_json({"invocation_id": invocation_id, "code": code, "message": message}),
+                    now,
+                ),
+            )
+
+    def set_stage_status(self, task_id: str, run_id: str | None, stage_type: str, status: str) -> None:
+        """Checkpoint de etapa del consenso (queued → running → completed/failed).
+
+        Da observabilidad del punto exacto de una interrupción; las tareas
+        single no tienen run ni etapas y la llamada es un no-op.
+        """
+        if run_id is None:
+            return
+        now = _utc_now_iso()
+        self.db.execute(
+            "UPDATE stages SET status = ?, "
+            "attempts = attempts + CASE WHEN ? = 'running' THEN 1 ELSE 0 END, updated_at = ? "
+            "WHERE task_id = ? AND run_id = ? AND stage_type = ?",
+            (status, status, now, task_id, run_id, stage_type),
+        )
+
     def complete_single_task(
         self,
         task_id: str,
+        invocation_id: str,
         model: ModelReference,
         output: ModelOutput,
         *,
         progress: dict[str, Any],
         result: dict[str, Any],
     ) -> str:
-        """Persiste invocación y resultado terminal en la misma transacción."""
-        invocation_id = f"inv_{uuid4().hex}"
+        """Cierra el checkpoint de invocación y el resultado terminal en la
+        misma transacción: o queda todo persistido o nada (la recuperación
+        tratará la fila 'started' como ambigua)."""
         now = _utc_now_iso()
-        started_at, completed_at = _invocation_window(now, output.latency_ms)
         with self.db.transaction() as connection:
             row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None or row["status"] == TaskStatus.cancelled.value:
                 raise ProviderError("TASK_CANCELLED", "La tarea fue cancelada antes de persistir el resultado")
             connection.execute(
-                "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
-                "output_json, tokens_input, tokens_output, cost_usd, latency_ms, started_at, completed_at, "
-                "status, created_at, updated_at) "
-                "VALUES (?, ?, NULL, 'single', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)",
+                "UPDATE model_invocations SET output_json = ?, tokens_input = ?, tokens_output = ?, "
+                "cost_usd = ?, latency_ms = ?, completed_at = ?, status = 'completed', updated_at = ? "
+                "WHERE id = ?",
                 (
-                    invocation_id, task_id, model.provider, model.deployment, model.model,
                     dumps_json(output.technical_output()), output.tokens_input, output.tokens_output,
-                    output.cost_usd, output.latency_ms, started_at, completed_at, now, now,
+                    output.cost_usd, output.latency_ms, now, now, invocation_id,
                 ),
             )
             connection.execute(
@@ -400,7 +441,16 @@ class TaskRepository:
         )
 
     def recover_interrupted_tasks(self, max_attempts: int | None = None) -> int:
-        """Re-encola tareas activas interrumpidas; supera max_attempts → failed."""
+        """Re-encola tareas interrumpidas según lo que había en vuelo al morir.
+
+        Las invocaciones que quedaron en 'started' pasan a 'ambiguous': no se
+        sabe si el proveedor llegó a ejecutar (y facturar) la llamada. Si
+        alguna era remota, la tarea NO se reintenta automáticamente — repetir
+        el workflow podría pagar dos veces la misma inferencia — y se marca
+        failed con código explícito para que el operador decida. Con solo
+        llamadas locales el reintento automático es seguro: cuesta cómputo,
+        no dinero.
+        """
         active_statuses = (
             "routing",
             "planning",
@@ -423,6 +473,71 @@ class TaskRepository:
             ).fetchall()
             position = 0
             for row in rows:
+                started = connection.execute(
+                    "SELECT id, provider, deployment, model FROM model_invocations "
+                    "WHERE task_id = ? AND status = 'started'",
+                    (row["id"],),
+                ).fetchall()
+                for item in started:
+                    connection.execute(
+                        "UPDATE model_invocations SET status = 'ambiguous', updated_at = ? WHERE id = ?",
+                        (now, item["id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                        (
+                            row["id"],
+                            "model_invocation.ambiguous",
+                            dumps_json({
+                                "invocation_id": item["id"],
+                                "provider": item["provider"],
+                                "deployment": item["deployment"],
+                                "model": item["model"],
+                            }),
+                            now,
+                        ),
+                    )
+                ambiguous_remote = [
+                    f"{item['provider']}/{item['deployment']}/{item['model']}"
+                    for item in started
+                    if not is_local_deployment(item["deployment"])
+                ]
+                if ambiguous_remote:
+                    progress = loads_json(row["progress_json"], {})
+                    progress["phase"] = TaskStatus.failed.value
+                    error = {
+                        "code": "RECOVERY_AMBIGUOUS_REMOTE_CALL",
+                        "message": (
+                            "La tarea se interrumpió con llamadas remotas en vuelo que pudieron "
+                            "facturarse: " + ", ".join(ambiguous_remote) + ". No se reintenta "
+                            "automáticamente; verifica el consumo en el proveedor y reenvía la "
+                            "tarea si procede."
+                        ),
+                        "retryable": False,
+                        "ambiguous_invocations": ambiguous_remote,
+                    }
+                    connection.execute(
+                        """
+                        UPDATE tasks
+                        SET status = 'failed',
+                            queue_position = NULL,
+                            progress_json = ?,
+                            error_json = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (dumps_json(progress), dumps_json(error), now, row["id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                        (
+                            row["id"],
+                            "task.status_changed",
+                            dumps_json({"status": "failed", "code": "RECOVERY_AMBIGUOUS_REMOTE_CALL"}),
+                            now,
+                        ),
+                    )
+                    continue
                 next_attempt = int(row["attempt"]) + 1
                 if max_attempts is not None and next_attempt >= max_attempts:
                     progress = loads_json(row["progress_json"], {})
@@ -505,9 +620,3 @@ class TaskRepository:
         )
 
 
-def _invocation_window(completed_iso: str, latency_ms: float | None) -> tuple[str | None, str]:
-    completed = _parse_dt(completed_iso)
-    if latency_ms is None:
-        return None, completed_iso
-    started = completed - timedelta(milliseconds=max(0.0, float(latency_ms)))
-    return started.isoformat(), completed_iso
