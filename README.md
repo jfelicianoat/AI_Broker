@@ -1,6 +1,10 @@
 # AI Broker — Consensus Gateway
 
+[![CI](https://github.com/jfelicianoat/AI_Broker/actions/workflows/ci.yml/badge.svg)](https://github.com/jfelicianoat/AI_Broker/actions/workflows/ci.yml)
+
 Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
+
+Cada push a `main` ejecuta el CI (GitHub Actions) en Windows y Ubuntu: Ruff, Mypy y la suite completa (183 tests) con cobertura mínima exigida del 90%, instalando desde `requirements.lock` en un entorno limpio.
 
 Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2 disponible sobre los read models de 5.1. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings, admite destino exacto y aplica timeout global. `fast` es serial; `slow` puede lanzar proponentes concurrentes dentro de un solo workflow. El proveedor `bootstrap` queda reservado para pruebas.
 
@@ -350,8 +354,25 @@ Cada tarea puede terminal en `completed`, `failed` o `cancelled` desde cualquier
 ## Inicio rápido
 
 ```bash
-pip install -e .[dev]
-python scripts/run_broker.py --config broker_config.yaml
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.lock   # versiones exactas verificadas
+.venv\Scripts\pip install -e . --no-deps
+.venv\Scripts\python scripts\run_broker.py --config broker_config.yaml
+```
+
+El entorno es reproducible en cualquier PC: `requirements.lock` congela las
+versiones exactas (directas y transitivas) con las que pasa la suite. El venv
+no se puede copiar entre máquinas (guarda rutas absolutas); recréalo siempre
+con los comandos de arriba. Para actualizar dependencias: `pip install -e
+.[dev]`, pasar los tests y regenerar el lock con
+`pip freeze --exclude-editable > requirements.lock`.
+
+Verificación local:
+
+```bash
+.venv\Scripts\python -m pytest --cov=app --cov-report=term-missing
+.venv\Scripts\python -m ruff check .
+.venv\Scripts\python -m mypy
 ```
 
 Para desarrollo con autoreload (la app se construye con la factory; no existe

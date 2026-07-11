@@ -1,0 +1,43 @@
+# CI de AI Broker: cada push ejecuta la misma verificación que en local
+# (lint + tipos + suite con cobertura mínima) sobre un entorno recién creado
+# desde requirements.lock — si el proyecto deja de ser reproducible, el CI
+# falla aunque "en mi máquina funcione".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows es el entorno de desarrollo real; Ubuntu demuestra que el
+        # proyecto no depende del SO (rutas, keyring, subprocesos).
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Instalar dependencias exactas del lockfile
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -e . --no-deps
+
+      - name: Lint (Ruff)
+        run: ruff check .
+
+      - name: Tipos (Mypy)
+        run: mypy
+
+      - name: Tests con cobertura minima (fail_under en pyproject)
+        run: pytest --cov=app --cov-report=term-missing

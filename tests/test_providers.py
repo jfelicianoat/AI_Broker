@@ -157,6 +157,90 @@ class DeepSeekProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(models[0]["name"], "deepseek-chat")
         self.assertEqual(output.cost_usd, 0.00002)
 
+    async def test_models_catalog_disabled_cache_and_network_errors(self) -> None:
+        calls = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return httpx.Response(200, json={"data": [{"id": "deepseek-chat"}]})
+            return httpx.Response(500)
+
+        disabled = DeepSeekProvider(DeepSeekConfig(enabled=False))
+        self.assertEqual(await disabled.models(), [])
+        await disabled.close()
+
+        provider = DeepSeekProvider(
+            DeepSeekConfig(enabled=True, catalog_cache_seconds=60),
+            transport=httpx.MockTransport(handler),
+        )
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "secret"}):
+            first = await provider.models()
+            # Segunda llamada dentro del TTL: servida desde caché, sin red.
+            second = await provider.models()
+            self.assertEqual(first, second)
+            self.assertEqual(calls["count"], 1)
+
+            provider._catalog_cache.clear()
+            with self.assertRaises(ProviderError) as raised:
+                await provider.models()
+            self.assertEqual(raised.exception.code, "PROVIDER_UNAVAILABLE")
+            self.assertTrue(raised.exception.retryable)
+        await provider.close()
+
+    async def test_missing_credential_fails_before_any_network_call(self) -> None:
+        called = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(200)
+
+        config = DeepSeekConfig(
+            enabled=True,
+            api_key_env="DEEPSEEK_TEST_KEY_AUSENTE",
+            keyring_username="deepseek_test_credencial_ausente",
+        )
+        provider = DeepSeekProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEEPSEEK_TEST_KEY_AUSENTE", None)
+            with self.assertRaises(ProviderError) as raised:
+                await provider.models()
+        self.assertEqual(raised.exception.code, "CREDENTIALS_UNAVAILABLE")
+        self.assertFalse(called)
+        await provider.close()
+
+    async def test_generate_maps_http_errors_and_invalid_payloads(self) -> None:
+        responses = iter([
+            httpx.Response(429, json={"error": {"message": "rate limited"}}),
+            httpx.Response(200, json={"choices": []}),
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            # El system prompt viaja como primer mensaje del payload.
+            assert body["messages"][0]["role"] == "system"
+            assert body["response_format"] == {"type": "json_object"}
+            return next(responses)
+
+        provider = DeepSeekProvider(DeepSeekConfig(enabled=True), transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(
+            idempotency_key="deepseek:errores",
+            content={"prompt": "hola"},
+            output={"format": "json", "json_schema": {"type": "object"}},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["deepseek"]},
+        )
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as http_error:
+                await provider.generate(request, "deepseek-chat", "hola", system="Eres conciso")
+            self.assertEqual(http_error.exception.code, "MODEL_ERROR")
+            self.assertFalse(http_error.exception.retryable)
+
+            with self.assertRaises(ProviderError) as invalid:
+                await provider.generate(request, "deepseek-chat", "hola", system="Eres conciso")
+            self.assertEqual(invalid.exception.code, "INVALID_PROVIDER_RESPONSE")
+        await provider.close()
+
     async def test_reload_rebuilds_client_only_when_network_settings_change(self) -> None:
         provider = DeepSeekProvider(DeepSeekConfig(enabled=True))
         original_client = provider.client
