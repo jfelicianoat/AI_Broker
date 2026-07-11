@@ -5,3 +5,7 @@
 /state/
 *.pyc
 /logs/
+.coverage
+.coverage.*
+/htmlcov/
+/coverage.xml
