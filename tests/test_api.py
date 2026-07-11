@@ -7,7 +7,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.dashboard_web as dashboard_web
-import app.main as main_module
 import app.providers as providers_module
 from app.config import (
     BrokerConfig,
@@ -579,6 +578,150 @@ def test_dashboard_configuration_can_be_reviewed_without_saving(tmp_path: Path) 
     assert not config_path.exists()
 
 
+def test_dashboard_configuration_form_errors_are_rendered(tmp_path: Path) -> None:
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-errors.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        # Margen de VRAM >= presupuesto: error de formulario, no un 500.
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "8",
+                "vram_safety_margin_gb": "16",
+                "max_loaded_local_models": "auto",
+            },
+        )
+    assert response.status_code == 200
+    assert "margen de VRAM" in response.text
+    # Nada se guardó: la config en memoria y el YAML quedan intactos.
+    assert config.resources.local_vram_budget_gb != 8
+    assert not config_path.exists()
+
+
+def test_dashboard_views_render_and_validate_task_kind(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        mixture = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "views:mixture",
+                "content": {"prompt": "Consenso para comparar"},
+                "execution": {"strategy": "mixture_of_agents", "preset": "fast"},
+            },
+        ).json()
+        single = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "views:single", "content": {"prompt": "Tarea simple"}},
+        ).json()
+        client.post("/api/v1/dispatcher/tick")
+        client.post("/api/v1/dispatcher/tick")
+
+        assert client.get("/dashboard/prompt-tester").status_code == 200
+        assert client.get("/dashboard/models").status_code == 200
+        assert client.get("/dashboard/comparison").status_code == 200
+        assert client.get(f"/dashboard/comparison?task_id={mixture['task_id']}").status_code == 200
+        assert client.get(f"/dashboard/tasks/{mixture['task_id']}").status_code == 200
+        for fragment in ("summary", "queue", "active", "health", "resources", "history", "config"):
+            assert client.get(f"/dashboard/fragments/{fragment}").status_code == 200, fragment
+
+        # La comparación solo aplica a consensos; una single devuelve 422.
+        assert client.get(f"/dashboard/comparison?task_id={single['task_id']}").status_code == 422
+        assert client.get("/dashboard/comparison?task_id=task_inexistente").status_code == 404
+        assert client.get("/dashboard/tasks/task_inexistente").status_code == 404
+
+
+def test_prompt_tester_validates_enqueues_and_reports_errors(tmp_path: Path) -> None:
+    bootstrap_model = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    with make_client(tmp_path) as client:
+        token = dashboard_csrf(client)
+
+        # Validar sin encolar: devuelve la previsualización del contrato.
+        preview = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "csrf_token": token,
+                "action": "validate",
+                "prompt": "Prueba de validación",
+                "strategy": "single",
+                "single_model": bootstrap_model,
+            },
+        )
+        assert preview.status_code == 200
+        assert "prompt-tester" in preview.text or "Prueba" in preview.text
+
+        # Encolar: crea la tarea de verdad.
+        enqueued = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "csrf_token": token,
+                "action": "enqueue",
+                "prompt": "Prueba encolada",
+                "strategy": "single",
+                "single_model": bootstrap_model,
+            },
+        )
+        assert enqueued.status_code == 200
+        # La plantilla enlaza a la vista de la tarea recién creada.
+        assert "/dashboard/tasks/task_" in enqueued.text
+
+        # Errores de formulario: prompt vacío y JSON de entrada inválido.
+        empty = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={"csrf_token": token, "action": "validate", "prompt": "   ", "strategy": "single"},
+        )
+        assert empty.status_code == 200
+        assert "no puede estar vacio" in empty.text
+
+        bad_json = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "csrf_token": token,
+                "action": "validate",
+                "prompt": "{no es json",
+                "input_mode": "json",
+                "strategy": "single",
+                "single_model": bootstrap_model,
+            },
+        )
+        assert bad_json.status_code == 200
+        assert "JSON de entrada invalido" in bad_json.text
+
+
+def test_single_model_probe_reports_errors_without_breaking(tmp_path: Path) -> None:
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-probe.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+
+        # Proveedor inexistente: redirección con el error en la query.
+        redirect = client.post(
+            "/dashboard/actions/models/probe",
+            data={"csrf_token": token, "provider": "desconocido", "model": "algo"},
+            follow_redirects=False,
+        )
+        assert redirect.status_code == 303
+        assert "model_probe=error" in redirect.headers["location"]
+
+        # La variante JSON (HTMX) responde 422 con el mensaje.
+        as_json = client.post(
+            "/dashboard/actions/models/probe",
+            data={"csrf_token": token, "provider": "desconocido", "model": "algo"},
+            headers={"Accept": "application/json"},
+        )
+        assert as_json.status_code == 422
+        assert as_json.json()["ok"] is False
+
+
 def test_dashboard_configuration_adds_custom_api_provider(tmp_path: Path) -> None:
     config_path = tmp_path / "broker_config.yaml"
     config = BrokerConfig(
@@ -631,9 +774,11 @@ def test_lmstudio_auto_start_uses_configured_port(monkeypatch) -> None:
             return {"returncode": 0, "stdout": "The server is not running.", "stderr": ""}
         return {"returncode": 0, "stdout": "Success! Server is now running on port 1234", "stderr": ""}
 
-    monkeypatch.setattr(main_module, "_run_process", fake_run_process)
-    logger = main_module.logging.getLogger("test.lmstudio")
-    asyncio.run(main_module._ensure_lmstudio_server("http://127.0.0.1:1234/v1", logger))
+    import app.startup as startup_module
+
+    monkeypatch.setattr(startup_module, "run_process", fake_run_process)
+    logger = startup_module.logging.getLogger("test.lmstudio")
+    asyncio.run(startup_module.ensure_lmstudio_server("http://127.0.0.1:1234/v1", logger))
 
     assert calls == [
         (["lms", "server", "status"], 10),
@@ -1940,7 +2085,7 @@ def test_health_reports_disk_dependency(tmp_path: Path) -> None:
 
 def test_zero_cost_cloud_providers_detection() -> None:
     from app.config import DeepSeekConfig, OpenAICompatibleProviderConfig, ProvidersConfig
-    from app.main import _zero_cost_cloud_providers
+    from app.startup import zero_cost_cloud_providers
 
     config = BrokerConfig(
         providers=ProvidersConfig(
@@ -1959,10 +2104,10 @@ def test_zero_cost_cloud_providers_detection() -> None:
             ],
         )
     )
-    assert _zero_cost_cloud_providers(config) == ["deepseek", "nvidia"]
+    assert zero_cost_cloud_providers(config) == ["deepseek", "nvidia"]
 
     config.providers.deepseek.input_cost_per_million = 0.27
-    assert _zero_cost_cloud_providers(config) == ["nvidia"]
+    assert zero_cost_cloud_providers(config) == ["nvidia"]
 
 
 def test_database_rejects_execute_inside_transaction(tmp_path: Path) -> None:
@@ -2013,12 +2158,12 @@ def test_prune_terminal_task_events(tmp_path: Path) -> None:
 
 
 def test_vram_budget_mismatch_detection() -> None:
-    from app.main import _vram_budget_mismatch
+    from app.startup import vram_budget_mismatch
 
-    assert _vram_budget_mismatch(64.0, 8.0) is not None
-    assert _vram_budget_mismatch(10.0, 8.0) is None
-    assert _vram_budget_mismatch(64.0, None) is None
-    assert _vram_budget_mismatch(64.0, 64.0) is None
+    assert vram_budget_mismatch(64.0, 8.0) is not None
+    assert vram_budget_mismatch(10.0, 8.0) is None
+    assert vram_budget_mismatch(64.0, None) is None
+    assert vram_budget_mismatch(64.0, 64.0) is None
 
 
 def test_save_config_is_atomic_and_keeps_backup(tmp_path: Path) -> None:
