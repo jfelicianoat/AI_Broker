@@ -10,6 +10,7 @@ import httpx
 from app.config import (
     BrokerConfig,
     DeepSeekConfig,
+    HealthConfig,
     HuggingFaceLocalConfig,
     HuggingFaceLocalModelConfig,
     OllamaConfig,
@@ -155,6 +156,21 @@ class DeepSeekProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(models[0]["name"], "deepseek-chat")
         self.assertEqual(output.cost_usd, 0.00002)
+
+    async def test_reload_rebuilds_client_only_when_network_settings_change(self) -> None:
+        provider = DeepSeekProvider(DeepSeekConfig(enabled=True))
+        original_client = provider.client
+
+        # Cambia base_url: el cliente viejo se cierra y el nuevo apunta al proxy.
+        await provider.reload_config(DeepSeekConfig(enabled=True, base_url="https://proxy.example.com"))
+        self.assertTrue(original_client.is_closed)
+        self.assertIn("proxy.example.com", str(provider.client.base_url))
+
+        # Recarga sin cambios de red: el cliente se conserva.
+        surviving_client = provider.client
+        await provider.reload_config(DeepSeekConfig(enabled=True, base_url="https://proxy.example.com"))
+        self.assertIs(provider.client, surviving_client)
+        await provider.close()
 
     async def test_rejects_request_before_call_when_budget_is_insufficient(self) -> None:
         called = False
@@ -705,6 +721,9 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
             "idempotency_key": "route:exact",
             "content": {"prompt": "hola"},
             "model_requirements": {
+                # gpu-a/gpu-b son deployments ficticios: bajo la política
+                # fail-closed cualquier deployment no local exige cloud_allowed.
+                "cloud_allowed": True,
                 "target_model": {"provider": "ollama", "deployment": "gpu-b", "model": "shared"},
                 "fallback_allowed": False,
             },
@@ -724,6 +743,171 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProviderError) as raised:
             await router.select(wrong, 1, ["single"])
         self.assertEqual(raised.exception.code, "MODEL_UNAVAILABLE")
+        await router.close()
+
+    async def test_local_only_excludes_external_api_deployments(self) -> None:
+        class StubProvider:
+            def __init__(self, models):
+                self._models = models
+
+            async def models(self):
+                return self._models
+
+            async def close(self):
+                return None
+
+        ollama = StubProvider(
+            [{"name": "local-model", "provider": "ollama", "deployment": "local", "context_window": 100000}]
+        )
+        nvidia = StubProvider(
+            [{"name": "remote-model", "provider": "nvidia", "deployment": "api", "context_window": 100000}]
+        )
+        router = RoutedModelProvider(
+            BrokerConfig(), ollama=ollama, deepseek=StubProvider([]), custom={"nvidia": nvidia}
+        )
+        request = TaskCreateRequest(
+            idempotency_key="route:local-only",
+            content={"prompt": "privado"},
+            model_requirements={"cloud_allowed": False, "allowed_providers": ["ollama", "nvidia"]},
+        )
+        selected = await router.select(request, 1, ["single"])
+        self.assertEqual((selected[0].provider, selected[0].deployment), ("ollama", "local"))
+
+        only_external = TaskCreateRequest(
+            idempotency_key="route:local-only-external",
+            content={"prompt": "privado"},
+            model_requirements={"cloud_allowed": False, "allowed_providers": ["nvidia"]},
+        )
+        with self.assertRaises(ProviderError) as raised:
+            await router.select(only_external, 1, ["single"])
+        self.assertEqual(raised.exception.code, "MODEL_UNAVAILABLE")
+        await router.close()
+
+    async def test_reload_config_swaps_custom_clients_and_parallel_limit(self) -> None:
+        class ReloadableStub:
+            def __init__(self):
+                self.reloaded = 0
+
+            async def models(self):
+                return []
+
+            async def close(self):
+                return None
+
+            async def reload_config(self, config):
+                self.reloaded += 1
+
+        custom_cfg = OpenAICompatibleProviderConfig(
+            id="lmstudio",
+            enabled=True,
+            base_url="http://127.0.0.1:1234/v1",
+            deployment="local",
+        )
+        config = BrokerConfig(
+            processing=ProcessingConfig(max_parallel_invocations=2),
+            providers=ProvidersConfig(custom=[custom_cfg]),
+        )
+        ollama = ReloadableStub()
+        router = RoutedModelProvider(config, ollama=ollama, deepseek=ReloadableStub())
+        old_custom = router.custom["lmstudio"]
+        self.assertEqual(router._parallel_limit, 2)
+        self.assertFalse(old_custom.client.is_closed)
+
+        updated = config.model_copy(deep=True)
+        updated.processing.max_parallel_invocations = 3
+        await router.reload_config(updated)
+
+        # El custom reemplazado se cierra (antes fugaba el cliente HTTP).
+        self.assertTrue(old_custom.client.is_closed)
+        self.assertIsNot(router.custom["lmstudio"], old_custom)
+        # El semáforo refleja el límite nuevo y los sub-providers recargaron.
+        self.assertEqual(router._parallel_limit, 3)
+        self.assertEqual(router._parallel_inference_slot._value, 3)
+        self.assertEqual(ollama.reloaded, 1)
+        await router.close()
+
+    async def test_health_probes_run_concurrently_with_deadline(self) -> None:
+        class HangingProvider:
+            async def models(self):
+                return []
+
+            async def health(self):
+                await asyncio.sleep(30)
+
+            async def close(self):
+                return None
+
+        config = BrokerConfig(health=HealthConfig(probe_timeout_seconds=0.1))
+        router = RoutedModelProvider(
+            config,
+            ollama=HangingProvider(),
+            deepseek=HangingProvider(),
+            custom={"nvidia": HangingProvider()},
+        )
+        started = asyncio.get_running_loop().time()
+        checks = await router.health()
+        elapsed = asyncio.get_running_loop().time() - started
+
+        # Dos sondas colgadas (ollama + nvidia; deepseek está deshabilitado):
+        # con deadline y concurrencia la respuesta llega en ~1 deadline, no en
+        # la suma de timeouts de inferencia.
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(checks["ollama"]["status"], "unavailable")
+        self.assertIn("deadline", checks["ollama"]["detail"])
+        self.assertEqual(checks["nvidia"]["status"], "unavailable")
+        await router.close()
+
+    async def test_health_results_are_cached_per_interval(self) -> None:
+        class CountingProvider:
+            def __init__(self):
+                self.probes = 0
+
+            async def models(self):
+                return []
+
+            async def health(self):
+                self.probes += 1
+                return {"status": "healthy", "detail": "ok", "latency_ms": 1.0}
+
+            async def close(self):
+                return None
+
+        ollama = CountingProvider()
+        router = RoutedModelProvider(BrokerConfig(), ollama=ollama, deepseek=CountingProvider())
+        first = await router.health()
+        second = await router.health()
+
+        # Dentro del intervalo local (30 s por defecto) no se vuelve a sondear.
+        self.assertEqual(ollama.probes, 1)
+        self.assertEqual(first["ollama"], second["ollama"])
+        await router.close()
+
+    async def test_generate_blocks_external_api_model_without_cloud_allowed(self) -> None:
+        class StubProvider:
+            def __init__(self, models):
+                self._models = models
+
+            async def models(self):
+                return self._models
+
+            async def close(self):
+                return None
+
+        nvidia = StubProvider(
+            [{"name": "remote-model", "provider": "nvidia", "deployment": "api", "context_window": 100000}]
+        )
+        router = RoutedModelProvider(
+            BrokerConfig(), ollama=StubProvider([]), deepseek=StubProvider([]), custom={"nvidia": nvidia}
+        )
+        request = TaskCreateRequest(
+            idempotency_key="route:generate-local-only",
+            content={"prompt": "privado"},
+            model_requirements={"cloud_allowed": False, "allowed_providers": ["nvidia"]},
+        )
+        model = ModelReference(provider="nvidia", deployment="api", model="remote-model", role="single")
+        with self.assertRaises(ProviderError) as raised:
+            await router.propose(request, model, 1)
+        self.assertEqual(raised.exception.code, "CLOUD_NOT_ALLOWED")
         await router.close()
 
     async def test_serializes_all_llm_calls_globally(self) -> None:

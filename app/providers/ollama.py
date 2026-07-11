@@ -123,8 +123,30 @@ class OllamaProvider:
         self.config = config
         ollama = config.providers.ollama
         self.client = httpx.AsyncClient(base_url=ollama.base_url, timeout=ollama.timeout_seconds, transport=transport)
+        # Ajustes materializados en el cliente: la recarga compara contra la
+        # config nueva (la config compartida puede mutarse in place, así que
+        # self.config no sirve como referencia del estado anterior).
+        self._client_settings = (ollama.base_url, ollama.timeout_seconds)
         self.lifecycle = OllamaLifecycleManager(self.client, config)
         self._catalog_cache = _CatalogCache(ollama.catalog_cache_seconds)
+
+    async def reload_config(self, config: BrokerConfig) -> None:
+        """Aplica la config nueva de verdad: cliente y lifecycle se reconstruyen
+        si base_url o timeout cambian; el catálogo cacheado se descarta siempre."""
+        self.config = config
+        ollama = config.providers.ollama
+        self._catalog_cache = _CatalogCache(ollama.catalog_cache_seconds)
+        settings = (ollama.base_url, ollama.timeout_seconds)
+        if settings != self._client_settings:
+            old_client = self.client
+            self.client = httpx.AsyncClient(base_url=ollama.base_url, timeout=ollama.timeout_seconds)
+            # El lifecycle va ligado al cliente; solo se recrea con él para no
+            # perder los leases de modelos cargados en recargas sin cambios.
+            self.lifecycle = OllamaLifecycleManager(self.client, config)
+            self._client_settings = settings
+            await old_client.aclose()
+        else:
+            self.lifecycle.config = config
 
     async def close(self) -> None:
         await self.client.aclose()

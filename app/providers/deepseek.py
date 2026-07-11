@@ -23,7 +23,22 @@ class DeepSeekProvider:
     def __init__(self, config: DeepSeekConfig, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.config = config
         self.client = httpx.AsyncClient(base_url=config.base_url, timeout=config.timeout_seconds, transport=transport)
+        # Ajustes materializados en el cliente HTTP: la recarga los compara con
+        # la config nueva porque reasignar .config no cambia un cliente ya creado.
+        self._client_settings = (config.base_url, config.timeout_seconds)
         self._catalog_cache = _CatalogCache(config.catalog_cache_seconds)
+
+    async def reload_config(self, config: DeepSeekConfig) -> None:
+        """Aplica la config nueva de verdad: si base_url o timeout cambian se
+        construye un cliente nuevo y se cierra el anterior."""
+        self.config = config
+        self._catalog_cache = _CatalogCache(config.catalog_cache_seconds)
+        settings = (config.base_url, config.timeout_seconds)
+        if settings != self._client_settings:
+            old_client = self.client
+            self.client = httpx.AsyncClient(base_url=config.base_url, timeout=config.timeout_seconds)
+            self._client_settings = settings
+            await old_client.aclose()
 
     async def close(self) -> None:
         await self.client.aclose()

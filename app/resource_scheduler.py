@@ -4,7 +4,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.config import BrokerConfig
+from app.config import BrokerConfig, effective_max_parallel_invocations
 from app.schemas import ExecutionPreset, ExecutionStrategy, SchedulingPolicy, TaskCreateRequest
 
 
@@ -83,15 +83,9 @@ class ResourceScheduler:
         )
 
     def _max_parallel_invocations(self) -> int:
-        configured = self.config.processing.max_parallel_invocations
-        if isinstance(configured, int):
-            return configured
-        usable_vram = max(
-            1.0,
-            self.config.resources.local_vram_budget_gb - self.config.resources.vram_safety_margin_gb,
-        )
-        # Conservative bootstrap estimate until real model telemetry exists.
-        return max(1, min(3, int(usable_vram // 18)))
+        # Fórmula única compartida con RoutedModelProvider (semáforo de
+        # ejecución): plan y ejecución deben prometer la misma capacidad.
+        return effective_max_parallel_invocations(self.config)
 
     def max_parallel_invocations(self) -> int:
         return self._max_parallel_invocations()

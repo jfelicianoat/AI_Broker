@@ -30,6 +30,16 @@ class TaskStatus(str, Enum):
 
 TERMINAL_STATUSES = {TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled}
 
+# Política de privacidad fail-closed: solo lo que se ejecuta en esta máquina
+# cuenta como local ("bootstrap" es el proveedor fake in-process). Cualquier
+# otro deployment ("cloud", "api" o valores futuros) se trata como externo y
+# exige cloud_allowed=true.
+LOCAL_DEPLOYMENTS = {"local", "bootstrap"}
+
+
+def is_local_deployment(deployment: str | None) -> bool:
+    return str(deployment or "").strip().lower() in LOCAL_DEPLOYMENTS
+
 
 class ExecutionStrategy(str, Enum):
     single = "single"
@@ -149,7 +159,7 @@ class ModelRequirements(StrictBaseModel):
             if self.preferred_model is not None and self.preferred_model != self.target_model.model:
                 raise ValueError("preferred_model and target_model.model must match when both are provided")
             target_is_cloud = (
-                self.target_model.deployment.lower() == "cloud"
+                not is_local_deployment(self.target_model.deployment)
                 or target_provider in {"deepseek", "ollama_cloud", "openai", "anthropic", "google"}
             )
             if target_is_cloud and not self.cloud_allowed:

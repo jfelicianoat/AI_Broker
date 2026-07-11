@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +17,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.admin_auth import resolve_admin_token, verify_admin_access
+from app.admin_auth import (
+    LOOPBACK_HOSTS,
+    AdminTokenLookupError,
+    resolve_admin_token,
+    verify_admin_access,
+)
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository
@@ -47,11 +54,21 @@ from app.schemas import (
     TaskStateResponse,
     TaskStatus,
     UsageResponse,
+    is_local_deployment,
 )
 
 
 def create_app(config: BrokerConfig | None = None, config_path: str | Path = "broker_config.yaml") -> FastAPI:
+    """Única vía para construir la app; no existe instancia global a nivel de módulo.
+
+    Cada llamada abre su propia BD y clientes de proveedores, así que crear apps
+    implícitas al importar duplicaría recursos sin cierre. Producción:
+    scripts/run_broker.py (propaga --config). Desarrollo con autoreload:
+    `uvicorn app.main:create_app --factory`. config_path es además el YAML que
+    el dashboard edita y recarga en caliente.
+    """
     broker_config = config or load_config(config_path)
+    _ensure_admin_credential_for_exposed_host(broker_config)
     configure_logging(broker_config.logging)
     logger = logging.getLogger("ai_broker.http")
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
@@ -63,15 +80,25 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if broker_config.server.host not in {"127.0.0.1", "localhost", "::1"} and not resolve_admin_token(broker_config):
-            logger.warning(
-                "security.exposed_without_token",
-                extra={
-                    "event": "security.exposed_without_token",
-                    "host": broker_config.server.host,
-                    "detail": "El servidor escucha fuera de loopback sin token admin: la API mutable queda abierta a la red",
-                },
-            )
+        if broker_config.server.host not in LOOPBACK_HOSTS:
+            try:
+                exposed_token = resolve_admin_token(broker_config)
+            except AdminTokenLookupError:
+                exposed_token = None
+            if not exposed_token:
+                # Solo alcanzable con allow_unauthenticated_lan=true: el guard
+                # de arranque fail-closed ya rechazó el resto de casos.
+                logger.warning(
+                    "security.exposed_without_token",
+                    extra={
+                        "event": "security.exposed_without_token",
+                        "host": broker_config.server.host,
+                        "detail": (
+                            "allow_unauthenticated_lan=true sin token admin: "
+                            "la API completa queda abierta a la red"
+                        ),
+                    },
+                )
         for provider_id in _zero_cost_cloud_providers(broker_config):
             logger.warning(
                 "providers.cloud_zero_cost",
@@ -156,6 +183,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             return "stopped"
         return "running"
 
+    # Caché de dependencias de salud compartida por /health, /health/ready y
+    # el panel; vive lo que la app y usa los TTL de config.health.
+    health_cache: dict[str, tuple[float, HealthDependency]] = {}
+
+    async def _health_snapshot() -> HealthResponse:
+        return await _health_response(db, provider, _dispatcher_state(), broker_config, health_cache)
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
@@ -203,7 +237,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             scheduler=scheduler,
             config=broker_config,
             config_path=Path(config_path),
-            health_loader=lambda: _health_response(db, provider, _dispatcher_state()),
+            health_loader=_health_snapshot,
         )
     )
 
@@ -244,7 +278,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.get("/api/v1/tasks/{task_id}", response_model=TaskStateResponse)
-    def get_task(task_id: str) -> TaskStateResponse:
+    def get_task(task_id: str, request: Request) -> TaskStateResponse:
+        # La respuesta incluye result/progress (salida completa del modelo):
+        # con token configurado es una lectura protegida, igual que las mutaciones.
+        verify_admin_access(request, broker_config)
         try:
             return repository.get_task(task_id)
         except KeyError as exc:
@@ -260,6 +297,8 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/api/v1/queue", response_model=QueueResponse)
     def get_queue() -> QueueResponse:
+        # Lectura abierta a propósito: solo ids, estados y posiciones — sin
+        # prompts ni resultados. Reordenar (PATCH) sí exige credencial.
         return repository.list_queue()
 
     @app.patch("/api/v1/queue", response_model=QueueResponse)
@@ -382,11 +421,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/api/v1/dashboard/tasks", response_model=DashboardTaskPage)
     def dashboard_tasks(
+        request: Request,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=50, ge=1, le=200),
         status: TaskStatus | None = None,
         origin: str | None = Query(default=None, min_length=1, max_length=64),
     ) -> DashboardTaskPage:
+        verify_admin_access(request, broker_config)
         return dashboard_queries.list_tasks(
             page=page,
             page_size=page_size,
@@ -395,7 +436,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.get("/api/v1/dashboard/tasks/{task_id}", response_model=DashboardTaskDetail)
-    def dashboard_task_detail(task_id: str) -> DashboardTaskDetail:
+    def dashboard_task_detail(task_id: str, request: Request) -> DashboardTaskDetail:
+        # Devuelve request_json (el prompt íntegro) y result_json: lectura
+        # protegida cuando hay token configurado.
+        verify_admin_access(request, broker_config)
         try:
             return dashboard_queries.task_detail(task_id)
         except KeyError as error:
@@ -407,7 +451,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
-        return await _health_response(db, provider, _dispatcher_state())
+        return await _health_snapshot()
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:
@@ -415,8 +459,14 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/health/ready", response_model=HealthResponse)
     async def ready(response: Response) -> HealthResponse:
-        health_response = await _health_response(db, provider, _dispatcher_state())
-        if health_response.dependencies["sqlite"].status == "unavailable":
+        health_response = await _health_snapshot()
+        # No listo sin SQLite ni con el bucle de despacho muerto: aceptar
+        # tareas que nadie va a despachar sería un 200 engañoso. Los
+        # proveedores caídos solo degradan: encolar sigue siendo válido.
+        dispatcher = health_response.dependencies.get("dispatcher")
+        if health_response.dependencies["sqlite"].status == "unavailable" or (
+            dispatcher is not None and dispatcher.status == "unavailable"
+        ):
             response.status_code = 503
         return health_response
 
@@ -462,14 +512,41 @@ def _vram_budget_mismatch(budget_gb: float, detected_gb: float | None) -> str | 
     return None
 
 
+def _ensure_admin_credential_for_exposed_host(config: BrokerConfig) -> None:
+    """Arranque fail-closed: fuera de loopback se exige token admin verificable.
+
+    Escuchar en LAN expone mutaciones y lecturas con prompts/resultados, así
+    que sin credencial el broker no arranca (antes solo emitía un warning).
+    Un fallo del backend de credenciales también bloquea: no poder verificar
+    el token no es lo mismo que no tenerlo. El opt-out explícito es
+    server.allow_unauthenticated_lan=true.
+    """
+    if config.server.host in LOOPBACK_HOSTS or config.server.allow_unauthenticated_lan:
+        return
+    try:
+        token = resolve_admin_token(config)
+    except AdminTokenLookupError as error:
+        raise RuntimeError(
+            f"El broker escucha en {config.server.host} pero el backend de credenciales falló "
+            f"({error}). Define el token por variable de entorno, repara el keyring o usa "
+            "server.allow_unauthenticated_lan=true bajo tu responsabilidad."
+        ) from error
+    if not token:
+        raise RuntimeError(
+            f"El broker escucha en {config.server.host} sin token admin configurado. "
+            "Guarda un token (env o keyring) o activa server.allow_unauthenticated_lan=true "
+            "bajo tu responsabilidad."
+        )
+
+
 def _zero_cost_cloud_providers(config: BrokerConfig) -> list[str]:
-    """Providers cloud habilitados sin precios: su gasto real será invisible (coste 0)."""
+    """Providers externos (cloud/api) habilitados sin precios: su gasto real será invisible (coste 0)."""
     zero: list[str] = []
     deepseek = config.providers.deepseek
     if deepseek.enabled and not deepseek.input_cost_per_million and not deepseek.output_cost_per_million:
         zero.append("deepseek")
     for item in config.providers.custom:
-        if not item.enabled or item.deployment != "cloud":
+        if not item.enabled or is_local_deployment(item.deployment):
             continue
         model_costs = any(
             model.input_cost_per_million or model.output_cost_per_million for model in item.models
@@ -581,28 +658,93 @@ async def _dispatcher_loop(
             pass
 
 
-async def _health_response(db: Database, provider, dispatcher_state: str | None = None) -> HealthResponse:
+def _cached_dependency(
+    cache: dict[str, tuple[float, HealthDependency]],
+    key: str,
+    now: float,
+    ttl: float,
+    probe: Callable[[], HealthDependency],
+) -> HealthDependency:
+    """Reutiliza el último resultado dentro del TTL: los orquestadores sondean
+    /health/ready en bucle y no tiene sentido repetir cada comprobación."""
+    entry = cache.get(key)
+    if entry is not None and entry[0] > now:
+        return entry[1]
+    dependency = probe()
+    cache[key] = (now + ttl, dependency)
+    return dependency
+
+
+def _check_sqlite(db: Database) -> HealthDependency:
     checked_at = datetime.now(timezone.utc)
-    status: Literal["healthy", "degraded", "unavailable"]
     try:
         start = datetime.now(timezone.utc)
         db.query_one("SELECT 1")
         latency_ms = (datetime.now(timezone.utc) - start).total_seconds() * 1000
-        sqlite = HealthDependency(
+        return HealthDependency(
             status="healthy",
             checked_at=checked_at,
             detail="SQLite reachable",
             latency_ms=latency_ms,
         )
-        status = "healthy"
     except Exception as exc:  # pragma: no cover - defensive readiness path
-        sqlite = HealthDependency(
+        return HealthDependency(status="unavailable", checked_at=checked_at, detail=str(exc))
+
+
+def _check_disk(database: Path, alert_gb: int) -> HealthDependency:
+    """El broker escribe BD, WAL, logs y artefactos en este volumen: quedarse
+    sin espacio corrompe la cola, así que por debajo del umbral se degrada."""
+    checked_at = datetime.now(timezone.utc)
+    try:
+        free_gb = shutil.disk_usage(database.resolve().parent).free / 1024**3
+    except OSError as exc:
+        return HealthDependency(
             status="unavailable",
             checked_at=checked_at,
-            detail=str(exc),
+            detail=f"No se pudo medir el espacio libre: {exc}",
         )
-        status = "unavailable"
+    if free_gb < alert_gb:
+        return HealthDependency(
+            status="degraded",
+            checked_at=checked_at,
+            detail=f"{free_gb:.1f} GB libres, por debajo de la alerta de {alert_gb} GB",
+        )
+    return HealthDependency(
+        status="healthy",
+        checked_at=checked_at,
+        detail=f"{free_gb:.1f} GB libres (alerta a partir de {alert_gb} GB)",
+    )
+
+
+async def _health_response(
+    db: Database,
+    provider,
+    dispatcher_state: str | None,
+    config: BrokerConfig,
+    cache: dict[str, tuple[float, HealthDependency]],
+) -> HealthResponse:
+    """Estado agregado de dependencias con caché por intervalo (config.health).
+
+    sqlite y disco se revalidan según su TTL; las sondas de proveedores llevan
+    su propia caché y deadline (RoutedModelProvider.health). El dispatcher se
+    evalúa siempre en fresco: es una comprobación en memoria y decide la
+    readiness.
+    """
+    checked_at = datetime.now(timezone.utc)
+    health_config = config.health
+    now = time.monotonic()
+
+    sqlite = _cached_dependency(
+        cache, "sqlite", now, health_config.sqlite_interval_seconds, lambda: _check_sqlite(db)
+    )
     dependencies = {"sqlite": sqlite}
+    dependencies["disk"] = _cached_dependency(
+        cache,
+        "disk",
+        now,
+        health_config.local_dependencies_interval_seconds,
+        lambda: _check_disk(Path(config.persistence.database), health_config.disk_free_alert_gb),
+    )
     if dispatcher_state is not None:
         running = dispatcher_state == "running"
         dependencies["dispatcher"] = HealthDependency(
@@ -617,10 +759,12 @@ async def _health_response(db: Database, provider, dispatcher_state: str | None 
             detail=check.get("detail"),
             latency_ms=check.get("latency_ms"),
         )
+    status: Literal["healthy", "degraded", "unavailable"]
+    status = "unavailable" if sqlite.status == "unavailable" else "healthy"
     states = {dependency.status for dependency in dependencies.values()}
     if "unavailable" in states and sqlite.status != "unavailable":
         status = "degraded"
-    elif "degraded" in states:
+    elif "degraded" in states and status == "healthy":
         status = "degraded"
     return HealthResponse(status=status, checked_at=checked_at, dependencies=dependencies)
 
@@ -852,6 +996,3 @@ def _model_feature_profile(entry: dict[str, Any]) -> dict[str, Any]:
         notes.append("Las capacidades no declaradas por el proveedor se devuelven como unknown.")
 
     return {"features": features, "feature_notes": notes}
-
-
-app = create_app()

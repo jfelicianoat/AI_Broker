@@ -86,6 +86,25 @@ def test_local_only_allows_lmstudio_local_provider() -> None:
     assert payload.model_requirements.allowed_providers == ["lmstudio"]
 
 
+def test_exact_target_external_deployment_requires_cloud_allowed() -> None:
+    # Regresión fail-closed: "api" (u otro deployment no local) cuenta como
+    # externo aunque el proveedor no esté en la lista de nombres cloud conocidos.
+    try:
+        TaskCreateRequest.model_validate({
+            "idempotency_key": "contract:target-api-deployment",
+            "content": {"prompt": "Privado"},
+            "model_requirements": {
+                "cloud_allowed": False,
+                "allowed_providers": ["nvidia"],
+                "target_model": {"provider": "nvidia", "deployment": "api", "model": "yi-large"},
+            },
+        })
+    except Exception as exc:
+        assert "cloud_allowed" in str(exc)
+    else:
+        raise AssertionError("api deployment target without cloud_allowed should fail")
+
+
 def test_exact_target_must_respect_provider_and_local_only_boundaries() -> None:
     try:
         TaskCreateRequest.model_validate({

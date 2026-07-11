@@ -14,11 +14,15 @@ class ServerConfig(BaseModel):
     port: int = 8080
     workers: int = 1
     cors_enabled: bool = False
-    # Token de administración del dashboard: si existe (env o keyring), las
-    # acciones mutables de /dashboard/actions/* exigen sesión admin.
+    # Token de administración: si existe (env o keyring), las mutaciones y las
+    # lecturas con prompts/resultados (API y dashboard) exigen credencial admin.
     admin_token_env: str | None = Field(default="AI_BROKER_ADMIN_TOKEN", max_length=120)
     admin_keyring_service: str = Field(default="ai-broker", max_length=120)
     admin_keyring_username: str = Field(default="dashboard_admin_token", max_length=120)
+    # Opt-out explícito del arranque fail-closed: permite escuchar fuera de
+    # loopback sin token admin (p. ej. una demo en LAN aislada). Sin este flag,
+    # el broker se niega a arrancar expuesto a la red sin credencial.
+    allow_unauthenticated_lan: bool = False
 
     @model_validator(mode="after")
     def validate_single_worker(self) -> ServerConfig:
@@ -78,10 +82,18 @@ class ResourceConfig(BaseModel):
 
 
 class HealthConfig(BaseModel):
+    # TTL de la caché de cada dependencia: /health y /health/ready reutilizan
+    # el último resultado dentro del intervalo en vez de sondear en cada GET.
     sqlite_interval_seconds: int = 10
     local_dependencies_interval_seconds: int = 30
+    # Los proveedores externos (cloud/api) se sondean con mucha menos frecuencia:
+    # cada sonda es una llamada de red a un servicio de terceros.
     external_providers_interval_seconds: int = 300
+    # Umbral del check de disco del volumen de la BD: por debajo, "degraded".
     disk_free_alert_gb: int = 10
+    # Deadline de cada sonda de proveedor; al agotarse se reporta "unavailable"
+    # sin bloquear la respuesta (los timeouts de inferencia llegan a 300 s).
+    probe_timeout_seconds: float = Field(default=5.0, gt=0)
 
 
 class LoggingConfig(BaseModel):
@@ -211,6 +223,24 @@ class BrokerConfig(BaseModel):
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+
+
+def effective_max_parallel_invocations(config: BrokerConfig) -> int:
+    """Capacidad paralela efectiva de inferencia.
+
+    Fórmula única compartida por ResourceScheduler (planificación de olas) y
+    RoutedModelProvider (semáforo de ejecución): si divergieran, el plan
+    podría prometer un paralelismo que el router no concede, o al revés.
+    """
+    configured = config.processing.max_parallel_invocations
+    if isinstance(configured, int):
+        return configured
+    usable_vram = max(
+        1.0,
+        config.resources.local_vram_budget_gb - config.resources.vram_safety_margin_gb,
+    )
+    # Estimación conservadora de arranque hasta tener telemetría real por modelo.
+    return max(1, min(3, int(usable_vram // 18)))
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

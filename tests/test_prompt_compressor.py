@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.config import BrokerConfig, PromptCompressionConfig
@@ -112,5 +114,5 @@ def test_routing_provider_respects_reload(monkeypatch):
 
     updated = config.model_copy(deep=True)
     updated.prompt_compression.enabled = False
-    provider.reload_config(updated)
+    asyncio.run(provider.reload_config(updated))
     assert provider.prompt_compressor.enabled is False
