@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -18,6 +19,7 @@ from app.config import (
     OpenAICompatibleProviderConfig,
     ProcessingConfig,
     ProvidersConfig,
+    ResourceConfig,
 )
 from app.providers import (
     DeepSeekProvider,
@@ -121,6 +123,271 @@ class OllamaProviderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertTrue(state["unloaded"])
+        await provider.close()
+
+    async def test_running_maps_http_error_to_provider_unavailable(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            await provider.lifecycle.running()
+        self.assertEqual(raised.exception.code, "PROVIDER_UNAVAILABLE")
+        await provider.close()
+
+    async def test_models_maps_http_error_to_provider_unavailable(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            await provider.models()
+        self.assertEqual(raised.exception.code, "PROVIDER_UNAVAILABLE")
+        await provider.close()
+
+    async def test_models_falls_back_to_defaults_when_show_endpoint_fails(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                return httpx.Response(200, json={"models": [{"name": "sin-metadata"}]})
+            if request.url.path == "/api/show":
+                return httpx.Response(500)
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        models = await provider.models()
+        await provider.close()
+
+        self.assertIsNone(models[0]["context_window"])
+        self.assertEqual(models[0]["capabilities"], [])
+
+    async def test_lease_reference_counts_and_only_unloads_after_last_release(self) -> None:
+        calls = {"unloads": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": []})
+            if request.url.path == "/api/generate":
+                calls["unloads"] += 1
+                return httpx.Response(200, json={})
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        async with provider.lifecycle.lease("modelo", estimated_size=10):
+            async with provider.lifecycle.lease("modelo", estimated_size=10):
+                pass
+            # Sigue habiendo un lease activo: no debe descargar todavía.
+            self.assertEqual(calls["unloads"], 0)
+        # Se libera el último lease: ahora sí se descarga.
+        self.assertEqual(calls["unloads"], 1)
+        await provider.close()
+
+    async def test_lease_skips_capacity_check_when_model_already_running(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": [{"name": "ya-cargado", "size_vram": 5_000_000_000}]})
+            if request.url.path == "/api/generate":
+                return httpx.Response(200, json={})
+            return httpx.Response(404)
+
+        config = BrokerConfig(
+            # No interesa el unload al salir del lease, solo el atajo de _ensure_capacity.
+            processing=ProcessingConfig(unload_after_task=False),
+            resources=ResourceConfig(local_vram_budget_gb=1.0, vram_safety_margin_gb=0.0),
+        )
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        # Sin este atajo el presupuesto sería insuficiente; al estar ya cargado no se comprueba.
+        async with provider.lifecycle.lease("ya-cargado", estimated_size=100):
+            pass
+        await provider.close()
+
+    async def test_lease_raises_vram_insufficient_when_running_models_are_all_leased(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": [{"name": "big", "size_vram": 2_000_000_000}]})
+            return httpx.Response(404)
+
+        config = BrokerConfig(resources=ResourceConfig(local_vram_budget_gb=1.0, vram_safety_margin_gb=0.0))
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        provider.lifecycle._leases["big"] = 1  # ya arrendado: no es candidato a desalojo
+        with self.assertRaises(ProviderError) as raised:
+            async with provider.lifecycle.lease("nuevo", estimated_size=500_000_000):
+                pass
+        self.assertEqual(raised.exception.code, "VRAM_INSUFFICIENT")
+        await provider.close()
+
+    async def test_unload_maps_http_error_to_retryable_failure(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/generate":
+                return httpx.Response(500)
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            await provider.lifecycle.unload("modelo")
+        self.assertEqual(raised.exception.code, "MODEL_UNLOAD_FAILED")
+        self.assertTrue(raised.exception.retryable)
+        await provider.close()
+
+    async def test_unload_raises_after_timeout_when_model_keeps_running(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/generate":
+                return httpx.Response(200, json={})
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": [{"name": "atascado", "size_vram": 1}]})
+            return httpx.Response(404)
+
+        config = BrokerConfig(providers=ProvidersConfig(ollama=OllamaConfig(unload_timeout_seconds=0.05)))
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            await provider.lifecycle.unload("atascado")
+        self.assertEqual(raised.exception.code, "MODEL_UNLOAD_FAILED")
+        await provider.close()
+
+    async def test_resource_snapshot_reports_loaded_models_and_reservations(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(
+                    200,
+                    json={"models": [
+                        {"name": "a", "size_vram": 100, "context_length": 4096},
+                        {"name": "b", "size_vram": 200},
+                    ]},
+                )
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        provider.lifecycle._leases["a"] = 2
+        provider.lifecycle._reserved_sizes["a"] = 50
+        snapshot = await provider.lifecycle.resource_snapshot()
+        await provider.close()
+
+        loaded_by_name = {item["model"]: item for item in snapshot["loaded_models"]}
+        self.assertEqual(loaded_by_name["a"]["lease_count"], 2)
+        self.assertEqual(loaded_by_name["a"]["context_length"], 4096)
+        self.assertIsNone(loaded_by_name["b"]["context_length"])
+        self.assertEqual(snapshot["used_vram_bytes"], 300)
+        self.assertEqual(snapshot["reserved_vram_bytes"], 50)
+
+    async def test_reload_config_rebuilds_client_and_lifecycle_on_network_change(self) -> None:
+        provider = OllamaProvider(BrokerConfig())
+        original_client = provider.client
+        original_lifecycle = provider.lifecycle
+
+        unchanged = BrokerConfig()  # mismos base_url/timeout que la config inicial
+        await provider.reload_config(unchanged)
+        self.assertIs(provider.client, original_client)
+        self.assertIs(provider.lifecycle, original_lifecycle)
+        self.assertIs(provider.lifecycle.config, unchanged)
+
+        changed = BrokerConfig(providers=ProvidersConfig(ollama=OllamaConfig(base_url="http://otro-host:11434")))
+        await provider.reload_config(changed)
+        self.assertIsNot(provider.client, original_client)
+        self.assertIsNot(provider.lifecycle, original_lifecycle)
+        self.assertTrue(original_client.is_closed)
+        await provider.close()
+
+    async def test_generate_maps_http_and_invalid_response_errors_with_system_message(self) -> None:
+        captured_messages = []
+        responses = iter([
+            httpx.Response(500, json={"error": {"message": "boom"}}),
+            httpx.Response(200, json={"message": {"content": "   "}}),
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                return httpx.Response(
+                    200,
+                    json={"models": [{"name": "modelo", "context_length": 4096, "capabilities": ["completion"]}]},
+                )
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": []})
+            if request.url.path == "/api/generate":
+                # Descarga tras el error/respuesta invalida: debe ser un no-op silencioso
+                # para no enmascarar la excepcion real que se propaga del bloque try.
+                return httpx.Response(200, json={})
+            if request.url.path == "/api/chat":
+                body = json.loads(request.content)
+                captured_messages.append(body["messages"])
+                return next(responses)
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(idempotency_key="ollama:errors", content={"prompt": "hola"})
+
+        with self.assertRaises(ProviderError) as http_error:
+            await provider.generate(request, "modelo", "hola", system="Eres conciso")
+        self.assertEqual(http_error.exception.code, "MODEL_ERROR")
+        self.assertEqual(captured_messages[0][0]["role"], "system")
+
+        with self.assertRaises(ProviderError) as invalid:
+            await provider.generate(request, "modelo", "hola")
+        self.assertEqual(invalid.exception.code, "INVALID_PROVIDER_RESPONSE")
+        await provider.close()
+
+    async def test_embed_reraises_lease_errors_without_wrapping(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                return httpx.Response(
+                    200,
+                    json={"models": [{"name": "embed-model", "context_length": 2048, "capabilities": ["embedding"]}]},
+                )
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": [{"name": "busy", "size_vram": 2_000_000_000}]})
+            return httpx.Response(404)
+
+        config = BrokerConfig(resources=ResourceConfig(local_vram_budget_gb=1.0, vram_safety_margin_gb=0.0))
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        provider.lifecycle._leases["busy"] = 1
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "ollama:embed-lease-error",
+            "inference_kind": "embedding",
+            "content": {"prompt": "hola"},
+            "output": {"format": "json", "json_schema": {"type": "object"}},
+        })
+        with self.assertRaises(ProviderError) as raised:
+            await provider.embed(request, "embed-model", "hola")
+        self.assertEqual(raised.exception.code, "VRAM_INSUFFICIENT")
+        await provider.close()
+
+    async def test_embed_validates_model_and_response_shape(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                return httpx.Response(
+                    200,
+                    json={"models": [
+                        {"name": "solo-chat", "context_length": 2048, "capabilities": ["completion"]},
+                        {"name": "embed-model", "context_length": 2048, "capabilities": ["embedding"]},
+                    ]},
+                )
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": []})
+            if request.url.path == "/api/embed":
+                return httpx.Response(200, json={"embeddings": []})
+            if request.url.path == "/api/generate":
+                # Descarga tras la respuesta invalida: no-op silencioso, no debe
+                # enmascarar la excepcion real que se propaga del bloque try.
+                return httpx.Response(200, json={})
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        base_request = {
+            "idempotency_key": "ollama:embed-validate",
+            "inference_kind": "embedding",
+            "content": {"prompt": "hola"},
+            "output": {"format": "json", "json_schema": {"type": "object"}},
+        }
+
+        with self.assertRaises(ProviderError) as unknown:
+            await provider.embed(TaskCreateRequest.model_validate(base_request), "no-existe", "hola")
+        self.assertEqual(unknown.exception.code, "MODEL_UNAVAILABLE")
+
+        with self.assertRaises(ProviderError) as mismatch:
+            await provider.embed(TaskCreateRequest.model_validate(base_request), "solo-chat", "hola")
+        self.assertEqual(mismatch.exception.code, "MODEL_CAPABILITY_MISMATCH")
+
+        with self.assertRaises(ProviderError) as invalid:
+            await provider.embed(TaskCreateRequest.model_validate(base_request), "embed-model", "hola")
+        self.assertEqual(invalid.exception.code, "INVALID_PROVIDER_RESPONSE")
         await provider.close()
 
 
@@ -635,6 +902,341 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.tokens_input, 6)
         self.assertEqual(output.tokens_output, 0)
         self.assertEqual(output.cost_usd, 0.000006)
+
+    async def test_models_disabled_returns_empty_list(self) -> None:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleProviderConfig(id="apagado", enabled=False, base_url="http://localhost:1234/v1")
+        )
+        self.assertEqual(await provider.models(), [])
+        await provider.close()
+
+    async def test_missing_credential_raises_before_any_network_call(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("no debería llegar a la red sin credencial")
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia-sin-credencial",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key_env="NVIDIA_TEST_KEY_AUSENTE",
+            models=[OpenAICompatibleModelConfig(name="modelo")],
+        )
+        os.environ.pop("NVIDIA_TEST_KEY_AUSENTE", None)
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        request = TaskCreateRequest(
+            idempotency_key="nvidia:no-cred",
+            content={"prompt": "hola"},
+            model_requirements={"cloud_allowed": True, "allowed_providers": ["nvidia-sin-credencial"]},
+        )
+        with self.assertRaises(ProviderError) as raised:
+            await provider.generate(request, "modelo", "hola")
+        self.assertEqual(raised.exception.code, "CREDENTIALS_UNAVAILABLE")
+        await provider.close()
+
+    async def test_sync_models_maps_http_error_and_reraises_credential_error(self) -> None:
+        def server_error_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia", enabled=True, base_url="https://integrate.api.nvidia.com/v1", sync_models=True
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(server_error_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as raised:
+                await provider.models()
+        self.assertEqual(raised.exception.code, "PROVIDER_UNAVAILABLE")
+        await provider.close()
+
+        def unreachable_handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("no debería llegar a la red sin credencial")
+
+        no_credential_config = OpenAICompatibleProviderConfig(
+            id="nvidia-sin-credencial-sync",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            sync_models=True,
+            api_key_env="NVIDIA_TEST_KEY_AUSENTE_SYNC",
+        )
+        os.environ.pop("NVIDIA_TEST_KEY_AUSENTE_SYNC", None)
+        provider_no_cred = OpenAICompatibleProvider(
+            no_credential_config, transport=httpx.MockTransport(unreachable_handler)
+        )
+        # sync_models reenvía el error de credenciales tal cual (no lo reenvuelve).
+        with self.assertRaises(ProviderError) as credential_error:
+            await provider_no_cred.models()
+        self.assertEqual(credential_error.exception.code, "CREDENTIALS_UNAVAILABLE")
+        await provider_no_cred.close()
+
+    async def test_probe_chat_compatibility_maps_rate_limit_and_network_errors(self) -> None:
+        config = OpenAICompatibleProviderConfig(id="nvidia", enabled=True, base_url="https://integrate.api.nvidia.com/v1")
+
+        def rate_limited_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, json={"error": {"message": "too many requests"}})
+
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(rate_limited_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as raised:
+                await provider.probe_chat_compatibility("modelo")
+        self.assertEqual(raised.exception.code, "RATE_LIMITED")
+        await provider.close()
+
+        def timeout_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("timeout", request=request)
+
+        provider2 = OpenAICompatibleProvider(config, transport=httpx.MockTransport(timeout_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            result = await provider2.probe_chat_compatibility("modelo")
+        self.assertEqual(result["compatibility"], "incompatible")
+        await provider2.close()
+
+    async def test_probe_embedding_compatibility_maps_rate_limit_http_and_network_errors(self) -> None:
+        config = OpenAICompatibleProviderConfig(id="nvidia", enabled=True, base_url="https://integrate.api.nvidia.com/v1")
+        responses = iter([
+            httpx.Response(429, json={"error": {"message": "rate"}}),
+            httpx.Response(400, json={"error": {"message": "bad request"}}),
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return next(responses)
+
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as rate_limited:
+                await provider.probe_embedding_compatibility("modelo")
+            self.assertEqual(rate_limited.exception.code, "RATE_LIMITED")
+
+            incompatible = await provider.probe_embedding_compatibility("modelo")
+        self.assertEqual(incompatible["compatibility"], "incompatible")
+        self.assertIn("bad request", incompatible["compatibility_error"])
+        await provider.close()
+
+        def timeout_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("timeout", request=request)
+
+        provider2 = OpenAICompatibleProvider(config, transport=httpx.MockTransport(timeout_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            network_result = await provider2.probe_embedding_compatibility("modelo")
+        self.assertEqual(network_result["compatibility"], "incompatible")
+        await provider2.close()
+
+    async def test_probe_all_models_reports_progress_and_stops_on_rate_limit(self) -> None:
+        progress_events = []
+
+        async def on_progress(payload):
+            progress_events.append(payload["phase"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, json={"error": {"message": "rate"}})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(name="uno", compatibility="unknown"),
+                OpenAICompatibleModelConfig(name="dos", compatibility="unknown"),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models(progress_callback=on_progress)
+        await provider.close()
+
+        # El límite de tasa corta el sondeo: no llega al segundo modelo.
+        self.assertEqual(results, [])
+        self.assertIn("running", progress_events)
+        self.assertEqual(progress_events[-1], "completed")
+
+    async def test_probe_all_models_stops_on_rate_limit_for_embedding_models(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, json={"error": {"message": "rate"}})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[OpenAICompatibleModelConfig(name="embed-1", capabilities=["embedding"], compatibility="unknown")],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+        self.assertEqual(results, [])
+
+    async def test_embed_validates_model_capability_budget_and_response(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": [{"embedding": []}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[
+                OpenAICompatibleModelConfig(name="solo-chat", capabilities=["completion"]),
+                OpenAICompatibleModelConfig(name="embed-model", capabilities=["embedding"], input_cost_per_million=1000),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        base = {
+            "idempotency_key": "nvidia:embed-validate",
+            "inference_kind": "embedding",
+            "content": {"prompt": "hola"},
+            "output": {"format": "json", "json_schema": {"type": "object"}},
+            "model_requirements": {"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        }
+
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as unknown:
+                await provider.embed(TaskCreateRequest.model_validate(base), "no-existe", "hola")
+            self.assertEqual(unknown.exception.code, "MODEL_UNAVAILABLE")
+
+            with self.assertRaises(ProviderError) as mismatch:
+                await provider.embed(TaskCreateRequest.model_validate(base), "solo-chat", "hola")
+            self.assertEqual(mismatch.exception.code, "MODEL_CAPABILITY_MISMATCH")
+
+            expensive = {**base, "model_requirements": {**base["model_requirements"], "max_cost_usd": 0.000001}}
+            with self.assertRaises(ProviderError) as budget:
+                await provider.embed(
+                    TaskCreateRequest.model_validate(expensive), "embed-model", "texto largo para superar presupuesto"
+                )
+            self.assertEqual(budget.exception.code, "BUDGET_EXCEEDED")
+
+            with self.assertRaises(ProviderError) as invalid:
+                await provider.embed(TaskCreateRequest.model_validate(base), "embed-model", "hola")
+            self.assertEqual(invalid.exception.code, "INVALID_PROVIDER_RESPONSE")
+        await provider.close()
+
+    async def test_embed_maps_network_and_http_errors(self) -> None:
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[OpenAICompatibleModelConfig(name="embed-model", capabilities=["embedding"])],
+        )
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "nvidia:embed-http-error",
+            "inference_kind": "embedding",
+            "content": {"prompt": "hola"},
+            "output": {"format": "json", "json_schema": {"type": "object"}},
+            "model_requirements": {"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        })
+
+        def server_error_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(server_error_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as raised:
+                await provider.embed(request, "embed-model", "hola")
+        self.assertEqual(raised.exception.code, "MODEL_ERROR")
+        self.assertTrue(raised.exception.retryable)
+        await provider.close()
+
+        def timeout_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("timeout", request=request)
+
+        provider2 = OpenAICompatibleProvider(config, transport=httpx.MockTransport(timeout_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as network_error:
+                await provider2.embed(request, "embed-model", "hola")
+        self.assertEqual(network_error.exception.code, "PROVIDER_UNAVAILABLE")
+        await provider2.close()
+
+    async def test_generate_validates_model_budget_and_uses_system_and_json_format(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            captured["messages"] = body["messages"]
+            captured["response_format"] = body.get("response_format")
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[
+                OpenAICompatibleModelConfig(name="solo-embedding", capabilities=["embedding"]),
+                OpenAICompatibleModelConfig(
+                    name="chat-model", capabilities=["completion"],
+                    input_cost_per_million=1000, output_cost_per_million=1000,
+                ),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        base = {
+            "idempotency_key": "nvidia:generate-validate",
+            "content": {"prompt": "hola"},
+            "model_requirements": {"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        }
+
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as unknown:
+                await provider.generate(TaskCreateRequest.model_validate(base), "no-existe", "hola")
+            self.assertEqual(unknown.exception.code, "MODEL_UNAVAILABLE")
+
+            with self.assertRaises(ProviderError) as mismatch:
+                await provider.generate(TaskCreateRequest.model_validate(base), "solo-embedding", "hola")
+            self.assertEqual(mismatch.exception.code, "MODEL_CAPABILITY_MISMATCH")
+
+            expensive = {**base, "model_requirements": {**base["model_requirements"], "max_cost_usd": 0.000001}}
+            with self.assertRaises(ProviderError) as budget:
+                await provider.generate(TaskCreateRequest.model_validate(expensive), "chat-model", "hola" * 200)
+            self.assertEqual(budget.exception.code, "BUDGET_EXCEEDED")
+
+            json_request = {**base, "output": {"format": "json", "json_schema": {"type": "object"}}}
+            await provider.generate(
+                TaskCreateRequest.model_validate(json_request), "chat-model", "hola", system="Eres conciso"
+            )
+        self.assertEqual(captured["messages"][0]["role"], "system")
+        self.assertEqual(captured["response_format"], {"type": "json_object"})
+        await provider.close()
+
+    async def test_generate_maps_network_and_invalid_response_errors(self) -> None:
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            models=[OpenAICompatibleModelConfig(name="chat-model", capabilities=["completion"])],
+        )
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "nvidia:generate-errors",
+            "content": {"prompt": "hola"},
+            "model_requirements": {"cloud_allowed": True, "allowed_providers": ["nvidia"]},
+        })
+        responses = iter([
+            httpx.Response(500),
+            httpx.Response(200, json={"choices": [{"message": {"content": "   "}}]}),
+        ])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return next(responses)
+
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as http_error:
+                await provider.generate(request, "chat-model", "hola")
+            self.assertEqual(http_error.exception.code, "MODEL_ERROR")
+
+            with self.assertRaises(ProviderError) as invalid:
+                await provider.generate(request, "chat-model", "hola")
+            self.assertEqual(invalid.exception.code, "INVALID_PROVIDER_RESPONSE")
+        await provider.close()
+
+        def timeout_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("timeout", request=request)
+
+        provider2 = OpenAICompatibleProvider(config, transport=httpx.MockTransport(timeout_handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with self.assertRaises(ProviderError) as network_error:
+                await provider2.generate(request, "chat-model", "hola")
+        self.assertEqual(network_error.exception.code, "PROVIDER_UNAVAILABLE")
+        await provider2.close()
 
 
 class HuggingFaceLocalProviderTests(unittest.IsolatedAsyncioTestCase):
