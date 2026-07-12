@@ -31,6 +31,16 @@ resources:
   max_loaded_local_models: auto
   scheduling_policy: adaptive
   allow_execution_waves: true
+# Selección adaptativa de modelos: reordena los candidatos elegibles según la
+# evidencia de model_invocations (fiabilidad, latencia, coste). Los pesos se
+# normalizan entre sí; con menos de min_invocations el modelo puntúa neutro.
+routing:
+  adaptive_selection: true
+  stats_window_days: 7
+  min_invocations: 3
+  success_weight: 0.5
+  latency_weight: 0.3
+  cost_weight: 0.2
 health:
   sqlite_interval_seconds: 10
   local_dependencies_interval_seconds: 30

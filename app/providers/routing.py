@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 from typing import Any
 
 from app.config import BrokerConfig, effective_max_parallel_invocations
+from app.model_stats import ModelKey, ModelStats
 from app.prompt_compressor import PromptCompressor
 from app.providers.base import (
     ROLE_SYSTEM_PROMPTS,
@@ -28,17 +31,23 @@ from app.schemas import (
     is_local_deployment,
 )
 
+logger = logging.getLogger("ai_broker.routing")
+
 
 class RoutedModelProvider:
     def __init__(self, config: BrokerConfig, *, ollama: OllamaProvider | None = None,
                  deepseek: DeepSeekProvider | None = None,
                  huggingface_local: HuggingFaceLocalProvider | None = None,
-                 custom: dict[str, OpenAICompatibleProvider] | None = None) -> None:
+                 custom: dict[str, OpenAICompatibleProvider] | None = None,
+                 stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None) -> None:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
         self.huggingface_local = huggingface_local or HuggingFaceLocalProvider(config.providers.huggingface_local)
         self.custom = custom if custom is not None else self._build_custom_providers(config)
+        # Evidencia operativa para la selección adaptativa (app.model_stats);
+        # sin loader el router mantiene el orden del catálogo.
+        self._stats_loader = stats_loader
         self._parallel_limit = effective_max_parallel_invocations(config)
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(self._parallel_limit)
@@ -221,6 +230,79 @@ class RoutedModelProvider:
                 "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
             }
 
+    def _rank_candidates(self, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Ordena los candidatos por score multiobjetivo (config.routing).
+
+        Componentes en [0, 1]: fiabilidad (tasa de éxito con suavizado de
+        Laplace), latencia y coste (normalizados min-max entre los candidatos
+        de esta selección; menor es mejor). Un modelo sin historial suficiente
+        puntúa neutro (0.5) en todo: el arranque en frío no castiga. El orden
+        es estable: a igualdad de score se conserva el orden del catálogo, así
+        que sin historial el comportamiento es idéntico al reparto clásico.
+        """
+        routing = self.config.routing
+        if not routing.adaptive_selection or self._stats_loader is None or len(catalog) < 2:
+            return catalog
+        try:
+            stats = self._stats_loader()
+        except Exception:
+            # La selección nunca debe caerse por un fallo leyendo métricas.
+            logger.warning("routing.stats_unavailable", exc_info=True)
+            return catalog
+        if not stats:
+            return catalog
+
+        def entry_key(entry: dict[str, Any]) -> ModelKey:
+            return (
+                str(entry.get("provider") or "").lower(),
+                str(entry.get("deployment") or "").lower(),
+                str(entry.get("name") or "").lower(),
+            )
+
+        def usable(entry: dict[str, Any]) -> ModelStats | None:
+            stat = stats.get(entry_key(entry))
+            if stat is None or stat.attempts < routing.min_invocations:
+                return None
+            return stat
+
+        def min_max_score(value: float | None, values: list[float]) -> float:
+            if value is None or not values:
+                return 0.5
+            low, high = min(values), max(values)
+            if high <= low:
+                return 0.5
+            # Invertido: menor latencia/coste puntúa más alto.
+            return 1.0 - (value - low) / (high - low)
+
+        latencies = [s.avg_latency_ms for e in catalog if (s := usable(e)) and s.avg_latency_ms is not None]
+        costs = [s.avg_cost_usd for e in catalog if (s := usable(e)) and s.avg_cost_usd is not None]
+        total_weight = routing.success_weight + routing.latency_weight + routing.cost_weight
+
+        def score(entry: dict[str, Any]) -> float:
+            stat = usable(entry)
+            if stat is None:
+                success_component = latency_component = cost_component = 0.5
+            else:
+                success_component = stat.success_rate
+                latency_component = min_max_score(stat.avg_latency_ms, latencies)
+                cost_component = min_max_score(stat.avg_cost_usd, costs)
+            return (
+                routing.success_weight * success_component
+                + routing.latency_weight * latency_component
+                + routing.cost_weight * cost_component
+            ) / total_weight
+
+        ranked = sorted(catalog, key=score, reverse=True)
+        if ranked != catalog:
+            logger.debug(
+                "routing.adaptive_ranking",
+                extra={
+                    "event": "routing.adaptive_ranking",
+                    "ranking": [f"{e['provider']}/{e['name']}:{score(e):.3f}" for e in ranked[:5]],
+                },
+            )
+        return ranked
+
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         allowed = {item.lower() for item in request.model_requirements.allowed_providers}
         catalog = [item for item in await self.models() if item["provider"].lower() in allowed]
@@ -239,6 +321,10 @@ class RoutedModelProvider:
             item for item in capability_catalog
             if context_fits_with_capped_output(request, item.get("context_window"))
         ]
+        # Selección adaptativa: reordena por evidencia operativa a los
+        # candidatos ya elegibles. target_model y preferred_model (más abajo)
+        # siguen teniendo prioridad absoluta sobre el score.
+        context_catalog = self._rank_candidates(context_catalog)
         target = request.model_requirements.target_model
         if target is not None:
             def matches_target(item: dict[str, Any]) -> bool:
@@ -433,5 +519,10 @@ class RoutedModelProvider:
             raise ProviderError("PROVIDER_UNAVAILABLE", f"Proveedor no soportado: {model.provider}")
 
 
-def build_provider(config: BrokerConfig):
-    return BootstrapModelProvider() if config.processing.provider_mode == "bootstrap" else RoutedModelProvider(config)
+def build_provider(
+    config: BrokerConfig,
+    stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
+):
+    if config.processing.provider_mode == "bootstrap":
+        return BootstrapModelProvider()
+    return RoutedModelProvider(config, stats_loader=stats_loader)
