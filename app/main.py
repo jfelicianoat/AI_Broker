@@ -29,6 +29,7 @@ from app.health import HealthCache, health_response
 from app.logging_config import configure_logging
 from app.maintenance import prune_terminal_task_artifacts, prune_terminal_task_events
 from app.model_catalog import model_availability_item, model_feature_profile
+from app.model_stats import load_model_stats
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
@@ -78,7 +79,12 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     repository = TaskRepository(db)
     dashboard_queries = DashboardQueryRepository(db)
     scheduler = ResourceScheduler(broker_config)
-    provider = build_provider(broker_config)
+    # La selección adaptativa lee la evidencia operativa de esta misma BD;
+    # el lambda difiere la consulta a cada selección (ventana configurable).
+    provider = build_provider(
+        broker_config,
+        stats_loader=lambda: load_model_stats(db, window_days=broker_config.routing.stats_window_days),
+    )
     coordinator = ConsensusCoordinator(db, scheduler, provider=provider)
 
     @asynccontextmanager

@@ -8,6 +8,8 @@ Cada push a `main` ejecuta el CI (GitHub Actions) en Windows y Ubuntu: Ruff, Myp
 
 Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2 disponible sobre los read models de 5.1. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings, admite destino exacto y aplica timeout global. `fast` es serial; `slow` puede lanzar proponentes concurrentes dentro de un solo workflow. El proveedor `bootstrap` queda reservado para pruebas.
 
+La selección de modelos es **adaptativa**: los candidatos que pasan los filtros (proveedor, privacidad cloud/local, capacidad, contexto) se reordenan por un score multiobjetivo — fiabilidad histórica (tasa de éxito con suavizado de Laplace), latencia y coste medios — calculado sobre la evidencia real de `model_invocations` en una ventana configurable (`routing:` en `broker_config.yaml`). Un modelo sin historial puntúa neutro (el arranque en frío no castiga) y `target_model`/`preferred_model` mantienen prioridad absoluta sobre el score.
+
 ## Stack
 
 | Capa | Tecnología |

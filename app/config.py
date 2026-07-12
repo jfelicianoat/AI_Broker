@@ -81,6 +81,32 @@ class ResourceConfig(BaseModel):
     allow_execution_waves: bool = True
 
 
+class RoutingConfig(BaseModel):
+    # Selección adaptativa: reordena los candidatos que ya pasaron los filtros
+    # (proveedor permitido, cloud, capacidad, contexto) según la evidencia
+    # operativa registrada en model_invocations. No altera qué modelos son
+    # elegibles, solo en qué orden se prefieren.
+    adaptive_selection: bool = True
+    # Ventana de histórico considerada: invocaciones más antiguas no pesan.
+    stats_window_days: int = Field(default=7, ge=1, le=365)
+    # Por debajo de este número de invocaciones el modelo puntúa neutro
+    # (arranque en frío): un modelo recién añadido nunca queda castigado.
+    min_invocations: int = Field(default=3, ge=1)
+    # Pesos del score multiobjetivo; se normalizan entre sí, así que solo
+    # importa su proporción. success = fiabilidad (tasa de éxito suavizada),
+    # latency y cost se normalizan min-max entre los candidatos de cada
+    # selección.
+    success_weight: float = Field(default=0.5, ge=0)
+    latency_weight: float = Field(default=0.3, ge=0)
+    cost_weight: float = Field(default=0.2, ge=0)
+
+    @model_validator(mode="after")
+    def validate_weights(self) -> RoutingConfig:
+        if self.success_weight + self.latency_weight + self.cost_weight <= 0:
+            raise ValueError("routing: al menos un peso debe ser mayor que cero")
+        return self
+
+
 class HealthConfig(BaseModel):
     # TTL de la caché de cada dependencia: /health y /health/ready reutilizan
     # el último resultado dentro del intervalo en vez de sondear en cada GET.
@@ -220,6 +246,7 @@ class BrokerConfig(BaseModel):
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     prompt_compression: PromptCompressionConfig = Field(default_factory=PromptCompressionConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
