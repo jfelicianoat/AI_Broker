@@ -41,6 +41,7 @@ from app.dashboard_forms import (
     _prompt_tester_impact,
     _validation_messages,
 )
+from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
@@ -49,6 +50,8 @@ from app.schemas import (
     DashboardResourcesResponse,
     DashboardTaskDetail,
     HealthResponse,
+    InferenceKind,
+    TaskCreateRequest,
     TaskStatus,
 )
 
@@ -106,21 +109,48 @@ def create_dashboard_router(
         except ProviderError as error:
             return [], f"{error.code}: catalogo no disponible"
 
+    def _config_page_context(
+        *,
+        cfg: BrokerConfig | None = None,
+        config_saved: bool = False,
+        config_errors: list[str] | None = None,
+        config_review: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "config": cfg if cfg is not None else config,
+            "config_saved": config_saved,
+            "config_errors": config_errors or [],
+            "config_review": config_review if config_review is not None else [],
+            "nav_active": "configuracion",
+        }
+
     @protected.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard(request: Request, config_saved: bool = False):
+    async def dashboard(request: Request):
         context: dict[str, Any] = {
             "summary": queries.summary(window_hours=24),
-            "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
+            "queue": queries.list_tasks(page=1, page_size=5, status=TaskStatus.queued, origin=None),
             "active": queries.active_task_detail(),
             "health": await health_loader(),
             "resources": await resources(),
-            "history": queries.list_terminal_tasks(page_size=20),
-            "config": config,
-            "config_saved": config_saved,
-            "config_errors": [],
-            "config_review": [],
+            "nav_active": "resumen",
         }
         return _template_response(request, "dashboard.html", context)
+
+    @protected.get("/dashboard/tasks", response_class=HTMLResponse)
+    async def tasks_page(request: Request):
+        return _template_response(
+            request,
+            "tasks.html",
+            {
+                "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
+                "history": queries.list_terminal_tasks(page_size=20),
+                "nav_active": "tareas",
+            },
+        )
+
+    @protected.get("/dashboard/config", response_class=HTMLResponse)
+    async def config_page(request: Request, config_saved: bool = False):
+        return _template_response(request, "config.html", _config_page_context(config_saved=config_saved))
 
     @protected.get("/dashboard/prompt-tester", response_class=HTMLResponse)
     async def prompt_tester(request: Request):
@@ -135,7 +165,9 @@ def create_dashboard_router(
                 "errors": [],
                 "request_preview": None,
                 "impact_preview": None,
+                "compression_preview": None,
                 "accepted": None,
+                "nav_active": "probador",
             },
         )
 
@@ -159,6 +191,7 @@ def create_dashboard_router(
                 "model_stats": _model_dashboard_stats(catalog, resource_snapshot),
                 "probeable_provider_ids": _probeable_provider_ids(config),
                 "model_probe": _model_probe_notice(model_probe, model_name, model_error),
+                "nav_active": "modelos",
             },
         )
 
@@ -185,22 +218,35 @@ def create_dashboard_router(
                 "tasks": tasks,
                 "selected": selected,
                 "comparison": comparison_view,
+                "nav_active": "comparacion",
             },
         )
 
-    @protected.get("/dashboard/tasks/{task_id}", response_class=HTMLResponse)
-    async def task_view(request: Request, task_id: str):
+    def _task_detail_context(task_id: str) -> dict[str, Any]:
         try:
             detail = queries.task_detail(task_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
+        return {
+            "detail": detail,
+            "task_result": _task_result_view(detail),
+            "terminal": detail.task.status.value in {"completed", "failed", "cancelled"},
+        }
+
+    @protected.get("/dashboard/tasks/{task_id}", response_class=HTMLResponse)
+    async def task_view(request: Request, task_id: str):
         return _template_response(
             request,
             "task_detail.html",
-            {
-                "detail": detail,
-                "task_result": _task_result_view(detail),
-            },
+            {**_task_detail_context(task_id), "nav_active": "tareas"},
+        )
+
+    @protected.get("/dashboard/fragments/task-detail/{task_id}", response_class=HTMLResponse)
+    async def task_detail_fragment(request: Request, task_id: str):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/task_detail_body.html",
+            context=_task_detail_context(task_id),
         )
 
     @protected.get("/dashboard/fragments/summary", response_class=HTMLResponse)
@@ -226,12 +272,43 @@ def create_dashboard_router(
             },
         )
 
+    @protected.get("/dashboard/fragments/queue-preview", response_class=HTMLResponse)
+    async def queue_preview_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/queue_preview.html",
+            context={
+                "queue": queries.list_tasks(
+                    page=1,
+                    page_size=5,
+                    status=TaskStatus.queued,
+                    origin=None,
+                )
+            },
+        )
+
     @protected.get("/dashboard/fragments/active", response_class=HTMLResponse)
     async def active_fragment(request: Request):
         return templates.TemplateResponse(
             request=request,
             name="fragments/active.html",
             context={"active": queries.active_task_detail()},
+        )
+
+    @protected.get("/dashboard/fragments/task-status/{task_id}", response_class=HTMLResponse)
+    async def task_status_fragment(request: Request, task_id: str):
+        try:
+            detail = queries.task_detail(task_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/task_status.html",
+            context={
+                "task": detail.task,
+                "progress": detail.progress,
+                "terminal": detail.task.status.value in {"completed", "failed", "cancelled"},
+            },
         )
 
     @protected.get("/dashboard/fragments/health", response_class=HTMLResponse)
@@ -280,19 +357,11 @@ def create_dashboard_router(
         try:
             updated = _build_dashboard_config(config, form)
             if form.get("config_action") == "validate":
-                context: dict[str, Any] = {
-                    "summary": queries.summary(window_hours=24),
-                    "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
-                    "active": queries.active_task_detail(),
-                    "health": await health_loader(),
-                    "resources": await resources(),
-                    "history": queries.list_terminal_tasks(page_size=20),
-                    "config": updated,
-                    "config_saved": False,
-                    "config_errors": [],
-                    "config_review": _config_review_items(config, updated),
-                }
-                return _template_response(request, "dashboard.html", context)
+                return _template_response(
+                    request,
+                    "config.html",
+                    _config_page_context(cfg=updated, config_review=_config_review_items(config, updated)),
+                )
             save_config(updated, config_path)
             _apply_config_update(config, updated)
             if hasattr(provider, "reload_config"):
@@ -302,20 +371,8 @@ def create_dashboard_router(
         except ValidationError as error:
             errors.extend(_validation_messages(error))
         if errors:
-            context = {
-                "summary": queries.summary(window_hours=24),
-                "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
-                "active": queries.active_task_detail(),
-                "health": await health_loader(),
-                "resources": await resources(),
-                "history": queries.list_terminal_tasks(page_size=20),
-                "config": config,
-                "config_saved": False,
-                "config_errors": errors,
-                "config_review": [],
-            }
-            return _template_response(request, "dashboard.html", context)
-        return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
+            return _template_response(request, "config.html", _config_page_context(config_errors=errors))
+        return RedirectResponse("/dashboard/config?config_saved=true", status_code=303)
 
     @protected.post("/dashboard/actions/providers/{provider_id}/probe", response_class=HTMLResponse)
     async def probe_provider_models(request: Request, provider_id: str):
@@ -387,20 +444,8 @@ def create_dashboard_router(
                 "updated_at": _utc_now().isoformat(),
             }
         if errors:
-            context: dict[str, Any] = {
-                "summary": queries.summary(window_hours=24),
-                "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
-                "active": queries.active_task_detail(),
-                "health": await health_loader(),
-                "resources": await resources(),
-                "history": queries.list_terminal_tasks(page_size=20),
-                "config": config,
-                "config_saved": False,
-                "config_errors": errors,
-                "config_review": [],
-            }
-            return _template_response(request, "dashboard.html", context)
-        return RedirectResponse("/dashboard?config_saved=true#config-panel", status_code=303)
+            return _template_response(request, "config.html", _config_page_context(config_errors=errors))
+        return RedirectResponse("/dashboard/config?config_saved=true", status_code=303)
 
     @protected.get("/dashboard/actions/providers/{provider_id}/probe/progress")
     async def probe_provider_progress(request: Request, provider_id: str, progress_id: str) -> dict[str, Any]:
@@ -473,10 +518,12 @@ def create_dashboard_router(
         accepted = None
         request_preview = None
         impact_preview = None
+        compression_preview = None
         try:
             payload = _build_prompt_tester_request(form)
             request_preview = payload.model_dump(mode="json")
             impact_preview = _prompt_tester_impact(payload)
+            compression_preview = _compression_preview(config, payload)
             if action == "enqueue":
                 task, created = repository.create_task(
                     payload,
@@ -509,7 +556,9 @@ def create_dashboard_router(
                 "errors": errors,
                 "request_preview": request_preview,
                 "impact_preview": impact_preview,
+                "compression_preview": compression_preview,
                 "accepted": accepted,
+                "nav_active": "probador",
             },
         )
 
@@ -580,16 +629,21 @@ def create_dashboard_router(
     @protected.post("/dashboard/actions/queue/{task_id}/{direction}", status_code=204)
     async def move_task(request: Request, task_id: str, direction: str) -> Response:
         _verify_dashboard_mutation(request)
-        if direction not in {"up", "down"}:
+        if direction not in {"up", "down", "top"}:
             raise HTTPException(status_code=422, detail="INVALID_DIRECTION")
         ids = [item.task_id for item in repository.list_queue().pending]
         if task_id not in ids:
             raise HTTPException(status_code=409, detail="TASK_NOT_QUEUED")
         index = ids.index(task_id)
-        target = index - 1 if direction == "up" else index + 1
-        if 0 <= target < len(ids):
-            ids[index], ids[target] = ids[target], ids[index]
-            repository.reorder_queue(ids)
+        if direction == "top":
+            if index > 0:
+                ids.insert(0, ids.pop(index))
+                repository.reorder_queue(ids)
+        else:
+            target = index - 1 if direction == "up" else index + 1
+            if 0 <= target < len(ids):
+                ids[index], ids[target] = ids[target], ids[index]
+                repository.reorder_queue(ids)
         return Response(status_code=204, headers={"HX-Trigger": "dashboard-refresh"})
 
     router = APIRouter()
@@ -650,6 +704,31 @@ async def _read_urlencoded_form(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
     parsed = parse_qs(body, keep_blank_values=True)
     return {key: values[-1] for key, values in parsed.items() if values}
+
+
+def _compression_preview(config: BrokerConfig, payload: TaskCreateRequest) -> dict[str, Any] | None:
+    """Vista previa fiel de la reducción de prompt: mismo compresor y misma
+    regla que el router (los embeddings nunca se comprimen)."""
+    if payload.inference_kind == InferenceKind.embedding:
+        return None
+    settings = config.prompt_compression
+    compressor = PromptCompressor(
+        enabled=settings.enabled,
+        level=settings.level,
+        min_chars=settings.min_chars,
+    )
+    result = compressor.compress(payload.content.prompt)
+    applied = result.applied and result.compressed_chars < result.original_chars
+    return {
+        "enabled": settings.enabled,
+        "level": settings.level,
+        "min_chars": settings.min_chars,
+        "applied": applied,
+        "original_chars": result.original_chars,
+        "compressed_chars": result.compressed_chars,
+        "saved_percent": round((1 - result.ratio) * 100, 1),
+        "text": result.text,
+    }
 
 
 def _model_dashboard_stats(

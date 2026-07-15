@@ -452,6 +452,7 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
 
         token = dashboard_csrf(client)
         page = client.get("/dashboard")
+        tasks_page = client.get("/dashboard/tasks")
         fragment = client.get("/dashboard/fragments/queue")
         moved = client.post(
             f"/dashboard/actions/queue/{second['task_id']}/up",
@@ -467,10 +468,12 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
 
     assert page.status_code == 200
     assert "Panel operativo" in page.text
-    assert "Cola de tareas" in page.text
-    assert "Historial" in page.text
+    assert "queue-preview-panel" in page.text
     assert "Coste real" in page.text
     assert "data-refresh-pauseable" in page.text
+    assert tasks_page.status_code == 200
+    assert "Cola de tareas" in tasks_page.text
+    assert "Historial" in tasks_page.text
     assert fragment.status_code == 200
     assert first["task_id"] in fragment.text
     assert f"Cancelar tarea {first['task_id']}?" in fragment.text
@@ -518,7 +521,7 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     )
     with TestClient(create_app(config, config_path=config_path)) as client:
         token = dashboard_csrf(client)
-        page = client.get("/dashboard")
+        page = client.get("/dashboard/config")
         response = client.post(
             "/dashboard/actions/config",
             data={
@@ -535,9 +538,9 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
 
     saved = load_config(config_path)
     assert page.status_code == 200
-    assert "Configuracion" in page.text
+    assert "Configuración" in page.text
     assert response.status_code == 200
-    assert "Configuracion guardada" in response.text
+    assert "Configuración guardada" in response.text
     assert config.processing.task_timeout_seconds == 900
     assert config.processing.max_parallel_invocations == 3
     assert config.processing.queue_max_size == 250
@@ -572,7 +575,7 @@ def test_dashboard_configuration_can_be_reviewed_without_saving(tmp_path: Path) 
         )
 
     assert response.status_code == 200
-    assert "Revision lista; no se ha guardado nada" in response.text
+    assert "Revisión lista; no se ha guardado nada" in response.text
     assert "Timeout global por tarea" in response.text
     assert config.processing.task_timeout_seconds != 900
     assert not config_path.exists()
@@ -626,9 +629,11 @@ def test_dashboard_views_render_and_validate_task_kind(tmp_path: Path) -> None:
         assert client.get("/dashboard/prompt-tester").status_code == 200
         assert client.get("/dashboard/models").status_code == 200
         assert client.get("/dashboard/comparison").status_code == 200
+        assert client.get("/dashboard/tasks").status_code == 200
+        assert client.get("/dashboard/config").status_code == 200
         assert client.get(f"/dashboard/comparison?task_id={mixture['task_id']}").status_code == 200
         assert client.get(f"/dashboard/tasks/{mixture['task_id']}").status_code == 200
-        for fragment in ("summary", "queue", "active", "health", "resources", "history", "config"):
+        for fragment in ("summary", "queue", "queue-preview", "active", "health", "resources", "history", "config"):
             assert client.get(f"/dashboard/fragments/{fragment}").status_code == 200, fragment
 
         # La comparación solo aplica a consensos; una single devuelve 422.
@@ -1195,7 +1200,7 @@ def test_models_dashboard_has_dedicated_screen_and_navigation(tmp_path: Path) ->
     assert 'href="/dashboard/models">Modelos' in dashboard.text
     assert 'href="/dashboard/models">Modelos' in tester.text
     assert 'href="#resources-panel">Modelos' not in dashboard.text
-    assert "Catalogo operativo" in models.text
+    assert "Catálogo operativo" in models.text
     assert "Runtime local" in models.text
 
 
@@ -1246,7 +1251,7 @@ def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Tarea encolada" in response.text
     assert "Impacto operativo validado" in response.text
-    assert "single/fast - 1 invocacion" in response.text
+    assert "single/fast - 1 invocación(es)" in response.text
     assert "Cloud bloqueado - fallback bloqueado" in response.text
     assert f"/dashboard/tasks/{queue['pending'][0]['task_id']}" in response.text
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in response.text
@@ -1295,6 +1300,140 @@ def test_prompt_tester_enqueues_manual_mixture(tmp_path: Path) -> None:
     assert request["execution"]["selection"]["allow_substitution"] is False
     assert [item["role"] for item in request["execution"]["selection"]["proposers"]] == ["architect", "reviewer"]
     assert request["execution"]["selection"]["arbiter"]["model"] == "bootstrap-single"
+
+
+def test_prompt_tester_shows_compression_preview(tmp_path: Path) -> None:
+    model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
+        response = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "action": "validate",
+                "csrf_token": token,
+                "input_mode": "prompt",
+                "prompt": "Hola, por favor, ¿podrías resumir este documento tan largo? Muchas gracias de antemano.",
+                "strategy": "single",
+                "single_model": model_value,
+            },
+        )
+        short = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                "action": "validate",
+                "csrf_token": token,
+                "input_mode": "prompt",
+                "prompt": "Resumen corto",
+                "strategy": "single",
+                "single_model": model_value,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "Reducción del prompt" in response.text
+    assert "Prompt reducido" in response.text
+    assert "caracteres con nivel" in response.text
+    assert short.status_code == 200
+    # Bajo el mínimo configurado no se reduce, y el panel lo explica.
+    assert "no llega al mínimo" in short.text
+
+
+def test_prompt_tester_hides_incompatible_models_from_mixture_selectors(tmp_path: Path, monkeypatch) -> None:
+    async def catalog_with_incompatible(self):
+        def entry(name: str, compatibility: str) -> dict:
+            return {
+                "name": name,
+                "provider": "ollama",
+                "deployment": "bootstrap",
+                "status": "available",
+                "context_window": 1000,
+                "capabilities": ["completion"],
+                "compatibility": compatibility,
+                "compatibility_checked_at": None,
+                "compatibility_error": None,
+            }
+
+        return [entry("apto", "compatible"), entry("vetado", "incompatible"), entry("pendiente", "unknown")]
+
+    monkeypatch.setattr(BootstrapModelProvider, "models", catalog_with_incompatible)
+    with make_client(tmp_path) as client:
+        page = client.get("/dashboard/prompt-tester").text
+
+    single_select = page.split('name="single_model"')[1].split("</select>")[0]
+    proposer_select = page.split('name="proposer_model_1"')[1].split("</select>")[0]
+    arbiter_select = page.split('name="arbiter_model"')[1].split("</select>")[0]
+    # El modelo único admite cualquier modelo, incluso los vetados para mixture.
+    assert "vetado" in single_select
+    # Proponentes y árbitro no ofrecen modelos incompatibles con mixture.
+    assert "vetado" not in proposer_select
+    assert "vetado" not in arbiter_select
+    assert "apto" in proposer_select
+    assert "apto" in arbiter_select
+    # Los pendientes de analizar siguen disponibles con su marcador.
+    assert "pendiente" in arbiter_select
+
+
+def test_queue_move_to_top(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        ids = [
+            client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": f"top:{index}", "content": {"prompt": f"Tarea {index}"}},
+            ).json()["task_id"]
+            for index in range(3)
+        ]
+        token = dashboard_csrf(client)
+        moved = client.post(
+            f"/dashboard/actions/queue/{ids[2]}/top",
+            headers={"X-CSRF-Token": token},
+        )
+        pending = client.get("/api/v1/queue").json()["pending"]
+
+    assert moved.status_code == 204
+    assert [item["task_id"] for item in pending] == [ids[2], ids[0], ids[1]]
+
+
+def test_task_detail_page_polls_via_fragment_until_terminal(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "detail:poll", "content": {"prompt": "Detalle en vivo"}},
+        ).json()
+        pending_page = client.get(f"/dashboard/tasks/{created['task_id']}")
+        pending_fragment = client.get(f"/dashboard/fragments/task-detail/{created['task_id']}")
+        client.post("/api/v1/dispatcher/tick")
+        finished_page = client.get(f"/dashboard/tasks/{created['task_id']}")
+        missing = client.get("/dashboard/fragments/task-detail/task_inexistente")
+
+    assert pending_page.status_code == 200
+    # El meta refresh desapareció: el refresco es por fragmento HTMX.
+    assert "http-equiv" not in pending_page.text
+    assert f"/dashboard/fragments/task-detail/{created['task_id']}" in pending_page.text
+    assert pending_fragment.status_code == 200
+    assert "task-detail-panel" in pending_fragment.text
+    # Terminal: la página deja de sondear.
+    assert finished_page.status_code == 200
+    assert "/dashboard/fragments/task-detail/" not in finished_page.text
+    assert missing.status_code == 404
+
+
+def test_task_status_fragment_polls_until_terminal(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "status:fragment", "content": {"prompt": "Estado en vivo"}},
+        ).json()
+        queued = client.get(f"/dashboard/fragments/task-status/{created['task_id']}")
+        client.post("/api/v1/dispatcher/tick")
+        finished = client.get(f"/dashboard/fragments/task-status/{created['task_id']}")
+        missing = client.get("/dashboard/fragments/task-status/task_inexistente")
+
+    assert queued.status_code == 200
+    assert "hx-get" in queued.text  # sigue sondeando mientras no es terminal
+    assert finished.status_code == 200
+    assert "hx-get" not in finished.text  # terminal: el fragmento deja de sondear
+    assert "Ver resultado" in finished.text
+    assert missing.status_code == 404
 
 
 def test_prompt_tester_rejects_cloud_models_when_cloud_is_not_allowed(tmp_path: Path) -> None:

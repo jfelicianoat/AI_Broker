@@ -1,0 +1,113 @@
+<div id="task-detail-panel"
+     {% if not terminal %}
+     hx-get="/dashboard/fragments/task-detail/{{ detail.task.task_id }}"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     data-refresh-pauseable
+     {% endif %}>
+  {% if detail.error %}
+    <div class="alert danger">
+      <strong>{{ task_result.error_code or 'Error' }}</strong>
+      {% if task_result.error_model %}
+        <p>{{ task_result.error_stage or 'fase desconocida' }} · {{ task_result.error_role or 'modelo' }} · {{ task_result.error_provider }}/{{ task_result.error_deployment }}/{{ task_result.error_model }}</p>
+      {% endif %}
+      <p>{{ task_result.error_message }}</p>
+    </div>
+  {% endif %}
+  {% if task_result.skipped_proposers %}
+    <div class="alert warning">
+      <strong>Modelos omitidos durante el consenso</strong>
+      <p>La tarea continuó porque había quórum suficiente, pero estos modelos fallaron y no aportaron propuesta.</p>
+      <ul>
+        {% for item in task_result.skipped_proposers %}
+          <li>
+            {{ item.role or 'proposer' }} - {{ item.provider }}/{{ item.deployment }}/{{ item.model }}
+            {% if item.code %}- {{ item.code }}{% endif %}
+            {% if item.message %}: {{ item.message }}{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% elif task_result.warnings %}
+    <div class="alert warning">
+      <strong>Avisos del consenso</strong>
+      <ul>
+        {% for warning in task_result.warnings %}
+          <li>{{ warning }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <section class="task-detail-grid">
+    <article class="panel task-result-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Resultado final</h2>
+          <p>{{ detail.task.invocations }} / {{ task_result.expected_invocations }} invocaciones registradas</p>
+        </div>
+        <span class="badge badge-{{ detail.task.status.value }}">{{ detail.task.status|status_label }}</span>
+      </div>
+      {% if task_result.assistant_content %}
+        <pre class="result-output">{{ task_result.assistant_content }}</pre>
+      {% elif not terminal %}
+        <div class="empty-state">
+          <strong>Tarea en curso</strong>
+          <p>Esta vista se actualiza sola cada 5 segundos hasta que la tarea termine.</p>
+        </div>
+      {% else %}
+        <div class="empty-state">
+          <strong>Sin resultado final</strong>
+          <p>La tarea no llegó a persistir una respuesta final.</p>
+        </div>
+      {% endif %}
+    </article>
+
+    <aside class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Resumen técnico</h2>
+          <p>{{ detail.task.updated_at|short_date }}</p>
+        </div>
+      </div>
+      <dl class="detail-list">
+        <div><dt>Estado</dt><dd>{{ detail.task.status|status_label }}</dd></div>
+        <div><dt>Fase</dt><dd>{{ detail.progress.get('phase', detail.task.status.value)|status_label }}</dd></div>
+        {% if task_result.error_model %}
+          <div><dt>Modelo fallido</dt><dd>{{ task_result.error_provider }}/{{ task_result.error_deployment }}/{{ task_result.error_model }}</dd></div>
+          <div><dt>Rol fallido</dt><dd>{{ task_result.error_role or 'N/D' }}</dd></div>
+        {% endif %}
+        <div><dt>Estrategia</dt><dd>{{ detail.task.execution_strategy.value }}/{{ detail.task.execution_preset.value }}</dd></div>
+        <div><dt>Tokens salida</dt><dd>{{ detail.task.tokens_output }}</dd></div>
+        <div><dt>Coste</dt><dd>${{ '%.4f'|format(detail.task.cost_actual_usd) }}</dd></div>
+      </dl>
+    </aside>
+  </section>
+
+  <section class="panel invocation-panel">
+    <div class="panel-heading">
+      <div>
+        <h2>Invocaciones</h2>
+        <p>Modelos ejecutados para esta tarea.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Rol</th><th>Modelo</th><th>Estado</th><th>Latencia</th><th>Tokens</th></tr>
+        </thead>
+        <tbody>
+          {% for item in detail.invocations %}
+          <tr>
+            <td>{{ item.role }}</td>
+            <td>{{ item.provider }}/{{ item.deployment }}/{{ item.model }}</td>
+            <td><span class="badge badge-{{ item.status }}">{{ item.status }}</span></td>
+            <td>{{ item.latency_ms|ms }}</td>
+            <td>{{ item.tokens_input }} / {{ item.tokens_output }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>

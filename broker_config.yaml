@@ -6,6 +6,7 @@ server:
   admin_token_env: AI_BROKER_ADMIN_TOKEN
   admin_keyring_service: ai-broker
   admin_keyring_username: dashboard_admin_token
+  allow_unauthenticated_lan: false
 persistence:
   database: state/broker.db
   journal_mode: WAL
@@ -31,9 +32,6 @@ resources:
   max_loaded_local_models: auto
   scheduling_policy: adaptive
   allow_execution_waves: true
-# Selección adaptativa de modelos: reordena los candidatos elegibles según la
-# evidencia de model_invocations (fiabilidad, latencia, coste). Los pesos se
-# normalizan entre sí; con menos de min_invocations el modelo puntúa neutro.
 routing:
   adaptive_selection: true
   stats_window_days: 7
@@ -46,6 +44,7 @@ health:
   local_dependencies_interval_seconds: 30
   external_providers_interval_seconds: 300
   disk_free_alert_gb: 10
+  probe_timeout_seconds: 5.0
 logging:
   level: INFO
   directory: logs
@@ -111,7 +110,7 @@ providers:
       capabilities:
       - completion
       compatibility: compatible
-      compatibility_checked_at: '2026-06-29T21:13:09.917539+00:00'
+      compatibility_checked_at: '2026-07-15T18:16:01.592810+00:00'
       compatibility_error: null
     - name: nvidia/nemotron-3-nano-omni
       context_window: 32768
@@ -169,7 +168,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-07-01T18:32:25.068529+00:00'
+      compatibility_checked_at: '2026-07-15T18:16:34.148816+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''23bd454d-b225-49a3-8118-582a62fc51b8'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -1114,36 +1113,40 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:31:23.375160+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
     - name: nvidia/nv-embedcode-7b-v1
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:31:25.529576+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
     - name: nvidia/nv-embedqa-e5-v5
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:31:27.073481+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
     - name: nvidia/nv-embedqa-mistral-7b-v2
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:31:28.461804+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
     - name: nvidia/nvclip
       context_window: 128000
       input_cost_per_million: 0.0
@@ -1227,9 +1230,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:31:37.550474+00:00'
+      compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"error":{"message":"invalid type: unit variant, expected newtype variant
+        at line 1 column 40","type":"Internal Server Error","code":500}}'
     - name: qwen/qwen3.5-397b-a17b
       context_window: 128000
       input_cost_per_million: 0.0
@@ -1245,8 +1250,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-15T16:31:41.756378+00:00'
       compatibility_error: null
     - name: snowflake/arctic-embed-l
       context_window: 128000
@@ -1254,17 +1259,18 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:31:49.799289+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        404 page not found'
     - name: stepfun-ai/step-3.5-flash
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-15T16:31:51.675365+00:00'
       compatibility_error: null
     - name: stepfun-ai/step-3.7-flash
       context_window: 128000
@@ -1272,8 +1278,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-15T16:31:59.952008+00:00'
       compatibility_error: null
     - name: stockmark/stockmark-2-100b-instruct
       context_window: 128000
@@ -1290,8 +1296,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-15T16:32:02.556224+00:00'
       compatibility_error: null
     - name: writer/palmyra-creative-122b
       context_window: 128000
@@ -1299,36 +1305,44 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:32:04.845932+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''00bdd0a7-e38f-4423-9007-c4d8730a3f78'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: writer/palmyra-fin-70b-32k
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:32:09.139629+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''316490c6-f1ed-41f9-9da8-3fa9e885653b'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: writer/palmyra-med-70b
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:32:13.412524+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''aab71274-5281-4941-b0b8-20f339d1fc7e'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: writer/palmyra-med-70b-32k
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:32:15.942915+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''d6faa974-3591-49a4-963d-97221d074b2e'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: z-ai/glm-5.1
       context_window: 128000
       input_cost_per_million: 0.0
@@ -1344,15 +1358,17 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T17:46:50.469046+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
+        {"status":404,"title":"Not Found","detail":"Function ''8378ffb2-51b0-4140-9684-dda1889373e6'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
     - name: z-ai/glm-5.2
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-15T16:32:17.920382+00:00'
+      compatibility_error: ''

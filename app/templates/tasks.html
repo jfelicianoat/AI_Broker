@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+
+{% block title %}AI Broker — Tareas{% endblock %}
+
+{% block topbar_state %}
+  <div>
+    <strong>Tareas</strong>
+    <small>Cola pendiente e historial de tareas finalizadas.</small>
+  </div>
+{% endblock %}
+
+{% block topbar_actions %}
+  <a class="button" href="/dashboard/prompt-tester">Nueva prueba</a>
+{% endblock %}
+
+{% block content %}
+  <section class="tasks-stack">
+    {% include 'fragments/queue.html' %}
+    {% include 'fragments/history.html' %}
+  </section>
+{% endblock %}

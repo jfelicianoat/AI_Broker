@@ -12,7 +12,7 @@
     {% if active %}<span class="badge badge-active">{{ active.task.status|status_label }}</span>{% endif %}
   </div>
   {% if active %}
-    <p class="panel-note">Estado persistido de la tarea; las metricas finales aparecen al cerrar cada invocacion.</p>
+    <p class="panel-note">Estado persistido de la tarea; las métricas finales aparecen al cerrar cada invocación.</p>
     <dl class="detail-list">
       <div><dt>ID de tarea</dt><dd>{{ active.task.task_id }}</dd></div>
       <div><dt>Estrategia</dt><dd>{{ active.task.execution_strategy.value }}/{{ active.task.execution_preset.value }}</dd></div>
@@ -60,7 +60,7 @@
   {% else %}
     <div class="empty-state tall">
       <strong>Sin tarea activa</strong>
-      <p>El dispatcher tomara la siguiente tarea pendiente automaticamente.</p>
+      <p>El dispatcher tomará la siguiente tarea pendiente automáticamente.</p>
     </div>
   {% endif %}
 </div>

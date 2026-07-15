@@ -1,104 +1,33 @@
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>AI Broker — Panel operativo</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script src="/static/dashboard.js" defer></script>
-</head>
-<body>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Navegación principal">
-      <a class="brand" href="/dashboard">AI Broker</a>
-      <nav class="nav-list">
-        <a class="nav-item active" href="#resumen">Resumen</a>
-        <a class="nav-item" href="#queue-panel">Cola</a>
-        <a class="nav-item" href="/dashboard/prompt-tester">Probador <small>Fase 5.3</small></a>
-        <a class="nav-item" href="/dashboard/comparison">Comparación <small>Fase 5.4</small></a>
-        <a class="nav-item" href="/dashboard/models">Modelos</a>
-        <a class="nav-item" href="#health-panel">Salud</a>
-        <a class="nav-item" href="#history-panel">Historial</a>
-        <a class="nav-item" href="#config-panel">Configuración</a>
-      </nav>
-      <div class="sidebar-foot">
-        <span>Contrato 2.1</span>
-        <span>1 workflow activo</span>
-      </div>
-    </aside>
+{% extends 'base.html' %}
 
-    <div class="workspace">
-      <header class="topbar">
-        <div class="service-state">
-          <span class="status-dot status-{{ health.status }}"></span>
-          <div>
-            <strong>Servicio {{ 'operativo' if health.status == 'healthy' else health.status }}</strong>
-            <small>Comprobado a las {{ health.checked_at|short_time }}</small>
-          </div>
-        </div>
-        <div class="topbar-actions">
-          <span class="endpoint">127.0.0.1:8080</span>
-          <button class="button secondary" type="button" data-refresh-dashboard>Actualizar</button>
-        </div>
-      </header>
+{% block title %}AI Broker — Panel operativo{% endblock %}
 
-      <main class="content" id="resumen">
-        <section id="summary-panel"
-                 hx-get="/dashboard/fragments/summary"
-                 hx-trigger="every 10s"
-                 hx-swap="innerHTML"
-                 data-refresh-pauseable>
-          {% include 'fragments/summary.html' %}
-        </section>
-
-        <section class="main-grid">
-          <div id="queue-panel"
-               class="panel queue-panel"
-               hx-get="/dashboard/fragments/queue"
-               hx-trigger="every 5s"
-               hx-swap="outerHTML"
-               data-refresh-pauseable>
-            {% include 'fragments/queue.html' %}
-          </div>
-
-          <div id="active-panel"
-               class="panel active-panel"
-               hx-get="/dashboard/fragments/active"
-               hx-trigger="every 3s"
-               hx-swap="outerHTML"
-               data-refresh-pauseable>
-            {% include 'fragments/active.html' %}
-          </div>
-
-          <div id="health-panel"
-               class="panel health-panel"
-               hx-get="/dashboard/fragments/health"
-               hx-trigger="every 30s"
-               hx-swap="outerHTML"
-               data-refresh-pauseable>
-            {% include 'fragments/health.html' %}
-          </div>
-
-          <div id="resources-panel"
-               class="panel resources-panel"
-               hx-get="/dashboard/fragments/resources"
-               hx-trigger="every 10s"
-               hx-swap="outerHTML"
-               data-refresh-pauseable>
-            {% include 'fragments/resources.html' %}
-          </div>
-
-          <div id="config-panel" class="panel config-panel">
-            {% include 'fragments/config.html' %}
-          </div>
-
-          {% include 'fragments/history.html' %}
-        </section>
-      </main>
-    </div>
+{% block topbar_state %}
+  <span class="status-dot status-{{ health.status }}"></span>
+  <div>
+    <strong>Servicio {{ 'operativo' if health.status == 'healthy' else health.status }}</strong>
+    <small>Comprobado a las {{ health.checked_at|short_time }}</small>
   </div>
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-</body>
-</html>
+{% endblock %}
+
+{% block topbar_actions %}
+  <span class="endpoint">{{ request.url.netloc }}</span>
+  <button class="button secondary" type="button" data-refresh-dashboard>Actualizar</button>
+{% endblock %}
+
+{% block content %}
+  <section id="summary-panel"
+           hx-get="/dashboard/fragments/summary"
+           hx-trigger="every 10s"
+           hx-swap="innerHTML"
+           data-refresh-pauseable>
+    {% include 'fragments/summary.html' %}
+  </section>
+
+  <section class="main-grid">
+    {% include 'fragments/active.html' %}
+    {% include 'fragments/queue_preview.html' %}
+    {% include 'fragments/health.html' %}
+    {% include 'fragments/resources.html' %}
+  </section>
+{% endblock %}

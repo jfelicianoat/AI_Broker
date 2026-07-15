@@ -1,0 +1,42 @@
+<div id="queue-preview-panel"
+     class="panel queue-preview-panel"
+     hx-get="/dashboard/fragments/queue-preview"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     data-refresh-pauseable>
+  <div class="panel-heading">
+    <div>
+      <h2>Cola</h2>
+      <p>{{ queue.total }} pendientes</p>
+    </div>
+    <a class="button secondary compact" href="/dashboard/tasks">Ver todas</a>
+  </div>
+  {% if queue.items %}
+    <div class="queue-preview-list">
+      {% for task in queue.items %}
+        <div class="queue-preview-row">
+          <span class="position">{{ task.queue_position or '-' }}</span>
+          <span class="queue-preview-id">
+            <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+            <small>
+              {% if task.requested_model %}
+                {{ task.requested_model.model }}
+              {% else %}
+                {{ task.execution_strategy.value }}/{{ task.execution_preset.value }}
+              {% endif %}
+            </small>
+          </span>
+          <span class="badge badge-queued">{{ task.status|status_label }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    {% if queue.total > queue.items|length %}
+      <div class="empty-inline">y {{ queue.total - queue.items|length }} tareas más en cola</div>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">
+      <strong>La cola está vacía</strong>
+      <p>Las nuevas tareas aparecerán aquí al ser aceptadas.</p>
+    </div>
+  {% endif %}
+</div>
