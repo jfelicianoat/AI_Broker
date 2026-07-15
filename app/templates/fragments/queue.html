@@ -29,7 +29,7 @@
         <tr>
           <td class="position">{{ task.queue_position or '-' }}</td>
           <td>
-            <a class="task-link" href="/api/v1/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+            <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
             <small>{{ task.origin or 'api' }}</small>
           </td>
           <td>
@@ -37,13 +37,16 @@
               <span>{{ task.requested_model.model }}</span>
               <small>{{ task.requested_model.provider }}/{{ task.requested_model.deployment }}</small>
             {% else %}
-              <span>Enrutamiento automatico</span>
+              <span>Enrutamiento automático</span>
               <small>{{ task.execution_strategy.value }}/{{ task.execution_preset.value }}</small>
             {% endif %}
           </td>
           <td>{{ task.created_at|short_date }}</td>
           <td><span class="badge badge-queued">{{ task.status|status_label }}</span></td>
           <td class="align-right actions">
+            <button class="link-button" type="button"
+                    hx-post="/dashboard/actions/queue/{{ task.task_id }}/top"
+                    aria-label="Mover tarea {{ task.task_id }} al principio">Al principio</button>
             <button class="link-button" type="button"
                     hx-post="/dashboard/actions/queue/{{ task.task_id }}/up"
                     aria-label="Subir tarea {{ task.task_id }}">Subir</button>
@@ -61,8 +64,8 @@
   </div>
   {% else %}
     <div class="empty-state">
-      <strong>La cola esta vacia</strong>
-      <p>Las nuevas tareas apareceran aqui al ser aceptadas.</p>
+      <strong>La cola está vacía</strong>
+      <p>Las nuevas tareas aparecerán aquí al ser aceptadas.</p>
     </div>
   {% endif %}
 </div>

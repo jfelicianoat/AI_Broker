@@ -1,0 +1,13 @@
+<div id="task-status-panel"
+     class="task-status"
+     {% if not terminal %}
+     hx-get="/dashboard/fragments/task-status/{{ task.task_id }}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+  <span>{{ progress.get('invocations_completed', 0) }} / {{ progress.get('invocations_total', '-') }} invocaciones · fase {{ progress.get('phase', task.status.value)|status_label }}</span>
+  {% if terminal %}
+    <a class="button secondary compact" href="/dashboard/tasks/{{ task.task_id }}">Ver resultado</a>
+  {% endif %}
+</div>

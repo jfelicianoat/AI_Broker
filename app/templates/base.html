@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  {% block head_extra %}{% endblock %}
+  <title>{% block title %}AI Broker{% endblock %}</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navegación principal">
+      <a class="brand" href="/dashboard">AI Broker</a>
+      {% set nav = nav_active|default('') %}
+      <nav class="nav-list">
+        <a class="nav-item{% if nav == 'resumen' %} active{% endif %}" href="/dashboard">Resumen</a>
+        <a class="nav-item{% if nav == 'tareas' %} active{% endif %}" href="/dashboard/tasks">Tareas</a>
+        <a class="nav-item{% if nav == 'probador' %} active{% endif %}" href="/dashboard/prompt-tester">Probador</a>
+        <a class="nav-item{% if nav == 'comparacion' %} active{% endif %}" href="/dashboard/comparison">Comparación</a>
+        <a class="nav-item{% if nav == 'modelos' %} active{% endif %}" href="/dashboard/models">Modelos</a>
+        <a class="nav-item{% if nav == 'configuracion' %} active{% endif %}" href="/dashboard/config">Configuración</a>
+      </nav>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="service-state">
+          {% block topbar_state %}{% endblock %}
+        </div>
+        <div class="topbar-actions">
+          {% block topbar_actions %}{% endblock %}
+        </div>
+      </header>
+
+      <main class="content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

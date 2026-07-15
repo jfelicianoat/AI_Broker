@@ -1,48 +1,31 @@
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>AI Broker — Probador de Prompts</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script src="/static/dashboard.js" defer></script>
-</head>
-<body>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Navegación principal">
-      <a class="brand" href="/dashboard">AI Broker</a>
-      <nav class="nav-list">
-        <a class="nav-item" href="/dashboard">Resumen</a>
-        <a class="nav-item" href="/dashboard#queue-panel">Cola</a>
-        <a class="nav-item active" href="/dashboard/prompt-tester">Probador <small>Fase 5.3</small></a>
-        <a class="nav-item" href="/dashboard/comparison">Comparación <small>Fase 5.4</small></a>
-        <a class="nav-item" href="/dashboard/models">Modelos</a>
-        <a class="nav-item" href="/dashboard#health-panel">Salud</a>
-        <a class="nav-item" href="/dashboard#config-panel">Configuracion</a>
-      </nav>
-      <div class="sidebar-foot">
-        <span>Contrato 2.1</span>
-        <span>Encola vía API normal</span>
-      </div>
-    </aside>
+{% extends 'base.html' %}
 
-    <div class="workspace">
-      <header class="topbar">
-        <div class="service-state">
-          <span class="status-dot status-healthy"></span>
-          <div>
-            <strong>Probador de Prompts</strong>
-            <small>No ejecuta providers directamente; crea tareas durables.</small>
-          </div>
-        </div>
-        <div class="topbar-actions">
-          <a class="button secondary" href="/dashboard">Volver al panel</a>
-        </div>
-      </header>
+{% block title %}AI Broker — Probador de Prompts{% endblock %}
 
-      <main class="content">
+{% macro model_options(models, selected, empty_label='Seleccionar…') -%}
+  <option value="">{{ empty_label }}</option>
+  {% for provider, group in models|groupby('provider') %}
+    <optgroup label="{{ provider }}">
+      {% for model in group %}
+        {% set value = model|model_value %}
+        <option value="{{ value }}" {% if selected == value %}selected{% endif %}>{{ model|model_compatibility_label }} {{ model.deployment }}/{{ model.name }}</option>
+      {% endfor %}
+    </optgroup>
+  {% endfor %}
+{%- endmacro %}
+
+{% block topbar_state %}
+  <div>
+    <strong>Probador de Prompts</strong>
+    <small>No ejecuta providers directamente; crea tareas durables.</small>
+  </div>
+{% endblock %}
+
+{% block content %}
+        {# Los selectores de mixture solo ofrecen modelos no vetados: los
+           incompatibles siguen visibles en "Modelo único" y en la página
+           Modelos, pero no se pueden elegir como proponente ni árbitro. #}
+        {% set mixture_models = models|rejectattr('compatibility', 'equalto', 'incompatible')|list %}
         {% if catalog_error %}
           <div class="alert warning">{{ catalog_error }}</div>
         {% endif %}
@@ -60,12 +43,19 @@
           <div class="alert success">
             <strong>Tarea encolada</strong>
             <p><a class="task-link" href="/dashboard/tasks/{{ accepted.task_id }}">{{ accepted.task_id }}</a></p>
+            <div id="task-status-panel" class="task-status"
+                 hx-get="/dashboard/fragments/task-status/{{ accepted.task_id }}"
+                 hx-trigger="every 3s"
+                 hx-swap="outerHTML">
+              <span class="badge badge-queued">En cola</span>
+              <span>Consultando estado…</span>
+            </div>
           </div>
         {% endif %}
         {% if impact_preview %}
           <div class="alert info">
             <strong>Impacto operativo validado</strong>
-            <p>{{ impact_preview.strategy }} - {{ impact_preview.expected_invocations }} invocacion(es), plan {{ impact_preview.scheduling }}, timeout {{ impact_preview.timeout_seconds }}s, max. {{ impact_preview.max_output_tokens }} tokens de salida.</p>
+            <p>{{ impact_preview.strategy }} - {{ impact_preview.expected_invocations }} invocación(es), plan {{ impact_preview.scheduling }}, timeout {{ impact_preview.timeout_seconds }}s, máx. {{ impact_preview.max_output_tokens }} tokens de salida.</p>
             <p>Cloud {{ 'permitido' if impact_preview.cloud_allowed else 'bloqueado' }} - fallback {{ 'permitido' if impact_preview.fallback_allowed else 'bloqueado' }}.</p>
             {% if impact_preview.cloud_models %}
               <ul>
@@ -98,6 +88,34 @@
                 <span>Contenido</span>
                 <textarea name="prompt" rows="16" required>{{ form.prompt }}</textarea>
               </label>
+
+              {% if compression_preview %}
+                <div class="compression-preview {% if compression_preview.applied %}applied{% endif %}">
+                  <div class="compression-preview-head">
+                    <strong>Reducción del prompt</strong>
+                    {% if not compression_preview.enabled %}
+                      <span class="badge badge-cancelled">Desactivada</span>
+                    {% elif compression_preview.applied %}
+                      <span class="badge badge-completed">−{{ compression_preview.saved_percent }}%</span>
+                    {% else %}
+                      <span class="badge badge-neutral">Sin cambios</span>
+                    {% endif %}
+                  </div>
+                  {% if not compression_preview.enabled %}
+                    <p>La compresión de prompts está desactivada; el texto viajará tal cual. Puedes activarla en <a href="/dashboard/config">Configuración</a>.</p>
+                  {% elif compression_preview.applied %}
+                    <p>{{ compression_preview.original_chars }} → {{ compression_preview.compressed_chars }} caracteres con nivel <em>{{ compression_preview.level }}</em>. Esto es lo que viajará al modelo; el prompt original se conserva en la tarea.</p>
+                    <details open>
+                      <summary>Prompt reducido</summary>
+                      <pre>{{ compression_preview.text }}</pre>
+                    </details>
+                  {% elif compression_preview.original_chars < compression_preview.min_chars %}
+                    <p>Sin reducción: el prompt no llega al mínimo de {{ compression_preview.min_chars }} caracteres configurado.</p>
+                  {% else %}
+                    <p>Sin reducción: el nivel <em>{{ compression_preview.level }}</em> no encontró cortesías ni relleno que eliminar.</p>
+                  {% endif %}
+                </div>
+              {% endif %}
             </div>
           </section>
 
@@ -116,62 +134,53 @@
                   <option value="mixture_of_agents" {% if form.strategy == 'mixture_of_agents' %}selected{% endif %}>Mixture of LLMs</option>
                 </select>
               </label>
-              <label class="field">
+              <label class="field" data-show-strategy="single">
                 <span>Modelo único exacto</span>
                 <select name="single_model">
-                  <option value="">Seleccionar…</option>
-                  {% for model in models %}
-                    {% set value = model|model_value %}
-                    <option class="{{ model|model_compatibility_class }}" value="{{ value }}" {% if form.single_model == value %}selected{% endif %}>{{ model|model_compatibility_label }} {{ model.provider }}/{{ model.deployment }}/{{ model.name }}</option>
-                  {% endfor %}
+                  {{ model_options(models, form.single_model) }}
                 </select>
               </label>
-              <div class="field-pair">
-                <label class="field">
-                  <span>Preset mixture</span>
-                  <select name="preset">
-                    <option value="fast" {% if form.preset == 'fast' %}selected{% endif %}>fast — serial</option>
-                    <option value="slow" {% if form.preset == 'slow' %}selected{% endif %}>slow — proponentes paralelos si hay recursos</option>
-                  </select>
-                </label>
-                <label class="field">
-                  <span>Scheduling slow</span>
-                  <select name="scheduling">
-                    <option value="adaptive" {% if form.scheduling == 'adaptive' %}selected{% endif %}>adaptive</option>
-                    <option value="parallel" {% if form.scheduling == 'parallel' %}selected{% endif %}>parallel</option>
-                    <option value="waves" {% if form.scheduling == 'waves' %}selected{% endif %}>waves</option>
-                    <option value="sequential" {% if form.scheduling == 'sequential' %}selected{% endif %}>sequential</option>
-                  </select>
-                </label>
-              </div>
-
-              <div class="proposer-list">
-                <span class="form-label">Proponentes manuales</span>
-                {% for index in range(1, 6) %}
-                  {% set model_key = 'proposer_model_' ~ index %}
-                  {% set role_key = 'proposer_role_' ~ index %}
-                  <div class="proposer-row">
-                    <input name="{{ role_key }}" value="{{ form[role_key] }}" aria-label="Rol proponente {{ index }}">
-                    <select name="{{ model_key }}" aria-label="Modelo proponente {{ index }}">
-                      <option value="">Sin usar</option>
-                      {% for model in models %}
-                        {% set value = model|model_value %}
-                        <option class="{{ model|model_compatibility_class }}" value="{{ value }}" {% if form[model_key] == value %}selected{% endif %}>{{ model|model_compatibility_label }} {{ model.provider }}/{{ model.deployment }}/{{ model.name }}</option>
-                      {% endfor %}
+              <div class="mixture-fields" data-show-strategy="mixture_of_agents">
+                <p class="form-hint">Solo se listan modelos aptos para mixture o pendientes de analizar; los incompatibles quedan fuera.</p>
+                <div class="field-pair">
+                  <label class="field">
+                    <span>Preset mixture</span>
+                    <select name="preset">
+                      <option value="fast" {% if form.preset == 'fast' %}selected{% endif %}>fast — serial</option>
+                      <option value="slow" {% if form.preset == 'slow' %}selected{% endif %}>slow — proponentes paralelos si hay recursos</option>
                     </select>
-                  </div>
-                {% endfor %}
-              </div>
-              <label class="field">
-                <span>Árbitro exacto</span>
-                <select name="arbiter_model">
-                  <option value="">Seleccionar…</option>
-                  {% for model in models %}
-                    {% set value = model|model_value %}
-                    <option class="{{ model|model_compatibility_class }}" value="{{ value }}" {% if form.arbiter_model == value %}selected{% endif %}>{{ model|model_compatibility_label }} {{ model.provider }}/{{ model.deployment }}/{{ model.name }}</option>
+                  </label>
+                  <label class="field">
+                    <span>Scheduling slow</span>
+                    <select name="scheduling">
+                      <option value="adaptive" {% if form.scheduling == 'adaptive' %}selected{% endif %}>adaptive</option>
+                      <option value="parallel" {% if form.scheduling == 'parallel' %}selected{% endif %}>parallel</option>
+                      <option value="waves" {% if form.scheduling == 'waves' %}selected{% endif %}>waves</option>
+                      <option value="sequential" {% if form.scheduling == 'sequential' %}selected{% endif %}>sequential</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="proposer-list">
+                  <span class="form-label">Proponentes manuales</span>
+                  {% for index in range(1, 6) %}
+                    {% set model_key = 'proposer_model_' ~ index %}
+                    {% set role_key = 'proposer_role_' ~ index %}
+                    <div class="proposer-row">
+                      <input name="{{ role_key }}" value="{{ form[role_key] }}" aria-label="Rol proponente {{ index }}">
+                      <select name="{{ model_key }}" aria-label="Modelo proponente {{ index }}">
+                        {{ model_options(mixture_models, form[model_key], 'Sin usar') }}
+                      </select>
+                    </div>
                   {% endfor %}
-                </select>
-              </label>
+                </div>
+                <label class="field">
+                  <span>Árbitro exacto</span>
+                  <select name="arbiter_model">
+                    {{ model_options(mixture_models, form.arbiter_model) }}
+                  </select>
+                </label>
+              </div>
             </div>
           </section>
 
@@ -184,12 +193,12 @@
             </div>
             <div class="form-body">
               <div class="field-pair">
-                <label class="field"><span>Temperatura</span><input name="temperature" value="{{ form.temperature }}" inputmode="decimal"></label>
-                <label class="field"><span>Máx. tokens</span><input name="max_output_tokens" value="{{ form.max_output_tokens }}" inputmode="numeric"></label>
+                <label class="field"><span>Temperatura</span><input name="temperature" value="{{ form.temperature }}" type="number" min="0" max="2" step="0.1"></label>
+                <label class="field"><span>Máx. tokens</span><input name="max_output_tokens" value="{{ form.max_output_tokens }}" type="number" min="1" step="1"></label>
               </div>
               <div class="field-pair">
-                <label class="field"><span>Timeout segundos</span><input name="timeout_seconds" value="{{ form.timeout_seconds }}" inputmode="numeric"></label>
-                <label class="field"><span>Coste máx. USD</span><input name="max_cost_usd" value="{{ form.max_cost_usd }}" inputmode="decimal" placeholder="opcional"></label>
+                <label class="field"><span>Timeout segundos</span><input name="timeout_seconds" value="{{ form.timeout_seconds }}" type="number" min="1" step="1"></label>
+                <label class="field"><span>Coste máx. USD</span><input name="max_cost_usd" value="{{ form.max_cost_usd }}" type="number" min="0" step="0.0001" placeholder="opcional"></label>
               </div>
               <div class="field-pair">
                 <label class="field">
@@ -210,7 +219,7 @@
                   </select>
                 </label>
               </div>
-              <label class="field">
+              <label class="field" data-show-format="json">
                 <span>JSON Schema de salida</span>
                 <textarea name="json_schema" rows="5" placeholder='{"type":"object"}'>{{ form.json_schema }}</textarea>
               </label>
@@ -220,7 +229,7 @@
               </div>
               <label class="field compact-field">
                 <span>Prioridad</span>
-                <input name="priority" value="{{ form.priority }}" inputmode="numeric">
+                <input name="priority" value="{{ form.priority }}" type="number" min="0" max="1000" step="1">
               </label>
             </div>
           </section>
@@ -237,7 +246,7 @@
             {% else %}
               <div class="empty-state">
                 <strong>Sin validación todavía</strong>
-                <p>Usa Validar para revisar el contrato o Encolar para crear la tarea.</p>
+                <p>Usa Validar para revisar el contrato y la reducción del prompt, o Encolar para crear la tarea.</p>
               </div>
             {% endif %}
             <div class="panel-actions">
@@ -246,32 +255,4 @@
             </div>
           </section>
         </form>
-
-        {% if models %}
-          <details class="panel model-catalog-panel">
-            <summary class="panel-heading model-catalog-summary">
-              <div>
-                <h2>Catalogo de modelos</h2>
-                <p>Verde: apto para mixture. Rojo: no usar en mixture. Ambar: pendiente de analizar.</p>
-              </div>
-              <span class="badge badge-neutral">{{ models|length }} modelos</span>
-            </summary>
-            <div class="model-catalog-grid">
-              {% for model in models %}
-                <div class="model-catalog-card {{ model|model_compatibility_class }}">
-                  <strong>{{ model.provider }}/{{ model.deployment }}/{{ model.name }}</strong>
-                  <span>{{ model|model_compatibility_text }}</span>
-                  {% if model.compatibility_error %}
-                    <small>{{ model.compatibility_error }}</small>
-                  {% endif %}
-                </div>
-              {% endfor %}
-            </div>
-          </details>
-        {% endif %}
-      </main>
-    </div>
-  </div>
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-</body>
-</html>
+{% endblock %}

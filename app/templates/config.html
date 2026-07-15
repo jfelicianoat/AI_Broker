@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+
+{% block title %}AI Broker — Configuración{% endblock %}
+
+{% block topbar_state %}
+  <div>
+    <strong>Configuración</strong>
+    <small>Límites operativos, compresión de prompts y proveedores.</small>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="config-panel" class="panel config-panel">
+    {% include 'fragments/config.html' %}
+  </div>
+{% endblock %}

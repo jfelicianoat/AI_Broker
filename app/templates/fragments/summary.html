@@ -12,10 +12,10 @@
   <article class="metric-card">
     <span class="metric-label">Coste real</span>
     <strong>${{ '%.4f'|format(summary.cost_actual_usd) }}</strong>
-    <small>Ultimas {{ summary.window_hours }} horas</small>
+    <small>Últimas {{ summary.window_hours }} horas</small>
   </article>
   <article class="metric-card">
-    <span class="metric-label">Tasa de exito</span>
+    <span class="metric-label">Tasa de éxito</span>
     <strong>{{ '%.1f%%'|format(summary.success_rate * 100) if summary.success_rate is not none else 'N/D' }}</strong>
     <small>{{ summary.completed }} completadas - {{ summary.failed }} fallidas en ventana</small>
   </article>

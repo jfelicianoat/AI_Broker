@@ -2,9 +2,11 @@
   const processed = new WeakSet();
   const processedScroll = new WeakSet();
   const scrollStorageKey = "ai-broker-dashboard-scroll";
+  const testerStorageKey = "ai-broker-tester-form";
   const refreshMap = {
     "#summary-panel": "/dashboard/fragments/summary",
     "#queue-panel": "/dashboard/fragments/queue",
+    "#queue-preview-panel": "/dashboard/fragments/queue-preview",
     "#active-panel": "/dashboard/fragments/active",
     "#health-panel": "/dashboard/fragments/health",
     "#resources-panel": "/dashboard/fragments/resources",
@@ -69,9 +71,9 @@
     if (bar) bar.style.width = `${percent}%`;
     if (label) {
       if (progress.phase === "completed") label.textContent = `Tanda completada: ${completed}/${total || completed}`;
-      else if (progress.phase === "failed") label.textContent = "Analisis detenido";
+      else if (progress.phase === "failed") label.textContent = "Análisis detenido";
       else if (total > 0) label.textContent = `Progreso de tanda: ${completed}/${total}`;
-      else label.textContent = "Preparando catalogo...";
+      else label.textContent = "Preparando catálogo...";
     }
     if (detail) {
       if (progress.error) detail.textContent = progress.error;
@@ -177,17 +179,10 @@
       const next = new DOMParser().parseFromString(html, "text/html");
       const nextPanel = next.querySelector("#config-panel");
       const panel = document.querySelector("#config-panel");
-      if (nextPanel && panel) {
-        panel.outerHTML = nextPanel.outerHTML;
-        bind(document);
-        await refreshDashboard();
-        toast("Compatibilidad actualizada");
-      } else {
-        rememberScroll();
-        document.open();
-        document.write(html);
-        document.close();
-      }
+      if (!nextPanel || !panel) throw new Error("Respuesta sin panel de configuración");
+      panel.outerHTML = nextPanel.outerHTML;
+      bind(document);
+      toast("Compatibilidad actualizada");
       return true;
     } catch (error) {
       stop.done = true;
@@ -251,10 +246,11 @@
       });
       const payload = await response.json();
       if (!response.ok || !payload.ok) throw new Error(payload.message || `Error ${response.status}`);
-      if (button) {
-        button.classList.remove("model-compatible", "model-incompatible", "model-unknown");
-        button.classList.add(payload.compatibility_class || "model-unknown");
-        button.textContent = payload.compatibility_text || "Pendiente de analizar";
+      const badge = form.querySelector(".compatibility-state");
+      if (badge) {
+        badge.classList.remove("model-compatible", "model-incompatible", "model-unknown");
+        badge.classList.add(payload.compatibility_class || "model-unknown");
+        badge.textContent = payload.compatibility_text || "Pendiente de analizar";
       }
       const errorNode = row ? row.querySelector(".compatibility-error") : null;
       if (errorNode) {
@@ -330,6 +326,18 @@
       processed.add(button);
       button.addEventListener("click", () => refresh(button.dataset.refreshTarget));
     });
+    root.querySelectorAll("[data-table-filter]").forEach((input) => {
+      if (processed.has(input)) return;
+      processed.add(input);
+      input.addEventListener("input", () => {
+        const table = document.querySelector(input.dataset.tableFilter);
+        if (!table) return;
+        const needle = input.value.trim().toLowerCase();
+        table.querySelectorAll("tbody tr").forEach((row) => {
+          row.hidden = needle !== "" && !row.textContent.toLowerCase().includes(needle);
+        });
+      });
+    });
     root.querySelectorAll("form.compatibility-probe-form").forEach((form) => {
       if (processed.has(form)) return;
       processed.add(form);
@@ -344,17 +352,76 @@
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (submitterProviderId(event.submitter)) await submitProbeForm(form, event.submitter);
-        else await submitHtmlForm(form, event.submitter, "#config-panel", "Configuracion actualizada");
+        else await submitHtmlForm(form, event.submitter, "#config-panel", "Configuración actualizada");
       });
     });
     root.querySelectorAll("form.tester-grid").forEach((form) => {
       if (processed.has(form)) return;
       processed.add(form);
+      restoreTesterForm(form);
+      updateTesterVisibility(form);
+      ["strategy", "output_format"].forEach((name) => {
+        const control = form.querySelector(`select[name='${name}']`);
+        if (control) control.addEventListener("change", () => updateTesterVisibility(form));
+      });
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
+        saveTesterForm(form);
         await submitHtmlForm(form, event.submitter, "main.content", "Probador actualizado");
       });
     });
+  }
+
+  function updateTesterVisibility(form) {
+    const strategy = form.querySelector("select[name='strategy']");
+    const format = form.querySelector("select[name='output_format']");
+    form.querySelectorAll("[data-show-strategy]").forEach((node) => {
+      node.hidden = Boolean(strategy) && node.getAttribute("data-show-strategy") !== strategy.value;
+    });
+    form.querySelectorAll("[data-show-format]").forEach((node) => {
+      node.hidden = Boolean(format) && node.getAttribute("data-show-format") !== format.value;
+    });
+  }
+
+  function testerFields(form) {
+    return Array.from(form.elements).filter(
+      (element) => element.name && element.name !== "csrf_token" && element.name !== "action"
+    );
+  }
+
+  function saveTesterForm(form) {
+    try {
+      const data = {};
+      testerFields(form).forEach((element) => {
+        data[element.name] = element.type === "checkbox" ? element.checked : element.value;
+      });
+      window.localStorage.setItem(testerStorageKey, JSON.stringify(data));
+    } catch (_) {
+      // Sin localStorage el probador funciona igual, solo no recuerda valores.
+    }
+  }
+
+  function restoreTesterForm(form) {
+    // Solo en carga limpia: si el servidor re-rendió el formulario tras un
+    // submit (hay alertas o preview), su estado manda y no se pisa.
+    if (document.querySelector("main.content .alert") || form.querySelector(".code-preview")) return;
+    const prompt = form.querySelector("textarea[name='prompt']");
+    if (!prompt || prompt.value.trim() !== "") return;
+    try {
+      const raw = window.localStorage.getItem(testerStorageKey);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      let restored = false;
+      testerFields(form).forEach((element) => {
+        if (!(element.name in data)) return;
+        if (element.type === "checkbox") element.checked = Boolean(data[element.name]);
+        else element.value = data[element.name];
+        restored = true;
+      });
+      if (restored) toast("Restaurada la última configuración del probador");
+    } catch (_) {
+      // Estado guardado corrupto: se ignora y quedan los valores por defecto.
+    }
   }
 
   async function refresh(selector) {

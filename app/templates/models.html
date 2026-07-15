@@ -1,53 +1,24 @@
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>AI Broker - Modelos</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script src="/static/dashboard.js" defer></script>
-</head>
-<body>
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Navegacion principal">
-      <a class="brand" href="/dashboard">AI Broker</a>
-      <nav class="nav-list">
-        <a class="nav-item" href="/dashboard">Resumen</a>
-        <a class="nav-item" href="/dashboard#queue-panel">Cola</a>
-        <a class="nav-item" href="/dashboard/prompt-tester">Probador <small>Fase 5.3</small></a>
-        <a class="nav-item" href="/dashboard/comparison">Comparacion <small>Fase 5.4</small></a>
-        <a class="nav-item active" href="/dashboard/models">Modelos</a>
-        <a class="nav-item" href="/dashboard#health-panel">Salud</a>
-        <a class="nav-item" href="/dashboard#history-panel">Historial</a>
-        <a class="nav-item" href="/dashboard#config-panel">Configuracion</a>
-      </nav>
-      <div class="sidebar-foot">
-        <span>Contrato 2.1</span>
-        <span>Catalogo operativo</span>
-      </div>
-    </aside>
+{% extends 'base.html' %}
 
-    <div class="workspace">
-      <header class="topbar">
-        <div class="service-state">
-          <span class="status-dot status-{{ resources.status }}"></span>
-          <div>
-            <strong>Modelos</strong>
-            <small>Catalogo, compatibilidad, runtime local y proveedores.</small>
-          </div>
-        </div>
-        <div class="topbar-actions">
-          <a class="button secondary" href="/dashboard/prompt-tester">Probar modelo</a>
-          <a class="button secondary" href="/dashboard#config-panel">Configurar</a>
-        </div>
-      </header>
+{% block title %}AI Broker — Modelos{% endblock %}
 
-      <main class="content">
+{% block topbar_state %}
+  <span class="status-dot status-{{ resources.status }}"></span>
+  <div>
+    <strong>Modelos</strong>
+    <small>Catálogo, compatibilidad, runtime local y proveedores.</small>
+  </div>
+{% endblock %}
+
+{% block topbar_actions %}
+  <a class="button secondary" href="/dashboard/prompt-tester">Probar modelo</a>
+  <a class="button secondary" href="/dashboard/config">Configurar</a>
+{% endblock %}
+
+{% block content %}
         {% if catalog_error %}
           <div class="alert warning">
-            <strong>Catalogo no disponible</strong>
+            <strong>Catálogo no disponible</strong>
             <p>{{ catalog_error }}</p>
           </div>
         {% endif %}
@@ -61,7 +32,7 @@
         <section class="metric-grid models-overview" aria-label="Resumen de modelos">
           <div class="metric-card"><span class="metric-label">Modelos catalogados</span><strong>{{ model_stats.total }}</strong><small>{{ model_stats.providers }} proveedor(es), {{ model_stats.deployments }} deployment(s)</small></div>
           <div class="metric-card"><span class="metric-label">Compatibles mixture</span><strong>{{ model_stats.compatible }}</strong><small>Listos para proponer o arbitrar</small></div>
-          <div class="metric-card"><span class="metric-label">Pendientes</span><strong>{{ model_stats.unknown }}</strong><small>Sin analisis de compatibilidad</small></div>
+          <div class="metric-card"><span class="metric-label">Pendientes</span><strong>{{ model_stats.unknown }}</strong><small>Sin análisis de compatibilidad</small></div>
           <div class="metric-card"><span class="metric-label">No compatibles</span><strong>{{ model_stats.incompatible }}</strong><small>Excluidos del flujo mixture</small></div>
           <div class="metric-card"><span class="metric-label">Cargados ahora</span><strong>{{ model_stats.loaded }}</strong><small>Snapshot {{ resources.checked_at|short_time }}</small></div>
         </section>
@@ -70,14 +41,16 @@
           <section class="panel models-catalog">
             <div class="panel-heading">
               <div>
-                <h2>Catalogo operativo</h2>
+                <h2>Catálogo operativo</h2>
                 <p>Modelos que el Broker puede seleccionar o mostrar al probador.</p>
               </div>
+              <input class="table-filter" type="search" placeholder="Filtrar por nombre o proveedor…"
+                     data-table-filter="#models-catalog-table" aria-label="Filtrar modelos del catálogo">
               <span class="badge badge-neutral">{{ models|length }} modelos</span>
             </div>
             {% if models %}
               <div class="table-wrap">
-                <table>
+                <table id="models-catalog-table">
                   <thead>
                     <tr>
                       <th>Modelo</th>
@@ -105,10 +78,11 @@
                               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                               <input type="hidden" name="provider" value="{{ model.provider }}">
                               <input type="hidden" name="model" value="{{ model.name }}">
-                              <button class="badge compatibility-probe {{ model|model_compatibility_class }}"
+                              <span class="badge compatibility-state {{ model|model_compatibility_class }}">{{ model|model_compatibility_text }}</span>
+                              <button class="button secondary compact compatibility-probe"
                                       type="submit"
                                       title="Comprobar compatibilidad de {{ model.provider }}/{{ model.name }}">
-                                {{ model|model_compatibility_text }}
+                                Analizar
                               </button>
                             </form>
                           {% else %}
@@ -123,7 +97,7 @@
             {% else %}
               <div class="empty-state">
                 <strong>Sin modelos catalogados</strong>
-                <p>Revisa proveedores activos o sincroniza el catalogo desde configuracion.</p>
+                <p>Revisa proveedores activos o sincroniza el catálogo desde configuración.</p>
               </div>
             {% endif %}
           </section>
@@ -209,9 +183,4 @@
             </section>
           </aside>
         </section>
-      </main>
-    </div>
-  </div>
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
-</body>
-</html>
+{% endblock %}

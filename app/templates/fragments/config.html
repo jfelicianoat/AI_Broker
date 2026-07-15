@@ -1,20 +1,20 @@
 <div class="panel-heading" id="configuracion">
   <div>
-    <h2>Configuracion</h2>
-    <p>Limites aplicados a las siguientes tareas.</p>
+    <h2>Configuración</h2>
+    <p>Límites aplicados a las siguientes tareas.</p>
   </div>
   <span class="badge badge-neutral">broker_config.yaml</span>
 </div>
 
 {% if config_saved %}
   <div class="alert success config-alert">
-    <strong>Configuracion guardada</strong>
-    <p>Los cambios operativos ya estan aplicados en memoria.</p>
+    <strong>Configuración guardada</strong>
+    <p>Los cambios operativos ya están aplicados en memoria.</p>
   </div>
 {% endif %}
 {% if config_errors %}
   <div class="alert danger config-alert">
-    <strong>No se ha guardado la configuracion</strong>
+    <strong>No se ha guardado la configuración</strong>
     <ul>
       {% for error in config_errors %}
         <li>{{ error }}</li>
@@ -24,8 +24,8 @@
 {% endif %}
 {% if config_review %}
   <div class="alert info config-alert">
-    <strong>Revision lista; no se ha guardado nada</strong>
-    <p>Estos cambios se aplicarian si pulsas Guardar configuracion.</p>
+    <strong>Revisión lista; no se ha guardado nada</strong>
+    <p>Estos cambios se aplicarían si pulsas Guardar configuración.</p>
     <ul>
       {% for item in config_review %}
         <li>{{ item.label }}: {{ item.before }} -> {{ item.after }}</li>
@@ -46,11 +46,11 @@
       <input name="task_timeout_seconds" value="{{ config.processing.task_timeout_seconds }}" inputmode="numeric">
     </label>
     <label class="field">
-      <span>Max. invocaciones paralelas slow</span>
+      <span>Máx. invocaciones paralelas slow</span>
       <input name="max_parallel_invocations" value="{{ config.processing.max_parallel_invocations }}" placeholder="auto">
     </label>
     <label class="field">
-      <span>Tamano maximo de cola</span>
+      <span>Tamaño máximo de cola</span>
       <input name="queue_max_size" value="{{ config.processing.queue_max_size }}" inputmode="numeric">
     </label>
     <label class="field">
@@ -62,7 +62,7 @@
       <input name="vram_safety_margin_gb" value="{{ config.resources.vram_safety_margin_gb }}" inputmode="decimal">
     </label>
     <label class="field">
-      <span>Max. modelos locales cargados</span>
+      <span>Máx. modelos locales cargados</span>
       <input name="max_loaded_local_models" value="{{ config.resources.max_loaded_local_models }}" placeholder="auto">
     </label>
     <div class="check-row config-checks">
@@ -75,8 +75,8 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
-        <h3>Compresion de prompts</h3>
-        <p>Reduce tokens del prompt (cortesias, muletillas, relleno) antes de enviarlo a los LLMs. El codigo y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
+        <h3>Compresión de prompts</h3>
+        <p>Reduce tokens del prompt (cortesías, muletillas, relleno) antes de enviarlo a los LLMs. El código y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
       </div>
       <span class="badge badge-neutral">prompt_compression</span>
     </div>
@@ -84,19 +84,19 @@
       <div class="check-row config-checks">
         <label>
           <input type="checkbox" name="prompt_compression_enabled" {% if config.prompt_compression.enabled %}checked{% endif %}>
-          Activar compresion de prompts
+          Activar compresión de prompts
         </label>
       </div>
       <label class="field">
-        <span>Nivel de compresion</span>
+        <span>Nivel de compresión</span>
         <select name="prompt_compression_level">
-          <option value="light" {% if config.prompt_compression.level == 'light' %}selected{% endif %}>light (solo cortesias)</option>
+          <option value="light" {% if config.prompt_compression.level == 'light' %}selected{% endif %}>light (solo cortesías)</option>
           <option value="medium" {% if config.prompt_compression.level == 'medium' %}selected{% endif %}>medium (+ muletillas y relleno)</option>
-          <option value="aggressive" {% if config.prompt_compression.level == 'aggressive' %}selected{% endif %}>aggressive (+ articulos, estilo caveman)</option>
+          <option value="aggressive" {% if config.prompt_compression.level == 'aggressive' %}selected{% endif %}>aggressive (+ artículos, estilo caveman)</option>
         </select>
       </label>
       <label class="field">
-        <span>Minimo de caracteres para comprimir</span>
+        <span>Mínimo de caracteres para comprimir</span>
         <input name="prompt_compression_min_chars" value="{{ config.prompt_compression.min_chars }}" inputmode="numeric">
       </label>
     </div>
@@ -158,7 +158,7 @@
     <div class="subsection-heading">
       <div>
         <h3>Proveedores API</h3>
-        <p>Adapters OpenAI-compatible. Deja la variable API key vacia para endpoints locales sin autenticacion.</p>
+        <p>Adapters OpenAI-compatible. Deja la variable API key vacía para endpoints locales sin autenticación.</p>
       </div>
       <span class="badge badge-neutral">custom</span>
     </div>
@@ -216,7 +216,7 @@
               <input name="custom_provider_{{ index }}_probe_delay_seconds" value="{{ provider.probe_delay_seconds if provider else 0.25 }}" inputmode="decimal">
             </label>
             <label class="field">
-              <span>Max. modelos por analisis</span>
+              <span>Máx. modelos por análisis</span>
               <input name="custom_provider_{{ index }}_probe_max_models" value="{{ provider.probe_max_models if provider else 50 }}" inputmode="numeric">
             </label>
             <label class="field">
@@ -239,7 +239,7 @@
               </label>
               <label>
                 <input type="checkbox" name="custom_provider_{{ index }}_sync_models" {% if provider and provider.sync_models %}checked{% endif %}>
-                Sincronizar catalogo desde /models
+                Sincronizar catálogo desde /models
               </label>
               <label>
                 <input type="checkbox" name="custom_provider_{{ index }}_probe_skip_compatible" {% if not provider or provider.probe_skip_compatible %}checked{% endif %}>
@@ -261,7 +261,7 @@
             <div class="provider-wide probe-progress" data-probe-progress="{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}" hidden>
               <div>
                 <strong>Analizando compatibilidad</strong>
-                <span data-probe-progress-label>Preparando catalogo...</span>
+                <span data-probe-progress-label>Preparando catálogo...</span>
               </div>
               <div class="probe-progress-bar" aria-hidden="true"><span data-probe-progress-bar></span></div>
               <small data-probe-progress-detail>Esperando primera respuesta del proveedor.</small>
@@ -293,6 +293,6 @@
   </div>
   <div class="panel-actions config-actions">
     <button class="button secondary" name="config_action" value="validate" type="submit">Revisar sin guardar</button>
-    <button class="button" type="submit">Guardar configuracion</button>
+    <button class="button" type="submit">Guardar configuración</button>
   </div>
 </form>
