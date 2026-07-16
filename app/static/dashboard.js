@@ -26,6 +26,13 @@
     return meta ? meta.getAttribute("content") : "";
   }
 
+  function httpErrorMessage(status) {
+    // El 403 del panel es casi siempre una sesión/cookie CSRF caducada en una
+    // pestaña vieja: recargar la página emite credenciales frescas.
+    if (status === 403) return "Sesión del panel caducada: recarga la página (F5) y vuelve a intentarlo.";
+    return `Error ${status}`;
+  }
+
   function rememberScroll() {
     try {
       window.sessionStorage.setItem(scrollStorageKey, JSON.stringify({
@@ -130,7 +137,7 @@
           "X-CSRF-Token": csrfToken()
         }
       });
-      if (!response.ok) throw new Error(`Error ${response.status}`);
+      if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const html = await response.text();
       const next = new DOMParser().parseFromString(html, "text/html");
       const nextTarget = next.querySelector(targetSelector);
@@ -174,7 +181,7 @@
       });
       stop.done = true;
       await poll;
-      if (!response.ok) throw new Error(`Error ${response.status}`);
+      if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const html = await response.text();
       const next = new DOMParser().parseFromString(html, "text/html");
       const nextPanel = next.querySelector("#config-panel");
@@ -207,7 +214,7 @@
           "X-CSRF-Token": csrfToken()
         }
       });
-      if (!response.ok) throw new Error(`Error ${response.status}`);
+      if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const targetSelector = element.getAttribute("hx-target");
       const target = targetSelector ? document.querySelector(targetSelector) : element;
       const swap = element.getAttribute("hx-swap") || "innerHTML";
@@ -245,7 +252,7 @@
         }
       });
       const payload = await response.json();
-      if (!response.ok || !payload.ok) throw new Error(payload.message || `Error ${response.status}`);
+      if (!response.ok || !payload.ok) throw new Error(payload.message || httpErrorMessage(response.status));
       const badge = form.querySelector(".compatibility-state");
       if (badge) {
         badge.classList.remove("model-compatible", "model-incompatible", "model-unknown");
@@ -346,11 +353,44 @@
         await submitCompatibilityProbe(form, event.submitter);
       });
     });
+    root.querySelectorAll("[data-provider-picker]").forEach((picker) => {
+      if (processed.has(picker)) return;
+      processed.add(picker);
+      const apply = () => {
+        const section = picker.closest(".config-subsection");
+        if (!section) return;
+        section.querySelectorAll("[data-provider-card]").forEach((card) => {
+          card.hidden = card.getAttribute("data-provider-card") !== picker.value;
+        });
+        try {
+          window.sessionStorage.setItem("ai-broker-provider-picker", picker.value);
+        } catch (_) {
+          // Sin sessionStorage el combo funciona igual, solo no recuerda la selección.
+        }
+      };
+      try {
+        const saved = window.sessionStorage.getItem("ai-broker-provider-picker");
+        if (saved && picker.querySelector(`option[value='${saved}']`)) picker.value = saved;
+      } catch (_) {
+        // Selección por defecto: el primer proveedor.
+      }
+      apply();
+      picker.addEventListener("change", apply);
+    });
     root.querySelectorAll("form.config-form").forEach((form) => {
       if (processed.has(form)) return;
       processed.add(form);
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
+        const deleteTarget = event.submitter ? event.submitter.getAttribute("data-provider-delete") : null;
+        if (deleteTarget !== null) {
+          const confirmed = window.confirm(
+            `¿Eliminar el proveedor ${deleteTarget}? Se borrará su configuración y su lista de modelos al guardar.`
+          );
+          if (!confirmed) return;
+          await submitHtmlForm(form, event.submitter, "#config-panel", `Proveedor ${deleteTarget} eliminado`);
+          return;
+        }
         if (submitterProviderId(event.submitter)) await submitProbeForm(form, event.submitter);
         else await submitHtmlForm(form, event.submitter, "#config-panel", "Configuración actualizada");
       });
@@ -360,9 +400,17 @@
       processed.add(form);
       restoreTesterForm(form);
       updateTesterVisibility(form);
+      updateTesterFeatureWarnings(form);
       ["strategy", "output_format"].forEach((name) => {
         const control = form.querySelector(`select[name='${name}']`);
-        if (control) control.addEventListener("change", () => updateTesterVisibility(form));
+        if (control) control.addEventListener("change", () => {
+          updateTesterVisibility(form);
+          updateTesterFeatureWarnings(form);
+        });
+      });
+      testerModelSelectNames().forEach((name) => {
+        const control = form.querySelector(`select[name='${name}']`);
+        if (control) control.addEventListener("change", () => updateTesterFeatureWarnings(form));
       });
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -370,6 +418,49 @@
         await submitHtmlForm(form, event.submitter, "main.content", "Probador actualizado");
       });
     });
+  }
+
+  function testerModelSelectNames() {
+    return [
+      "single_model",
+      "proposer_model_1", "proposer_model_2", "proposer_model_3", "proposer_model_4", "proposer_model_5",
+      "arbiter_model"
+    ];
+  }
+
+  function updateTesterFeatureWarnings(form) {
+    // Aviso en vivo: salida JSON pedida con modelos cuyo sondeo verificó que
+    // no soportan JSON estructurado (data-json-mode="no" en la opción).
+    const box = form.querySelector("[data-feature-warnings]");
+    if (!box) return;
+    const format = form.querySelector("select[name='output_format']");
+    const strategy = form.querySelector("select[name='strategy']");
+    const mixture = Boolean(strategy) && strategy.value === "mixture_of_agents";
+    const flagged = new Set();
+    if (format && format.value === "json") {
+      testerModelSelectNames()
+        .filter((name) => (name === "single_model") !== mixture)
+        .forEach((name) => {
+          const select = form.querySelector(`select[name='${name}']`);
+          const option = select && select.value ? select.selectedOptions[0] : null;
+          if (option && option.dataset.jsonMode === "no") {
+            flagged.add(option.textContent.trim());
+          }
+        });
+    }
+    box.hidden = flagged.size === 0;
+    box.textContent = "";
+    if (flagged.size === 0) return;
+    const title = document.createElement("strong");
+    title.textContent = "Sondeo de JSON estructurado";
+    box.appendChild(title);
+    const list = document.createElement("ul");
+    flagged.forEach((label) => {
+      const item = document.createElement("li");
+      item.textContent = `${label} no superó el sondeo: la salida JSON puede llegar como texto plano o fallar.`;
+      list.appendChild(item);
+    });
+    box.appendChild(list);
   }
 
   function updateTesterVisibility(form) {
@@ -430,7 +521,7 @@
     if (!url || !target) return;
     try {
       const response = await fetch(url, {headers: {"HX-Request": "true"}});
-      if (!response.ok) throw new Error(`Error ${response.status}`);
+      if (!response.ok) throw new Error(httpErrorMessage(response.status));
       target.outerHTML = await response.text();
       bind(document);
     } catch (error) {

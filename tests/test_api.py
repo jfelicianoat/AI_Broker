@@ -770,6 +770,90 @@ def test_dashboard_configuration_adds_custom_api_provider(tmp_path: Path) -> Non
     assert saved.providers.custom[0].models[0].name == "meta/llama-3.1-70b-instruct"
 
 
+def test_config_page_uses_provider_picker_and_hides_model_listings(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="lmstudio",
+                    display_name="LM Studio",
+                    enabled=True,
+                    base_url="http://127.0.0.1:1234/v1",
+                    deployment="local",
+                    sync_models=True,
+                    models=[OpenAICompatibleModelConfig(name="modelo-uno", compatibility="compatible")],
+                ),
+            ]
+        ),
+    )
+    with TestClient(create_app(config, config_path=tmp_path / "broker_config.yaml")) as client:
+        page = client.get("/dashboard/config").text
+
+    # Combo con el proveedor existente y la opción de alta.
+    assert "data-provider-picker" in page
+    assert "LM Studio" in page
+    assert "Dar de alta un proveedor nuevo" in page
+    # Tarjeta extra vacía para el alta (índice siguiente al último proveedor).
+    assert 'data-provider-card="2"' in page
+    assert 'name="custom_provider_2_id" value=""' in page
+    # El estado de los modelos ya no se lista en config (vive en /dashboard/models);
+    # el textarea queda plegado en un details.
+    assert "model-compat-list" not in page
+    assert "provider-models-details" in page
+    assert "Modelos declarados a mano (1)" in page
+
+
+def test_config_delete_button_removes_provider_from_saved_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="lmstudio",
+                    enabled=True,
+                    base_url="http://127.0.0.1:1234/v1",
+                    deployment="local",
+                    sync_models=True,
+                ),
+            ]
+        ),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard/config").text
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "300",
+                "max_parallel_invocations": "auto",
+                "queue_max_size": "1000",
+                "local_vram_budget_gb": "64",
+                "vram_safety_margin_gb": "6",
+                "max_loaded_local_models": "auto",
+                "prompt_compression_level": "medium",
+                "prompt_compression_min_chars": "40",
+                # El botón de eliminar viaja como un campo más del formulario.
+                "custom_provider_1_delete": "on",
+                "custom_provider_1_enabled": "on",
+                "custom_provider_1_id": "lmstudio",
+                "custom_provider_1_base_url": "http://127.0.0.1:1234/v1",
+                "custom_provider_1_deployment": "local",
+                "custom_provider_1_sync_models": "on",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert 'data-provider-delete="lmstudio"' in page
+    assert response.status_code == 200
+    assert saved.providers.custom == []
+    assert config.providers.custom == []
+
+
 def test_lmstudio_auto_start_uses_configured_port(monkeypatch) -> None:
     calls = []
 
@@ -835,6 +919,8 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
                     "compatibility": "compatible",
                     "compatibility_checked_at": "2026-06-26T20:00:00+00:00",
                     "compatibility_error": None,
+                    "features": {"vision": True, "json_mode": True, "tools": False},
+                    "features_checked_at": "2026-06-26T20:00:02+00:00",
                 },
                 {
                     "name": "vision-only",
@@ -898,12 +984,16 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
     assert progress.json()["phase"] == "completed"
     assert progress.json()["completed"] == 2
     assert by_name["chat-ok"].compatibility == "compatible"
+    assert by_name["chat-ok"].features == {"vision": True, "json_mode": True, "tools": False}
     assert by_name["vision-only"].compatibility == "incompatible"
+    assert by_name["vision-only"].features == {}
     assert by_name["not-probed-yet"].compatibility == "unknown"
     assert by_name["not-probed-yet"].context_window == 64000
     assert saved.providers.custom[0].probe_skip_compatible is True
     assert saved.providers.custom[0].probe_skip_checked is True
-    assert "No compatible mixture" in response.text
+    # El estado por modelo ya no se lista en config: se consulta en /dashboard/models.
+    assert "model-compat-list" not in response.text
+    assert "Modelos declarados a mano (3)" in response.text
 
 
 def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch) -> None:
@@ -933,6 +1023,9 @@ def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch
                 "compatibility_checked_at": "2026-07-01T12:00:00+00:00",
                 "compatibility_error": None,
             }
+
+        async def probe_model_features(self, model):
+            return {"vision": False, "json_mode": True, "tools": True}
 
         async def close(self):
             return None
@@ -990,10 +1083,13 @@ def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["compatibility"] == "compatible"
-    assert response.json()["compatibility_text"] == "Compatible mixture"
+    assert response.json()["compatibility_text"] == "Operativo"
     assert by_name["chat-pending"].compatibility == "compatible"
     assert by_name["chat-pending"].compatibility_checked_at == "2026-07-01T12:00:00+00:00"
+    assert by_name["chat-pending"].features == {"vision": False, "json_mode": True, "tools": True}
+    assert by_name["chat-pending"].features_checked_at is not None
     assert by_name["leave-alone"].compatibility == "unknown"
+    assert by_name["leave-alone"].features == {}
 
 
 def test_dashboard_javascript_reads_form_action_attribute() -> None:
@@ -1371,6 +1467,95 @@ def test_prompt_tester_hides_incompatible_models_from_mixture_selectors(tmp_path
     assert "apto" in arbiter_select
     # Los pendientes de analizar siguen disponibles con su marcador.
     assert "pendiente" in arbiter_select
+
+
+def test_prompt_tester_warns_when_json_output_uses_model_without_json_mode(tmp_path: Path, monkeypatch) -> None:
+    async def catalog_with_features(self):
+        def entry(name: str, features: dict) -> dict:
+            return {
+                "name": name,
+                "provider": "ollama",
+                "deployment": "bootstrap",
+                "status": "available",
+                "context_window": 1000,
+                "capabilities": ["completion"],
+                "compatibility": "compatible",
+                "compatibility_checked_at": None,
+                "compatibility_error": None,
+                "features": features,
+            }
+
+        return [
+            entry("con-json", {"json_mode": True, "tools": True}),
+            entry("sin-json", {"json_mode": False, "vision": True}),
+            entry("sin-sondear", {}),
+        ]
+
+    monkeypatch.setattr(BootstrapModelProvider, "models", catalog_with_features)
+    base_form = {
+        "action": "validate",
+        "input_mode": "prompt",
+        "prompt": "Devuelve un resumen estructurado",
+        "strategy": "single",
+        "output_format": "json",
+        "json_schema": '{"type": "object"}',
+    }
+
+    def model_value(name: str) -> str:
+        return json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": name})
+
+    with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
+        page = client.get("/dashboard/prompt-tester").text
+        flagged = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={**base_form, "csrf_token": token, "single_model": model_value("sin-json")},
+        )
+        clean = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={**base_form, "csrf_token": token, "single_model": model_value("con-json")},
+        )
+        unprobed = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={**base_form, "csrf_token": token, "single_model": model_value("sin-sondear")},
+        )
+        markdown = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={
+                **base_form,
+                "csrf_token": token,
+                "single_model": model_value("sin-json"),
+                "output_format": "markdown",
+                "json_schema": "",
+            },
+        )
+
+    # Las opciones exponen el sondeo para el aviso en vivo del navegador.
+    assert 'data-json-mode="no"' in page
+    assert 'data-json-mode="yes"' in page
+    # Aviso servidor: solo cuando se pide JSON con un negativo verificado.
+    assert flagged.status_code == 200
+    assert "Aviso de capacidades sondeadas" in flagged.text
+    assert "ollama/sin-json no superó el sondeo de JSON estructurado" in flagged.text
+    assert "Aviso de capacidades sondeadas" not in clean.text
+    assert "Aviso de capacidades sondeadas" not in unprobed.text
+    assert "Aviso de capacidades sondeadas" not in markdown.text
+
+
+def test_dashboard_csrf_cookie_slides_on_fragment_polling(tmp_path: Path) -> None:
+    """El polling de fragmentos renueva el max_age de la cookie CSRF: una
+    pestaña abierta y activa no debe acabar en 403 por cookie caducada."""
+    with make_client(tmp_path) as client:
+        page = client.get("/dashboard")
+        token = client.cookies.get("ai_broker_dashboard_csrf")
+        fragment = client.get("/dashboard/fragments/summary")
+
+    assert page.status_code == 200
+    assert token
+    set_cookie = fragment.headers.get("set-cookie", "")
+    assert "ai_broker_dashboard_csrf" in set_cookie
+    assert token in set_cookie
+    assert "Max-Age=28800" in set_cookie
 
 
 def test_queue_move_to_top(tmp_path: Path) -> None:

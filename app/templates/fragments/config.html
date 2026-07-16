@@ -139,11 +139,14 @@
             <span>Dtype por defecto</span>
             <input name="hf_local_default_dtype" value="{{ hf_local.default_dtype if hf_local and hf_local.default_dtype else '' }}" placeholder="float16">
           </label>
-          <label class="field provider-wide">
-            <span>Modelos: nombre|ruta|contexto|device|dtype</span>
-            <textarea name="hf_local_models" rows="5" placeholder="qwen2.5-7b|qwen2.5-7b|32768|auto|float16">{% for model in hf_models %}{{ model.name }}|{{ model.path }}|{{ model.context_window }}|{{ model.device or '' }}|{{ model.dtype or '' }}{% if not loop.last %}
+          <details class="provider-wide provider-models-details">
+            <summary>Modelos declarados ({{ hf_models|length }}) — editar a mano</summary>
+            <label class="field provider-wide">
+              <span>Modelos: nombre|ruta|contexto|device|dtype</span>
+              <textarea name="hf_local_models" rows="5" placeholder="qwen2.5-7b|qwen2.5-7b|32768|auto|float16">{% for model in hf_models %}{{ model.name }}|{{ model.path }}|{{ model.context_window }}|{{ model.device or '' }}|{{ model.dtype or '' }}{% if not loop.last %}
 {% endif %}{% endfor %}</textarea>
-          </label>
+            </label>
+          </details>
           <div class="check-row provider-wide">
             <label>
               <input type="checkbox" name="hf_local_trust_remote_code" {% if hf_local and hf_local.trust_remote_code %}checked{% endif %}>
@@ -158,16 +161,27 @@
     <div class="subsection-heading">
       <div>
         <h3>Proveedores API</h3>
-        <p>Adapters OpenAI-compatible. Deja la variable API key vacía para endpoints locales sin autenticación.</p>
+        <p>Adapters OpenAI-compatible. Elige un proveedor para ver o cambiar su conexión, o da de alta uno nuevo. El catálogo de modelos y su estado se consultan en <a href="/dashboard/models">Modelos</a>.</p>
       </div>
       <span class="badge badge-neutral">custom</span>
     </div>
+    {% set provider_count = config.providers.custom|length %}
+    <label class="field provider-picker-field">
+      <span>Proveedor</span>
+      <select data-provider-picker aria-label="Elegir proveedor a editar">
+        {% for provider in config.providers.custom %}
+          <option value="{{ loop.index }}">{{ provider.display_name or provider.id }}{% if not provider.enabled %} (inactivo){% endif %}</option>
+        {% endfor %}
+        <option value="{{ provider_count + 1 }}">+ Dar de alta un proveedor nuevo…</option>
+      </select>
+    </label>
     <div class="provider-grid">
-      {% for index in range(1, 4) %}
-        {% set provider = config.providers.custom[index - 1] if config.providers.custom|length >= index else none %}
-        <div class="provider-config">
+      {% for index in range(1, provider_count + 2) %}
+        {% set provider = config.providers.custom[index - 1] if provider_count >= index else none %}
+        {% set probe_id = provider.id if provider else 'provider-' ~ index %}
+        <div class="provider-config" data-provider-card="{{ index }}" {% if index > 1 %}hidden{% endif %}>
           <div class="provider-config-head">
-            <strong>Proveedor {{ index }}</strong>
+            <strong>{{ (provider.display_name or provider.id) if provider else 'Nuevo proveedor' }}</strong>
             <label>
               <input type="checkbox" name="custom_provider_{{ index }}_enabled" {% if provider and provider.enabled %}checked{% endif %}>
               Activo
@@ -176,19 +190,19 @@
           <div class="provider-fields">
             <label class="field">
               <span>ID proveedor</span>
-              <input name="custom_provider_{{ index }}_id" value="{{ provider.id if provider else ('nvidia' if index == 1 else '') }}" placeholder="nvidia">
+              <input name="custom_provider_{{ index }}_id" value="{{ provider.id if provider else '' }}" placeholder="nvidia">
             </label>
             <label class="field">
               <span>Nombre visible</span>
-              <input name="custom_provider_{{ index }}_display_name" value="{{ provider.display_name if provider and provider.display_name else ('NVIDIA NIM' if index == 1 else '') }}" placeholder="NVIDIA NIM">
+              <input name="custom_provider_{{ index }}_display_name" value="{{ provider.display_name if provider and provider.display_name else '' }}" placeholder="NVIDIA NIM">
             </label>
             <label class="field provider-wide">
               <span>Base URL</span>
-              <input name="custom_provider_{{ index }}_base_url" value="{{ provider.base_url if provider else ('https://integrate.api.nvidia.com/v1' if index == 1 else '') }}" placeholder="https://integrate.api.nvidia.com/v1">
+              <input name="custom_provider_{{ index }}_base_url" value="{{ provider.base_url if provider else '' }}" placeholder="https://integrate.api.nvidia.com/v1">
             </label>
             <label class="field">
               <span>Variable API key</span>
-              <input name="custom_provider_{{ index }}_api_key_env" value="{{ provider.api_key_env if provider and provider.api_key_env else ('' if provider else ('NVIDIA_API_KEY' if index == 1 else '')) }}" placeholder="LMSTUDIO_API_KEY opcional">
+              <input name="custom_provider_{{ index }}_api_key_env" value="{{ provider.api_key_env if provider and provider.api_key_env else '' }}" placeholder="NVIDIA_API_KEY (vacío si no requiere)">
             </label>
             <label class="field">
               <span>Deployment</span>
@@ -227,11 +241,15 @@
               <span>Coste output / 1M</span>
               <input name="custom_provider_{{ index }}_output_cost_per_million" value="{{ provider.output_cost_per_million if provider else 0 }}" inputmode="decimal">
             </label>
-            <label class="field provider-wide">
-              <span>Modelos: nombre|contexto|coste_input_1M|coste_output_1M</span>
-              <textarea name="custom_provider_{{ index }}_models" rows="5" placeholder="meta/llama-3.1-70b-instruct|128000|0|0">{% if provider %}{% for model in provider.models %}{{ model.name }}|{{ model.context_window }}|{{ model.input_cost_per_million }}|{{ model.output_cost_per_million }}{% if not loop.last %}
+            <details class="provider-wide provider-models-details">
+              <summary>Modelos declarados a mano ({{ provider.models|length if provider else 0 }}) — opcional</summary>
+              <p class="form-hint">Solo hace falta si el proveedor no soporta sincronizar desde /models. El estado de cada modelo se ve en <a href="/dashboard/models">Modelos</a>.</p>
+              <label class="field provider-wide">
+                <span>Modelos: nombre|contexto|coste_input_1M|coste_output_1M</span>
+                <textarea name="custom_provider_{{ index }}_models" rows="5" placeholder="meta/llama-3.1-70b-instruct|128000|0|0">{% if provider %}{% for model in provider.models %}{{ model.name }}|{{ model.context_window }}|{{ model.input_cost_per_million }}|{{ model.output_cost_per_million }}{% if not loop.last %}
 {% endif %}{% endfor %}{% endif %}</textarea>
-            </label>
+              </label>
+            </details>
             <div class="check-row provider-wide">
               <label>
                 <input type="checkbox" name="custom_provider_{{ index }}_auto_start" {% if provider and provider.auto_start %}checked{% endif %}>
@@ -243,22 +261,35 @@
               </label>
               <label>
                 <input type="checkbox" name="custom_provider_{{ index }}_probe_skip_compatible" {% if not provider or provider.probe_skip_compatible %}checked{% endif %}>
-                No comprobar modelos ya verdes
+                No comprobar modelos ya operativos
               </label>
               <label>
                 <input type="checkbox" name="custom_provider_{{ index }}_probe_skip_checked" {% if not provider or provider.probe_skip_checked %}checked{% endif %}>
-                No repetir modelos ya analizados
+                No repetir modelos ya analizados (los errores temporales se reintentan siempre)
+              </label>
+              <label>
+                <input type="checkbox" name="custom_provider_{{ index }}_probe_features" {% if not provider or provider.probe_features %}checked{% endif %}>
+                Sondear capacidades (visión, JSON, tools) de los modelos operativos
               </label>
             </div>
             <div class="provider-wide provider-actions">
+              {% if provider %}
+                <button class="button danger compact"
+                        type="submit"
+                        name="custom_provider_{{ index }}_delete"
+                        value="on"
+                        data-provider-delete="{{ provider.display_name or provider.id }}">
+                  Eliminar proveedor
+                </button>
+              {% endif %}
               <button class="button secondary compact"
                       type="submit"
-                      data-provider-probe="{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}"
-                      formaction="/dashboard/actions/providers/{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}/probe">
+                      data-provider-probe="{{ probe_id }}"
+                      formaction="/dashboard/actions/providers/{{ probe_id }}/probe">
                 Analizar compatibilidad
               </button>
             </div>
-            <div class="provider-wide probe-progress" data-probe-progress="{{ provider.id if provider else ('nvidia' if index == 1 else 'provider-' ~ index) }}" hidden>
+            <div class="provider-wide probe-progress" data-probe-progress="{{ probe_id }}" hidden>
               <div>
                 <strong>Analizando compatibilidad</strong>
                 <span data-probe-progress-label>Preparando catálogo...</span>
@@ -266,26 +297,6 @@
               <div class="probe-progress-bar" aria-hidden="true"><span data-probe-progress-bar></span></div>
               <small data-probe-progress-detail>Esperando primera respuesta del proveedor.</small>
             </div>
-            {% if provider and provider.models %}
-              <div class="provider-wide model-compat-list">
-                {% for model in provider.models %}
-                  {% set catalog_model = {
-                    'compatibility': model.compatibility,
-                    'compatibility_error': model.compatibility_error
-                  } %}
-                  <div class="model-compat-row {{ catalog_model|model_compatibility_class }}">
-                    <span>
-                      <strong>{{ model.name }}</strong>
-                      <small>{{ model.context_window }} contexto · {{ model.compatibility_checked_at or 'sin analizar' }}</small>
-                    </span>
-                    <span class="badge">{{ catalog_model|model_compatibility_text }}</span>
-                    {% if model.compatibility_error %}
-                      <small class="compat-error">{{ model.compatibility_error }}</small>
-                    {% endif %}
-                  </div>
-                {% endfor %}
-              </div>
-            {% endif %}
           </div>
         </div>
       {% endfor %}

@@ -161,7 +161,9 @@ class HuggingFaceLocalModelConfig(BaseModel):
     device: str | None = Field(default=None, max_length=80)
     dtype: str | None = Field(default=None, max_length=40)
     trust_remote_code: bool | None = None
-    compatibility: Literal["unknown", "compatible", "incompatible"] = "compatible"
+    # "error" = fallo temporal del proveedor en el último sondeo: no veta el
+    # modelo y la siguiente tanda lo reintenta aunque ya esté analizado.
+    compatibility: Literal["unknown", "compatible", "incompatible", "error"] = "compatible"
     compatibility_checked_at: str | None = None
     compatibility_error: str | None = Field(default=None, max_length=2000)
 
@@ -183,9 +185,16 @@ class OpenAICompatibleModelConfig(BaseModel):
     input_cost_per_million: float = Field(default=0.0, ge=0)
     output_cost_per_million: float = Field(default=0.0, ge=0)
     capabilities: list[str] = Field(default_factory=lambda: ["completion"])
-    compatibility: Literal["unknown", "compatible", "incompatible"] = "unknown"
+    # "incompatible" = error definitivo del contrato (400/404/422): el modelo
+    # queda vetado para cualquier uso. "error" = fallo temporal (5xx, timeout,
+    # credenciales): sigue usable y se reintenta en la siguiente tanda.
+    compatibility: Literal["unknown", "compatible", "incompatible", "error"] = "unknown"
     compatibility_checked_at: str | None = None
     compatibility_error: str | None = Field(default=None, max_length=2000)
+    # Capacidades sondeadas contra el endpoint real (vision, json_mode, tools).
+    # Clave ausente = sin sondear o sondeo no concluyente; True/False = verificado.
+    features: dict[str, bool] = Field(default_factory=dict)
+    features_checked_at: str | None = None
 
 
 class OpenAICompatibleProviderConfig(BaseModel):
@@ -208,6 +217,9 @@ class OpenAICompatibleProviderConfig(BaseModel):
     probe_max_models: int = Field(default=10, ge=1, le=1000)
     probe_skip_compatible: bool = True
     probe_skip_checked: bool = True
+    # Tras verificar el chat, sondea también visión, JSON estructurado y tools
+    # (3 peticiones extra de 1 token por modelo operativo).
+    probe_features: bool = True
     input_cost_per_million: float = Field(default=0.0, ge=0)
     output_cost_per_million: float = Field(default=0.0, ge=0)
     models: list[OpenAICompatibleModelConfig] = Field(default_factory=list)

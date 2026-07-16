@@ -743,6 +743,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             base_url="https://integrate.api.nvidia.com/v1",
             probe_delay_seconds=0,
+            probe_features=False,
             models=[
                 OpenAICompatibleModelConfig(name="already-ok", compatibility="compatible"),
                 OpenAICompatibleModelConfig(name="pending", compatibility="unknown"),
@@ -769,6 +770,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             base_url="https://integrate.api.nvidia.com/v1",
             probe_delay_seconds=0,
+            probe_features=False,
             models=[
                 OpenAICompatibleModelConfig(
                     name="already-bad",
@@ -986,8 +988,153 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         provider2 = OpenAICompatibleProvider(config, transport=httpx.MockTransport(timeout_handler))
         with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
             result = await provider2.probe_chat_compatibility("modelo")
-        self.assertEqual(result["compatibility"], "incompatible")
+        # Un timeout es un fallo del proveedor, no del modelo: no lo veta.
+        self.assertEqual(result["compatibility"], "error")
         await provider2.close()
+
+    async def test_probe_chat_compatibility_distinguishes_definitive_and_transient_errors(self) -> None:
+        config = OpenAICompatibleProviderConfig(id="nvidia", enabled=True, base_url="https://integrate.api.nvidia.com/v1")
+        cases = [
+            (404, "incompatible"),   # el modelo no existe en el endpoint: veto definitivo
+            (400, "incompatible"),   # contrato rechazado: veto definitivo
+            (500, "error"),          # fallo del servidor: temporal, se reintenta
+            (503, "error"),
+            (403, "error"),          # permisos/credenciales: no es culpa del modelo
+        ]
+        for status, expected in cases:
+            def handler(request: httpx.Request, status=status) -> httpx.Response:
+                return httpx.Response(status, json={"error": {"message": f"status {status}"}})
+
+            provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+            with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+                result = await provider.probe_chat_compatibility("modelo")
+            await provider.close()
+            self.assertEqual(result["compatibility"], expected, f"HTTP {status}")
+        # El fallo de credenciales lo explica el mensaje, no el veto.
+        self.assertIn("Credenciales o permisos", result["compatibility_error"])
+
+    async def test_probe_all_models_retries_transient_errors_despite_skip_checked(self) -> None:
+        called_models = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            called_models.append(body["model"])
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            probe_features=False,
+            models=[
+                OpenAICompatibleModelConfig(
+                    name="fallo-temporal",
+                    compatibility="error",
+                    compatibility_checked_at="2026-07-15T10:00:00+00:00",
+                ),
+                OpenAICompatibleModelConfig(
+                    name="vetado",
+                    compatibility="incompatible",
+                    compatibility_checked_at="2026-07-15T10:00:00+00:00",
+                ),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        # El error temporal se reintenta (y aquí se recupera); el veto definitivo no.
+        self.assertEqual(called_models, ["fallo-temporal"])
+        self.assertEqual(results[0]["compatibility"], "compatible")
+
+    async def test_probe_all_models_probes_features_for_operational_models(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            model = body["model"]
+            messages = body.get("messages") or []
+            content = messages[-1].get("content") if messages else None
+            if isinstance(content, list):
+                calls.append((model, "vision"))
+                # El proveedor rechaza imágenes para este modelo: visión = False.
+                return httpx.Response(400, json={"error": {"message": "image input not supported"}})
+            if "response_format" in body:
+                calls.append((model, "json_mode"))
+                return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+            if "tools" in body:
+                calls.append((model, "tools"))
+                return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+            calls.append((model, "chat"))
+            if model == "roto":
+                return httpx.Response(404, json={"error": {"message": "not found"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(name="operativo", compatibility="unknown"),
+                OpenAICompatibleModelConfig(name="roto", compatibility="unknown"),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        by_name = {item["name"]: item for item in results}
+        self.assertEqual(by_name["operativo"]["compatibility"], "compatible")
+        self.assertEqual(by_name["operativo"]["features"], {"vision": False, "json_mode": True, "tools": True})
+        self.assertIsNotNone(by_name["operativo"]["features_checked_at"])
+        # Un modelo no operativo no gasta sondeos de capacidades.
+        self.assertEqual(by_name["roto"]["compatibility"], "incompatible")
+        self.assertNotIn("features", by_name["roto"])
+        self.assertEqual([item for item in calls if item[0] == "roto"], [("roto", "chat")])
+
+    async def test_probe_features_rate_limit_keeps_partial_and_stops_batch(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            model = body["model"]
+            messages = body.get("messages") or []
+            content = messages[-1].get("content") if messages else None
+            if isinstance(content, list):
+                calls.append((model, "vision"))
+                return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+            if "response_format" in body:
+                calls.append((model, "json_mode"))
+                return httpx.Response(429, json={"error": {"message": "rate"}})
+            calls.append((model, "chat"))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(name="uno", compatibility="unknown"),
+                OpenAICompatibleModelConfig(name="dos", compatibility="unknown"),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        # El rate limit a mitad de capacidades conserva el resultado del chat
+        # con las capacidades parciales ya verificadas, y corta la tanda.
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "uno")
+        self.assertEqual(results[0]["compatibility"], "compatible")
+        self.assertEqual(results[0]["features"], {"vision": True})
+        self.assertNotIn(("dos", "chat"), calls)
 
     async def test_probe_embedding_compatibility_maps_rate_limit_http_and_network_errors(self) -> None:
         config = OpenAICompatibleProviderConfig(id="nvidia", enabled=True, base_url="https://integrate.api.nvidia.com/v1")
@@ -1016,7 +1163,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         provider2 = OpenAICompatibleProvider(config, transport=httpx.MockTransport(timeout_handler))
         with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
             network_result = await provider2.probe_embedding_compatibility("modelo")
-        self.assertEqual(network_result["compatibility"], "incompatible")
+        self.assertEqual(network_result["compatibility"], "error")
         await provider2.close()
 
     async def test_probe_all_models_reports_progress_and_stops_on_rate_limit(self) -> None:

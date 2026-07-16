@@ -8,7 +8,9 @@
     <optgroup label="{{ provider }}">
       {% for model in group %}
         {% set value = model|model_value %}
-        <option value="{{ value }}" {% if selected == value %}selected{% endif %}>{{ model|model_compatibility_label }} {{ model.deployment }}/{{ model.name }}</option>
+        {% set features = model|model_features_text %}
+        {% set json_mode = (model.features or {}).get('json_mode') %}
+        <option value="{{ value }}" {% if selected == value %}selected{% endif %}{% if json_mode is not none %} data-json-mode="{{ 'yes' if json_mode else 'no' }}"{% endif %}>{{ model|model_compatibility_label }} {{ model.deployment }}/{{ model.name }}{% if features != 'sin sondear' %} — {{ features }}{% endif %}</option>
       {% endfor %}
     </optgroup>
   {% endfor %}
@@ -50,6 +52,16 @@
               <span class="badge badge-queued">En cola</span>
               <span>Consultando estado…</span>
             </div>
+          </div>
+        {% endif %}
+        {% if feature_warnings %}
+          <div class="alert warning">
+            <strong>Aviso de capacidades sondeadas</strong>
+            <ul>
+              {% for warning in feature_warnings %}
+                <li>{{ warning }}</li>
+              {% endfor %}
+            </ul>
           </div>
         {% endif %}
         {% if impact_preview %}
@@ -141,7 +153,7 @@
                 </select>
               </label>
               <div class="mixture-fields" data-show-strategy="mixture_of_agents">
-                <p class="form-hint">Solo se listan modelos aptos para mixture o pendientes de analizar; los incompatibles quedan fuera.</p>
+                <p class="form-hint">Solo se listan modelos operativos, pendientes o con error temporal; los no operativos (rechazados por el proveedor) quedan fuera.</p>
                 <div class="field-pair">
                   <label class="field">
                     <span>Preset mixture</span>
@@ -223,6 +235,9 @@
                 <span>JSON Schema de salida</span>
                 <textarea name="json_schema" rows="5" placeholder='{"type":"object"}'>{{ form.json_schema }}</textarea>
               </label>
+              {# Aviso en vivo: lo rellena dashboard.js con los modelos elegidos
+                 cuyo sondeo verificó que no soportan JSON estructurado. #}
+              <div class="alert warning tester-feature-warning" data-feature-warnings hidden></div>
               <div class="check-row">
                 <label><input type="checkbox" name="cloud_allowed" {% if form.cloud_allowed %}checked{% endif %}> Permitir cloud</label>
                 <label><input type="checkbox" name="fallback_allowed" {% if form.fallback_allowed %}checked{% endif %}> Permitir fallback</label>
