@@ -11,6 +11,7 @@ from app.dashboard_forms import (
     _apply_probe_results,
     _auto_or_int_field,
     _checked,
+    _custom_provider_form_indexes,
     _ensure_cloud_allowed,
     _find_custom_provider,
     _float_field,
@@ -19,6 +20,7 @@ from app.dashboard_forms import (
     _int_range_field,
     _optional_float,
     _parse_custom_provider_models,
+    _parse_custom_providers,
     _parse_huggingface_local_models,
     _parse_model_reference,
     _parse_proposers,
@@ -156,6 +158,74 @@ def test_find_custom_provider_is_case_insensitive() -> None:
     config = _config_with_custom()
     assert _find_custom_provider(config, "LMSTUDIO") is not None
     assert _find_custom_provider(config, "inexistente") is None
+
+
+def test_custom_provider_form_indexes_are_dynamic() -> None:
+    form = {
+        "custom_provider_1_id": "lmstudio",
+        "custom_provider_4_id": "nuevo",
+        "custom_provider_12_base_url": "http://x",
+        "otro_campo": "x",
+    }
+    assert _custom_provider_form_indexes(form) == [1, 4, 12]
+    assert _custom_provider_form_indexes({}) == []
+
+
+def test_parse_custom_providers_preserves_models_when_form_omits_them() -> None:
+    """El formulario de config ya no lista los modelos: guardar la conexión de
+    un proveedor no debe borrar los modelos que mantiene el analizador."""
+    config = _config_with_custom()
+    form = {
+        "custom_provider_1_enabled": "on",
+        "custom_provider_1_id": "lmstudio",
+        "custom_provider_1_base_url": "http://127.0.0.1:1234/v1",
+        "custom_provider_1_deployment": "local",
+    }
+    providers = _parse_custom_providers(config, form)
+    assert len(providers) == 1
+    assert [model["name"] for model in providers[0]["models"]] == ["previo"]
+    assert providers[0]["models"][0]["context_window"] == 4096
+
+
+def test_parse_custom_providers_accepts_index_beyond_three() -> None:
+    config = BrokerConfig()
+    form = {
+        "custom_provider_4_enabled": "on",
+        "custom_provider_4_id": "openrouter",
+        "custom_provider_4_base_url": "https://openrouter.ai/api/v1",
+        "custom_provider_4_sync_models": "on",
+    }
+    providers = _parse_custom_providers(config, form)
+    assert [item["id"] for item in providers] == ["openrouter"]
+
+
+def test_parse_custom_providers_drops_provider_marked_for_deletion() -> None:
+    config = _config_with_custom()
+    form = {
+        "custom_provider_1_delete": "on",
+        "custom_provider_1_enabled": "on",
+        "custom_provider_1_id": "lmstudio",
+        "custom_provider_1_base_url": "http://127.0.0.1:1234/v1",
+        "custom_provider_2_enabled": "on",
+        "custom_provider_2_id": "openrouter",
+        "custom_provider_2_base_url": "https://openrouter.ai/api/v1",
+        "custom_provider_2_sync_models": "on",
+    }
+    providers = _parse_custom_providers(config, form)
+    assert [item["id"] for item in providers] == ["openrouter"]
+
+
+def test_parse_custom_providers_still_parses_models_textarea_when_present() -> None:
+    config = _config_with_custom()
+    form = {
+        "custom_provider_1_enabled": "on",
+        "custom_provider_1_id": "lmstudio",
+        "custom_provider_1_base_url": "http://127.0.0.1:1234/v1",
+        "custom_provider_1_models": "previo|8192\nextra|4096",
+    }
+    providers = _parse_custom_providers(config, form)
+    assert [model["name"] for model in providers[0]["models"]] == ["previo", "extra"]
+    assert providers[0]["models"][0]["context_window"] == 8192
 
 
 def test_apply_probe_results_merges_catalog_and_probe_outcomes() -> None:

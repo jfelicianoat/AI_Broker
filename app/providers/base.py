@@ -268,6 +268,24 @@ def provider_http_error_message(error: httpx.HTTPStatusError) -> str:
     return f"HTTP {response.status_code} en {response.url}"
 
 
+def classify_probe_http_error(error: httpx.HTTPStatusError) -> tuple[str, str]:
+    """Clasifica un fallo HTTP de sondeo de compatibilidad.
+
+    Solo los errores que describen el contrato (el modelo no existe en el
+    endpoint o no habla chat: 400/404/422 y afines) vetan el modelo como
+    "incompatible". Los fallos de credenciales (401/403) y del servidor
+    (408/5xx) son "error": temporales, no vetan y el siguiente sondeo los
+    reintenta aunque el modelo ya figure como analizado.
+    """
+    status = error.response.status_code
+    message = provider_http_error_message(error)
+    if status in (401, 403):
+        return "error", f"Credenciales o permisos insuficientes: {message}"
+    if status == 408 or status >= 500:
+        return "error", message
+    return "incompatible", message
+
+
 class CredentialResolver:
     @staticmethod
     def get(config: Any) -> str | None:

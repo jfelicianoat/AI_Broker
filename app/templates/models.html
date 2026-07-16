@@ -31,9 +31,10 @@
 
         <section class="metric-grid models-overview" aria-label="Resumen de modelos">
           <div class="metric-card"><span class="metric-label">Modelos catalogados</span><strong>{{ model_stats.total }}</strong><small>{{ model_stats.providers }} proveedor(es), {{ model_stats.deployments }} deployment(s)</small></div>
-          <div class="metric-card"><span class="metric-label">Compatibles mixture</span><strong>{{ model_stats.compatible }}</strong><small>Listos para proponer o arbitrar</small></div>
+          <div class="metric-card"><span class="metric-label">Operativos</span><strong>{{ model_stats.compatible }}</strong><small>Chat verificado: válidos en solitario y en mixture</small></div>
           <div class="metric-card"><span class="metric-label">Pendientes</span><strong>{{ model_stats.unknown }}</strong><small>Sin análisis de compatibilidad</small></div>
-          <div class="metric-card"><span class="metric-label">No compatibles</span><strong>{{ model_stats.incompatible }}</strong><small>Excluidos del flujo mixture</small></div>
+          <div class="metric-card"><span class="metric-label">Error temporal</span><strong>{{ model_stats.errors }}</strong><small>Fallo del proveedor: se reintentan en la próxima tanda</small></div>
+          <div class="metric-card"><span class="metric-label">No operativos</span><strong>{{ model_stats.incompatible }}</strong><small>El proveedor los rechaza: vetados para cualquier uso</small></div>
           <div class="metric-card"><span class="metric-label">Cargados ahora</span><strong>{{ model_stats.loaded }}</strong><small>Snapshot {{ resources.checked_at|short_time }}</small></div>
         </section>
 
@@ -58,6 +59,7 @@
                       <th>Deployment</th>
                       <th>Contexto</th>
                       <th>Capacidades</th>
+                      <th>Funciones</th>
                       <th>Compatibilidad</th>
                     </tr>
                   </thead>
@@ -72,6 +74,7 @@
                         <td>{{ model.deployment }}</td>
                         <td>{{ model.context_window or 'N/D' }}</td>
                         <td>{{ (model.capabilities or [])|join(', ') if model.capabilities else 'N/D' }}</td>
+                        <td {% if model.features_checked_at %}title="Sondeado {{ model.features_checked_at }}"{% endif %}>{{ model|model_features_text }}</td>
                         <td>
                           {% if model.provider|lower in probeable_provider_ids %}
                             <form class="compatibility-probe-form" method="post" action="/dashboard/actions/models/probe">

@@ -19,14 +19,22 @@ STATUS_LABELS = {
 
 COMPATIBILITY_LABELS = {
     "compatible": "[OK]",
-    "incompatible": "[NO MIX]",
+    "incompatible": "[NO OPERATIVO]",
+    "error": "[ERROR TEMP]",
     "unknown": "[PENDIENTE]",
 }
 
 COMPATIBILITY_TEXTS = {
-    "compatible": "Compatible mixture",
-    "incompatible": "No compatible mixture",
+    "compatible": "Operativo",
+    "incompatible": "No operativo",
+    "error": "Error temporal",
     "unknown": "Pendiente de analizar",
+}
+
+FEATURE_LABELS = {
+    "vision": "visión",
+    "json_mode": "JSON",
+    "tools": "tools",
 }
 
 
@@ -72,7 +80,19 @@ def model_compatibility_class(value: Any) -> str:
         return "model-compatible"
     if compatibility == "incompatible":
         return "model-incompatible"
+    if compatibility == "error":
+        return "model-error"
     return "model-unknown"
+
+
+def model_features_text(value: Any) -> str:
+    """Capacidades sondeadas de un modelo: 'visión · JSON · tools' o el motivo
+    por el que no hay dato. Clave ausente = ese aspecto no se llegó a verificar."""
+    features = (value or {}).get("features") or {}
+    if not features:
+        return "sin sondear"
+    enabled = [FEATURE_LABELS.get(key, key) for key, ok in features.items() if ok]
+    return " · ".join(enabled) if enabled else "solo texto"
 
 
 def status_label(value: Any) -> str:
@@ -89,4 +109,5 @@ def register_filters(env: Any) -> None:
     env.filters["model_compatibility_label"] = model_compatibility_label
     env.filters["model_compatibility_text"] = model_compatibility_text
     env.filters["model_compatibility_class"] = model_compatibility_class
+    env.filters["model_features_text"] = model_features_text
     env.filters["status_label"] = status_label

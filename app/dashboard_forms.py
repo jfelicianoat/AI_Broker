@@ -7,6 +7,7 @@ limita ahora a este archivo en vez de a todo el panel.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -19,7 +20,7 @@ from app.config import (
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
 )
-from app.schemas import ModelReference, TaskCreateRequest, is_local_deployment
+from app.schemas import ModelReference, OutputFormat, TaskCreateRequest, is_local_deployment
 
 
 class PromptTesterError(ValueError):
@@ -116,8 +117,9 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
             ("probe_delay_seconds", "pausa probe"),
             ("probe_max_models", "máx. modelos por análisis"),
             ("sync_models", "sincronizar catalogo"),
-            ("probe_skip_compatible", "omitir verdes"),
+            ("probe_skip_compatible", "omitir operativos"),
             ("probe_skip_checked", "omitir analizados"),
+            ("probe_features", "sondear capacidades"),
         ]
         for key, label in provider_checks:
             before = before_provider.get(key)
@@ -215,12 +217,31 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
 
 
 
+_CUSTOM_PROVIDER_FIELD_PATTERN = re.compile(r"^custom_provider_(\d+)_")
+
+
+def _custom_provider_form_indexes(form: dict[str, str]) -> list[int]:
+    """Índices de proveedor presentes en el formulario: el número de
+    proveedores es dinámico (el combo permite dar de alta los que hagan falta)."""
+    indexes = {
+        int(match.group(1))
+        for key in form
+        if (match := _CUSTOM_PROVIDER_FIELD_PATTERN.match(key))
+    }
+    return sorted(indexes)
+
+
 def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list[dict[str, Any]]:
     providers: list[dict[str, Any]] = []
-    for index in range(1, 4):
+    for index in _custom_provider_form_indexes(form):
+        # Baja explícita desde el botón "Eliminar proveedor": el proveedor se
+        # omite del YAML resultante, modelos incluidos.
+        if _checked(form, f"custom_provider_{index}_delete"):
+            continue
         provider_id = form.get(f"custom_provider_{index}_id", "").strip()
         base_url = form.get(f"custom_provider_{index}_base_url", "").strip()
-        models_text = form.get(f"custom_provider_{index}_models", "").strip()
+        models_field = form.get(f"custom_provider_{index}_models")
+        models_text = (models_field or "").strip()
         enabled = _checked(form, f"custom_provider_{index}_enabled")
         if not provider_id and not base_url and not models_text:
             continue
@@ -230,7 +251,12 @@ def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list
             raise PromptTesterError(f"Proveedor custom {provider_id}: indica base_url.")
         previous = _find_custom_provider(current, provider_id)
         previous_models = {item.name: item for item in previous.models} if previous is not None else {}
-        models = _parse_custom_provider_models(provider_id, models_text, previous_models)
+        if models_field is None:
+            # El formulario ya no lista los modelos: se conservan los del YAML
+            # (los mantienen el analizador y la sincronización de catálogo).
+            models = list(previous.models) if previous is not None else []
+        else:
+            models = _parse_custom_provider_models(provider_id, models_text, previous_models)
         sync_models = _checked(form, f"custom_provider_{index}_sync_models")
         if enabled and not sync_models and not models:
             raise PromptTesterError(
@@ -255,6 +281,7 @@ def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list
             "probe_max_models": _int_field(form, f"custom_provider_{index}_probe_max_models", 50),
             "probe_skip_compatible": _checked(form, f"custom_provider_{index}_probe_skip_compatible"),
             "probe_skip_checked": _checked(form, f"custom_provider_{index}_probe_skip_checked"),
+            "probe_features": _checked(form, f"custom_provider_{index}_probe_features"),
             "input_cost_per_million": _float_field(form, f"custom_provider_{index}_input_cost_per_million", 0.0),
             "output_cost_per_million": _float_field(form, f"custom_provider_{index}_output_cost_per_million", 0.0),
             "models": [item.model_dump(mode="json") for item in models],
@@ -334,6 +361,8 @@ def _parse_custom_provider_models(
                 compatibility=previous.compatibility if previous is not None else "unknown",
                 compatibility_checked_at=previous.compatibility_checked_at if previous is not None else None,
                 compatibility_error=previous.compatibility_error if previous is not None else None,
+                features=dict(previous.features) if previous is not None else {},
+                features_checked_at=previous.features_checked_at if previous is not None else None,
             ))
         except (ValueError, ValidationError) as error:
             raise PromptTesterError(
@@ -380,6 +409,8 @@ def _apply_probe_results(
                 compatibility=previous.compatibility,
                 compatibility_checked_at=previous.compatibility_checked_at,
                 compatibility_error=previous.compatibility_error,
+                features=dict(previous.features),
+                features_checked_at=previous.features_checked_at,
             )
             continue
         updated_by_name[name] = OpenAICompatibleModelConfig(
@@ -395,6 +426,7 @@ def _apply_probe_results(
     for result in results:
         name = str(result["name"])
         previous = updated_by_name.get(name)
+        result_features = result.get("features")
         updated_by_name[name] = OpenAICompatibleModelConfig(
             name=name,
             context_window=previous.context_window if previous is not None else provider_config.default_context_window,
@@ -408,6 +440,18 @@ def _apply_probe_results(
             compatibility=str(result.get("compatibility") or "unknown"),
             compatibility_checked_at=result.get("compatibility_checked_at"),
             compatibility_error=result.get("compatibility_error"),
+            # El sondeo de capacidades puede no haberse ejecutado (modelo no
+            # operativo, rate limit): en ese caso se conserva lo ya verificado.
+            features=(
+                dict(result_features)
+                if isinstance(result_features, dict)
+                else (dict(previous.features) if previous is not None else {})
+            ),
+            features_checked_at=(
+                result.get("features_checked_at")
+                if isinstance(result_features, dict)
+                else (previous.features_checked_at if previous is not None else None)
+            ),
         )
     provider_config.models = list(updated_by_name.values())
 
@@ -549,6 +593,50 @@ def _prompt_tester_impact(payload: TaskCreateRequest) -> dict[str, Any]:
         "fallback_allowed": bool(model_requirements.get("fallback_allowed")),
         "cloud_models": cloud_models,
     }
+
+
+def _prompt_tester_selected_models(payload: TaskCreateRequest) -> list[dict[str, Any]]:
+    """Referencias de modelo (dicts provider/deployment/model) que ejecutará la tarea."""
+    data = payload.model_dump(mode="json")
+    execution = data.get("execution") or {}
+    if execution.get("strategy") == "mixture_of_agents":
+        selection = execution.get("selection") if isinstance(execution.get("selection"), dict) else {}
+        proposers = selection.get("proposers") if isinstance(selection.get("proposers"), list) else []
+        selected = list(proposers) + ([selection.get("arbiter")] if selection.get("arbiter") else [])
+    else:
+        model_requirements = data.get("model_requirements") or {}
+        selected = [model_requirements.get("target_model")]
+    return [item for item in selected if isinstance(item, dict)]
+
+
+def _prompt_tester_feature_warnings(
+    payload: TaskCreateRequest,
+    catalog: list[dict[str, Any]],
+) -> list[str]:
+    """Avisos no bloqueantes: la petición exige una capacidad que el sondeo
+    verificó como no soportada en algún modelo seleccionado. Sin sondeo
+    (clave ausente en features) no se avisa: solo cuenta el negativo probado."""
+    if payload.output.format != OutputFormat.json:
+        return []
+    entries = {
+        (str(item.get("provider") or "").lower(), str(item.get("name") or "")): item
+        for item in catalog
+    }
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for item in _prompt_tester_selected_models(payload):
+        label = f"{item.get('provider')}/{item.get('model')}"
+        if label in seen:
+            continue
+        entry = entries.get((str(item.get("provider") or "").lower(), str(item.get("model") or "")))
+        features = (entry or {}).get("features") or {}
+        if features.get("json_mode") is False:
+            seen.add(label)
+            warnings.append(
+                f"El modelo {label} no superó el sondeo de JSON estructurado: "
+                "la salida JSON puede llegar como texto plano o fallar."
+            )
+    return warnings
 
 
 def _parse_proposers(form: dict[str, str]) -> list[ModelReference]:

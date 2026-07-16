@@ -4,7 +4,7 @@ import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -38,6 +38,7 @@ from app.dashboard_forms import (
     _config_review_items,
     _find_custom_provider,
     _prompt_tester_defaults,
+    _prompt_tester_feature_warnings,
     _prompt_tester_impact,
     _validation_messages,
 )
@@ -57,6 +58,7 @@ from app.schemas import (
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
+CSRF_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 8
 templates = Jinja2Templates(directory=TEMPLATES_ROOT)
 register_filters(templates.env)
 
@@ -166,6 +168,7 @@ def create_dashboard_router(
                 "request_preview": None,
                 "impact_preview": None,
                 "compression_preview": None,
+                "feature_warnings": [],
                 "accepted": None,
                 "nav_active": "probador",
             },
@@ -519,6 +522,7 @@ def create_dashboard_router(
         request_preview = None
         impact_preview = None
         compression_preview = None
+        payload: TaskCreateRequest | None = None
         try:
             payload = _build_prompt_tester_request(form)
             request_preview = payload.model_dump(mode="json")
@@ -557,6 +561,9 @@ def create_dashboard_router(
                 "request_preview": request_preview,
                 "impact_preview": impact_preview,
                 "compression_preview": compression_preview,
+                "feature_warnings": (
+                    _prompt_tester_feature_warnings(payload, catalog) if payload is not None else []
+                ),
                 "accepted": accepted,
                 "nav_active": "probador",
             },
@@ -659,22 +666,31 @@ def _template_response(request: Request, name: str, context: dict[str, Any]):
         name=name,
         context={"request": request, "csrf_token": token, **context},
     )
-    if request.cookies.get(CSRF_COOKIE_NAME) != token:
-        response.set_cookie(
-            CSRF_COOKIE_NAME,
-            token,
-            httponly=True,
-            samesite="strict",
-            secure=False,
-            path="/dashboard",
-            max_age=60 * 60 * 8,
-        )
+    # Se reenvía siempre, aunque el valor no cambie: cada render renueva el
+    # max_age (caducidad deslizante) para que una sesión activa no expire.
+    set_csrf_cookie(response, token)
     return response
+
+
+def set_csrf_cookie(response: Any, token: str) -> None:
+    response.set_cookie(
+        CSRF_COOKIE_NAME,
+        token,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        path="/dashboard",
+        max_age=CSRF_COOKIE_MAX_AGE_SECONDS,
+    )
+
+
+def valid_csrf_token_shape(token: str | None) -> TypeGuard[str]:
+    return token is not None and 24 <= len(token) <= 160
 
 
 def _csrf_token(request: Request) -> str:
     existing = request.cookies.get(CSRF_COOKIE_NAME)
-    if existing and 24 <= len(existing) <= 160:
+    if valid_csrf_token_shape(existing):
         return existing
     return secrets.token_urlsafe(32)
 
@@ -739,13 +755,15 @@ def _model_dashboard_stats(
     deployments = {str(item.get("deployment") or "unknown") for item in catalog}
     compatible = sum(1 for item in catalog if str(item.get("compatibility") or "unknown") == "compatible")
     incompatible = sum(1 for item in catalog if str(item.get("compatibility") or "unknown") == "incompatible")
-    unknown = len(catalog) - compatible - incompatible
+    errors = sum(1 for item in catalog if str(item.get("compatibility") or "unknown") == "error")
+    unknown = len(catalog) - compatible - incompatible - errors
     return {
         "total": len(catalog),
         "providers": len(providers),
         "deployments": len(deployments),
         "compatible": compatible,
         "incompatible": incompatible,
+        "errors": errors,
         "unknown": unknown,
         "loaded": len(resources.loaded_models),
     }
@@ -773,8 +791,9 @@ def _model_probe_notice(
             "message": error or "El proveedor no ha devuelto un resultado valido.",
         }
     label = {
-        "compatible": "compatible con mixture",
-        "incompatible": "no compatible con mixture",
+        "compatible": "operativo (chat verificado)",
+        "incompatible": "no operativo: el proveedor rechaza el modelo",
+        "error": "con error temporal del proveedor; se reintentará en la próxima tanda",
         "unknown": "pendiente de clasificar",
     }.get(result, result)
     return {
@@ -814,7 +833,11 @@ async def _probe_single_custom_model(
             raise PromptTesterError(f"Modelo no encontrado en {provider_config.id}: {model_name}")
         capabilities = {str(capability).lower() for capability in entry.get("capabilities") or []}
         if "completion" in capabilities:
-            return await probe.probe_chat_compatibility(model_name), catalog
+            result = await probe.probe_chat_compatibility(model_name)
+            if result.get("compatibility") == "compatible" and provider_config.probe_features:
+                result["features"] = await probe.probe_model_features(model_name)
+                result["features_checked_at"] = _utc_now().isoformat()
+            return result, catalog
         if "embedding" in capabilities:
             return await probe.probe_embedding_compatibility(model_name), catalog
         return {

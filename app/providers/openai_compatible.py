@@ -16,6 +16,7 @@ from app.providers.base import (
     ProviderError,
     _CatalogCache,
     _estimation_text,
+    classify_probe_http_error,
     enforce_context_limit,
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
@@ -23,6 +24,15 @@ from app.providers.base import (
     request_with_context_capped_output,
 )
 from app.schemas import OutputFormat, TaskCreateRequest
+
+# Capacidades sondeables contra /chat/completions con 1 token de salida.
+PROBE_FEATURES: tuple[str, ...] = ("vision", "json_mode", "tools")
+
+# PNG de 1x1 pixel: suficiente para saber si el modelo acepta imagenes.
+_PROBE_PIXEL_PNG = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 class OpenAICompatibleProvider:
@@ -107,6 +117,10 @@ class OpenAICompatibleProvider:
             "compatibility_error": (
                 model_config.compatibility_error if model_config is not None else None
             ),
+            "features": dict(model_config.features) if model_config is not None else {},
+            "features_checked_at": (
+                model_config.features_checked_at if model_config is not None else None
+            ),
         }
 
     def _model_config(self, model: str) -> Any | None:
@@ -149,19 +163,94 @@ class OpenAICompatibleProvider:
                     provider_http_error_message(error),
                     retryable=True,
                 ) from error
+            compatibility, detail = classify_probe_http_error(error)
             return {
                 "name": model,
-                "compatibility": "incompatible",
+                "compatibility": compatibility,
                 "compatibility_checked_at": started.isoformat(),
-                "compatibility_error": provider_http_error_message(error),
+                "compatibility_error": detail,
             }
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             return {
                 "name": model,
-                "compatibility": "incompatible",
+                "compatibility": "error",
                 "compatibility_checked_at": started.isoformat(),
                 "compatibility_error": str(error),
             }
+
+    def _feature_probe_payload(self, model: str, feature: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": self.config.probe_max_output_tokens,
+            "temperature": 0.1,
+            "stream": False,
+        }
+        if feature == "vision":
+            payload["messages"] = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "ping"},
+                    {"type": "image_url", "image_url": {"url": _PROBE_PIXEL_PNG}},
+                ],
+            }]
+        elif feature == "json_mode":
+            payload["messages"] = [{"role": "user", "content": "Devuelve un objeto JSON vacio."}]
+            payload["response_format"] = {"type": "json_object"}
+        elif feature == "tools":
+            payload["messages"] = [{"role": "user", "content": "ping"}]
+            payload["tools"] = [{
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "description": "Sonda de function calling",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }]
+        else:
+            raise ValueError(f"Capacidad no sondeable: {feature}")
+        return payload
+
+    async def probe_feature(self, model: str, feature: str) -> bool | None:
+        """True/False = verificado contra el endpoint; None = no concluyente
+        (fallo temporal del proveedor: no se persiste como negativo)."""
+        try:
+            response = await self.client.post(
+                "/chat/completions",
+                headers=self._headers(),
+                json=self._feature_probe_payload(model, feature),
+            )
+            response.raise_for_status()
+            return bool(response.json().get("choices"))
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            if status == 429:
+                raise ProviderError(
+                    "RATE_LIMITED",
+                    provider_http_error_message(error),
+                    retryable=True,
+                ) from error
+            if status in (401, 403, 408) or status >= 500:
+                return None
+            return False
+        except (httpx.TimeoutException, httpx.NetworkError):
+            return None
+
+    async def probe_model_features(self, model: str) -> dict[str, bool]:
+        features: dict[str, bool] = {}
+        for feature in PROBE_FEATURES:
+            if self.config.probe_delay_seconds:
+                await asyncio.sleep(self.config.probe_delay_seconds)
+            try:
+                outcome = await self.probe_feature(model, feature)
+            except ProviderError as error:
+                if error.code == "RATE_LIMITED":
+                    # Lo ya verificado no se pierde: el llamante decide si
+                    # persiste el parcial y corta la tanda.
+                    error.details["partial_features"] = dict(features)
+                raise
+            if outcome is not None:
+                features[feature] = outcome
+        return features
 
     async def probe_embedding_compatibility(self, model: str) -> dict[str, Any]:
         started = datetime.now(timezone.utc)
@@ -189,16 +278,17 @@ class OpenAICompatibleProvider:
                     provider_http_error_message(error),
                     retryable=True,
                 ) from error
+            compatibility, detail = classify_probe_http_error(error)
             return {
                 "name": model,
-                "compatibility": "incompatible",
+                "compatibility": compatibility,
                 "compatibility_checked_at": started.isoformat(),
-                "compatibility_error": provider_http_error_message(error),
+                "compatibility_error": detail,
             }
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             return {
                 "name": model,
-                "compatibility": "incompatible",
+                "compatibility": "error",
                 "compatibility_checked_at": started.isoformat(),
                 "compatibility_error": str(error),
             }
@@ -221,7 +311,9 @@ class OpenAICompatibleProvider:
         candidates = []
         for item in catalog:
             compatibility = str(item.get("compatibility") or "unknown")
-            if skip_checked and item.get("compatibility_checked_at"):
+            # Los errores temporales se reintentan siempre: "ya analizado" no
+            # aplica a un sondeo que falló por causas ajenas al modelo.
+            if skip_checked and item.get("compatibility_checked_at") and compatibility != "error":
                 continue
             if skip_compatible and compatibility == "compatible":
                 continue
@@ -248,14 +340,35 @@ class OpenAICompatibleProvider:
                     "current_model": name,
                     "last_result": None,
                 })
+            rate_limited = False
             if "completion" in capabilities:
                 try:
                     result = await self.probe_chat_compatibility(name)
-                    results.append(result)
                 except ProviderError as error:
                     if error.code == "RATE_LIMITED":
                         break
                     raise
+                if result["compatibility"] == "compatible" and self.config.probe_features:
+                    if progress_callback is not None:
+                        await progress_callback({
+                            "phase": "running",
+                            "completed": len(results),
+                            "total": len(candidates),
+                            "current_model": f"{name} (capacidades)",
+                            "last_result": None,
+                        })
+                    try:
+                        result["features"] = await self.probe_model_features(name)
+                        result["features_checked_at"] = datetime.now(timezone.utc).isoformat()
+                    except ProviderError as error:
+                        if error.code != "RATE_LIMITED":
+                            raise
+                        partial = error.details.get("partial_features") or {}
+                        if partial:
+                            result["features"] = partial
+                            result["features_checked_at"] = datetime.now(timezone.utc).isoformat()
+                        rate_limited = True
+                results.append(result)
             elif "embedding" in capabilities:
                 try:
                     result = await self.probe_embedding_compatibility(name)
@@ -280,6 +393,8 @@ class OpenAICompatibleProvider:
                     "current_model": name,
                     "last_result": result,
                 })
+            if rate_limited:
+                break
             if self.config.probe_delay_seconds:
                 await asyncio.sleep(self.config.probe_delay_seconds)
         if progress_callback is not None:

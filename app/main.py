@@ -22,7 +22,13 @@ from app.admin_auth import (
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository
-from app.dashboard_web import create_dashboard_router, load_dashboard_resources
+from app.dashboard_web import (
+    CSRF_COOKIE_NAME,
+    create_dashboard_router,
+    load_dashboard_resources,
+    set_csrf_cookie,
+    valid_csrf_token_shape,
+)
 from app.db import Database
 from app.dispatcher import dispatcher_loop
 from app.health import HealthCache, health_response
@@ -216,6 +222,18 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             "form-action 'self'; "
             "frame-ancestors 'none'",
         )
+        return response
+
+    @app.middleware("http")
+    async def renew_dashboard_csrf_cookie(request: Request, call_next):
+        response = await call_next(request)
+        # Caducidad deslizante: cualquier tráfico del panel (fragmentos de
+        # refresco incluidos) renueva el max_age de la cookie CSRF, para que
+        # una pestaña abierta y activa no acabe en 403 por cookie expirada.
+        if request.url.path.startswith("/dashboard") and "set-cookie" not in response.headers:
+            token = request.cookies.get(CSRF_COOKIE_NAME)
+            if valid_csrf_token_shape(token):
+                set_csrf_cookie(response, token)
         return response
 
     @app.middleware("http")
