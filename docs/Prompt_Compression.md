@@ -41,9 +41,13 @@ Esos proyectos actúan por instrucciones de estilo sobre la **salida** del model
 | System prompts de roles | No |
 | Código, URLs y correos dentro del prompt | Nunca (protegidos byte a byte) |
 
-El punto de aplicación es `RoutedModelProvider` (`app/providers/routing.py`), el punto único por donde los prompts salen hacia cualquier proveedor real (Ollama, Hugging Face local, DeepSeek, OpenAI-compatible). El proveedor `bootstrap` de pruebas no comprime.
+El punto de aplicación es `RoutedModelProvider.user_prompt` (`app/providers/routing.py`), el punto único por donde los prompts salen hacia cualquier proveedor real (Ollama, DeepSeek, OpenAI-compatible). El proveedor `bootstrap` de pruebas no comprime.
 
-**El prompt original persiste intacto** en `content.prompt`, en la base de datos y en los artefactos (`request.md`); solo se comprime la copia que viaja al proveedor. La estimación conservadora de contexto para seleccionar modelo se hace sobre el original, por lo que la compresión nunca relaja el preflight.
+**El prompt original persiste intacto** en `content.prompt`, en la base de datos y en los artefactos (`request.md`); solo se comprime la copia que viaja al proveedor. La estimación conservadora de contexto para seleccionar modelo se hace sobre el original, por lo que la compresión nunca relaja el preflight. Cuando la compresión altera el prompt, se persiste además un evento `prompt.compressed` en la tarea (texto comprimido y tamaños), exento de la poda de eventos: el detalle de la tarea en el dashboard muestra siempre el original y el comprimido que viajó.
+
+## Override por tarea
+
+Cada tarea puede fijar su propia compresión con el campo opcional `prompt_compression` del contrato (`POST /api/v1/tasks`): `"off"` envía el prompt tal cual aunque el servicio global esté activo, y `"light"`/`"medium"`/`"aggressive"` sustituyen al nivel global solo para esa tarea. Ausente = configuración global. `min_chars` es siempre el global: el override cambia cuánto se comprime, no la regla de prompts cortos. El probador del dashboard expone esta elección en el selector "Compresión del prompt para esta prueba", y su vista previa replica exactamente lo que hará el router. El flag `prompt_compression_override: true` de `GET /api/v1/capabilities` anuncia el soporte.
 
 ## Configuración
 

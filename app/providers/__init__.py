@@ -22,7 +22,6 @@ from app.providers.base import (
 )
 from app.providers.bootstrap import BootstrapModelProvider
 from app.providers.deepseek import DeepSeekProvider
-from app.providers.huggingface import HuggingFaceLocalProvider
 from app.providers.ollama import OllamaLifecycleManager, OllamaProvider
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.routing import RoutedModelProvider, build_provider
@@ -34,7 +33,6 @@ __all__ = [
     "BootstrapModelProvider",
     "CredentialResolver",
     "DeepSeekProvider",
-    "HuggingFaceLocalProvider",
     "ModelOutput",
     "OllamaLifecycleManager",
     "OllamaProvider",

@@ -21,12 +21,6 @@ dev = [
     "ruff>=0.5.0",
     "mypy>=1.10.0",
 ]
-hf-local = [
-    "accelerate>=0.31.0",
-    "torch>=2.3.0",
-    "transformers>=4.42.0",
-]
-
 # Sin esta lista setuptools intenta auto-descubrir paquetes y aborta porque la
 # raíz tiene varios directorios candidatos (graphify-out, state, logs, docs...):
 # `pip install -e .` fallaba con "Multiple top-level packages discovered".

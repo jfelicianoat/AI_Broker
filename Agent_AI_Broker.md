@@ -575,7 +575,7 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 
 ### Enrutamiento y contexto
 
-**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt` en persistencia, rechaza attachments sin mapeo lossless, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio. Con el servicio opcional de compresión de prompts activo (`prompt_compression` en `broker_config.yaml`, ver [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md)), la copia del prompt de chat que viaja al proveedor se comprime; los embeddings nunca se comprimen.
+**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt` en persistencia, rechaza attachments sin mapeo lossless, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio. Con el servicio opcional de compresión de prompts activo (`prompt_compression` en `broker_config.yaml`, ver [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md)), la copia del prompt de chat que viaja al proveedor se comprime; los embeddings nunca se comprimen. Cada tarea puede fijar su propia compresión con el campo opcional `prompt_compression` del contrato (ver «Novedades del contrato 2.2»).
 
 1. Respetar `preferred_model` cuando esté disponible y soporte la ventana necesaria.
 2. Si no está disponible y `fallback_allowed` es falso, terminar con `MODEL_UNAVAILABLE`.
@@ -586,6 +586,32 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de plantilla. Ollama embedding se ejecuta con `truncate: false`. Chat entrega `assistant_content`; embedding entrega un único vector numérico. Invocación y resultado terminal `single` se persisten atómicamente antes de que otro workflow pueda ocupar el slot.
 
 En `single`, el progreso se limita a `queued`, `routing`, `generating` y un estado terminal. En `mixture_of_agents/fast|slow` también existen `resource_planning`, `proposing` y `synthesizing` como etapas técnicas internas. `slow` persiste plan, wave y concurrencia observada. Extracción, chunking y workflows de conocimiento pertenecen al Orchestrator.
+
+### Novedades del contrato 2.2 (julio 2026)
+
+`GET /api/v1/capabilities` devuelve `contract_version: "2.2"`. Todos los cambios son aditivos: un cliente del contrato 2.1 sigue funcionando sin tocar nada.
+
+**Compresión de prompt por tarea.** `POST /api/v1/tasks` acepta el campo opcional de nivel superior `prompt_compression` con valores `"off"`, `"light"`, `"medium"` o `"aggressive"`. Ausente o `null` = usar la configuración global del broker; `"off"` = enviar el prompt tal cual aunque la compresión global esté activa; un nivel concreto sustituye al global (el mínimo de caracteres sigue siendo el de la configuración). El flag `prompt_compression_override: true` en `/api/v1/capabilities` permite detectar el soporte.
+
+```json
+{
+  "idempotency_key": "mi-app:123",
+  "content": {"prompt": "..."},
+  "prompt_compression": "off"
+}
+```
+
+**Registro del prompt que viajó.** Cuando la compresión altera el prompt, el broker persiste un evento `prompt.compressed` en la tarea (payload: `text`, `original_chars`, `compressed_chars`). Ese evento está exento de la poda de eventos: dura lo que la tarea. `content.prompt` original se conserva intacto en `request_json`, como siempre.
+
+**Compatibilidad y capacidades sondeadas por modelo.** El analizador de proveedores OpenAI-compatible clasifica cada modelo en cuatro estados (`compatible`, `incompatible` —veto definitivo por 400/404/422—, `error` —fallo temporal, se reintenta—, `unknown`) y, en los operativos, sondea contra el endpoint real tres capacidades: visión (imagen 1×1), JSON estructurado (`response_format: json_object`) y tools (function calling). Resultado expuesto en la API:
+
+- `GET /api/v1/models`: cada entrada incluye `features` (dict `{vision|json_mode|tools: bool}`; clave ausente = sin sondear o no concluyente) y `features_checked_at`.
+- `GET /api/v1/models/context`: la matriz de features refleja el sondeo con prioridad sobre cualquier inferencia por nombre (`generation.json_mode`, `modalities.image_input`, `tools.function_calling` pasan a `supported`/`unsupported` verificados; las notas indican «verificado por sondeo»).
+- `GET /api/v1/models/availability`: los `incompatible` no son despachables; pedir un modelo vetado como `target_model` falla en enrutamiento.
+
+**Enriquecimiento con catálogo externo (models.dev).** Con `model_enrichment.enabled: true` en `broker_config.yaml`, el broker descarga una vez al día el catálogo gratuito de models.dev (con caché en disco: sin red se usa la última copia) y cada entrada de `GET /api/v1/models` casada por nombre incluye un dict `catalog`: `vision`/`tools`/`json_mode` declarados, `knowledge_cutoff`, `release_date`, id canónico y — solo cuando el casado es con el proveedor equivalente — `cost_input_per_million`/`cost_output_per_million` de referencia. Jerarquía de evidencia: sondeo real > declarado por el runtime > catálogo externo > heurística por nombre; el catálogo rellena huecos (p. ej. `context_window` cuando la fuente era el default sin verificar, marcado `context_window_source: "catalog"`) y nunca pisa un dato verificado. `GET /api/v1/models/context` aplica la misma jerarquía en su matriz de features.
+
+**Proveedores.** El proveedor `huggingface_local` se retiró (julio 2026): los proveedores válidos son `ollama`, `deepseek` y los `custom` OpenAI-compatible (p. ej. `lmstudio`, `nvidia`). El modo `local_only` de `risk.data_classification` acepta como locales `ollama` y `lmstudio`. Referencias a `huggingface_local` en peticiones fallan con `PROVIDER_NOT_ALLOWED`/`PROVIDER_UNAVAILABLE`.
 
 ### Cancelación y VRAM
 

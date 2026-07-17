@@ -93,3 +93,43 @@ def test_feature_profile_reflects_deployment_and_compatibility() -> None:
     assert remote["features"]["deployment"]["cloud_execution"] == "supported"
     assert remote["features"]["broker_support"]["mixture_proposer"] == "unsupported"
     assert remote["features"]["generation"]["chat_completions"] == "unsupported"
+
+
+def test_feature_profile_probed_features_override_name_inference() -> None:
+    # El sondeo real contra el endpoint manda sobre la inferencia por nombre:
+    # un "-vl-" en el nombre no vale nada si el probe de visión devolvió False.
+    profile = model_feature_profile(_entry(
+        name="modelo-vl-vision",
+        features={"vision": False, "json_mode": True, "tools": False},
+    ))
+    features = profile["features"]
+    assert features["modalities"]["image_input"] == "unsupported"
+    assert features["files"]["image_file_input"] == "unsupported"
+    assert features["generation"]["json_mode"] == "supported"
+    assert features["tools"]["function_calling"] == "unsupported"
+    assert features["tools"]["tool_choice"] == "unsupported"
+    assert any("verificado por sondeo" in note for note in profile["feature_notes"])
+
+    # Sin sondeo (dict vacío) no se toca nada: la inferencia por nombre queda.
+    unprobed = model_feature_profile(_entry(name="modelo-vl-vision", features={}))
+    assert unprobed["features"]["modalities"]["image_input"] == "supported"
+    assert not any("verificado por sondeo" in note for note in unprobed["feature_notes"])
+
+
+def test_feature_profile_catalog_tier_between_name_hints_and_probe() -> None:
+    # Catálogo externo sin sondeo: sus claims mandan sobre el nombre.
+    catalog_only = model_feature_profile(_entry(
+        name="modelo-vl",
+        catalog={"vision": False, "json_mode": True, "tools": True},
+    ))
+    assert catalog_only["features"]["modalities"]["image_input"] == "unsupported"
+    assert catalog_only["features"]["generation"]["json_mode"] == "supported"
+    assert catalog_only["features"]["tools"]["function_calling"] == "supported"
+    assert any("catálogo externo" in note for note in catalog_only["feature_notes"])
+
+    # Con sondeo, el sondeo pisa al catálogo.
+    probed = model_feature_profile(_entry(
+        catalog={"json_mode": True},
+        features={"json_mode": False},
+    ))
+    assert probed["features"]["generation"]["json_mode"] == "unsupported"

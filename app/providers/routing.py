@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from app.config import BrokerConfig, effective_max_parallel_invocations
+from app.model_enrichment import ModelEnrichment
 from app.model_stats import ModelKey, ModelStats
 from app.prompt_compressor import PromptCompressor
 from app.providers.base import (
@@ -19,7 +21,6 @@ from app.providers.base import (
 )
 from app.providers.bootstrap import BootstrapModelProvider
 from app.providers.deepseek import DeepSeekProvider
-from app.providers.huggingface import HuggingFaceLocalProvider
 from app.providers.ollama import OllamaProvider
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.schemas import (
@@ -37,13 +38,11 @@ logger = logging.getLogger("ai_broker.routing")
 class RoutedModelProvider:
     def __init__(self, config: BrokerConfig, *, ollama: OllamaProvider | None = None,
                  deepseek: DeepSeekProvider | None = None,
-                 huggingface_local: HuggingFaceLocalProvider | None = None,
                  custom: dict[str, OpenAICompatibleProvider] | None = None,
                  stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None) -> None:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
-        self.huggingface_local = huggingface_local or HuggingFaceLocalProvider(config.providers.huggingface_local)
         self.custom = custom if custom is not None else self._build_custom_providers(config)
         # Evidencia operativa para la selección adaptativa (app.model_stats);
         # sin loader el router mantiene el orden del catálogo.
@@ -52,6 +51,10 @@ class RoutedModelProvider:
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(self._parallel_limit)
         self.prompt_compressor = self._build_prompt_compressor(config)
+        self.model_enrichment = ModelEnrichment(
+            config.model_enrichment,
+            cache_path=Path(config.persistence.database).parent / "models_dev_catalog.json",
+        )
         # Caché de sondas de salud: provider_id -> (expira_en_monotonic, resultado).
         self._health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -64,13 +67,24 @@ class RoutedModelProvider:
             min_chars=settings.min_chars,
         )
 
-    def _user_prompt(self, request: TaskCreateRequest) -> str:
+    def user_prompt(self, request: TaskCreateRequest) -> str:
         """Prompt que viaja al proveedor; el original persiste intacto en la tarea.
 
-        Los embeddings nunca se comprimen: alterar el texto altera el vector.
+        La tarea puede traer un override (`prompt_compression`): "off" envía el
+        texto tal cual y un nivel concreto sustituye al de la configuración
+        global. Los embeddings nunca se comprimen: alterar el texto altera el vector.
         """
         if request.inference_kind == InferenceKind.embedding:
             return request.content.prompt
+        override = request.prompt_compression
+        if override == "off":
+            return request.content.prompt
+        if override is not None:
+            return PromptCompressor(
+                enabled=True,
+                level=override,
+                min_chars=self.config.prompt_compression.min_chars,
+            ).compress_text(request.content.prompt)
         return self.prompt_compressor.compress_text(request.content.prompt)
 
     @staticmethod
@@ -96,9 +110,9 @@ class RoutedModelProvider:
         self.config = config
         await self.ollama.reload_config(config)
         await self.deepseek.reload_config(config.providers.deepseek)
-        self.huggingface_local.reload_config(config.providers.huggingface_local)
         self.custom = new_custom
         self.prompt_compressor = self._build_prompt_compressor(config)
+        self.model_enrichment.reload_settings(config.model_enrichment)
         self._rebuild_inference_slots(config)
         # El conjunto de proveedores puede haber cambiado: las sondas cacheadas
         # dejan de ser representativas.
@@ -120,7 +134,6 @@ class RoutedModelProvider:
     async def close(self) -> None:
         await self.ollama.close()
         await self.deepseek.close()
-        await self.huggingface_local.close()
         for provider in self.custom.values():
             await provider.close()
 
@@ -131,15 +144,14 @@ class RoutedModelProvider:
             sources.append(self.ollama)
         if self.config.providers.deepseek.enabled:
             sources.append(self.deepseek)
-        if self.config.providers.huggingface_local.enabled:
-            sources.append(self.huggingface_local)
         sources.extend(self.custom.values())
         for source in sources:
             try:
                 result.extend(await source.models())
             except ProviderError:
                 pass
-        return result
+        await self.model_enrichment.ensure_loaded()
+        return [self.model_enrichment.enrich_entry(item) for item in result]
 
     async def health(self) -> dict[str, dict[str, Any]]:
         """Sondas de salud concurrentes, con deadline corto y caché por proveedor.
@@ -155,8 +167,6 @@ class RoutedModelProvider:
             sources.append(("ollama", self.ollama, False))
         if self.config.providers.deepseek.enabled:
             sources.append(("deepseek", self.deepseek, True))
-        if self.config.providers.huggingface_local.enabled:
-            sources.append(("huggingface_local", self.huggingface_local, False))
         for provider_id, provider in self.custom.items():
             item = next(
                 (c for c in self.config.providers.custom if c.id.lower() == provider_id),
@@ -407,7 +417,7 @@ class RoutedModelProvider:
         system = None
         if request.execution.strategy == ExecutionStrategy.mixture_of_agents:
             system = role_system_prompt(model.role) or ROLE_SYSTEM_PROMPTS["proposer"]
-        return await self._generate(request, model, self._user_prompt(request), system=system)
+        return await self._generate(request, model, self.user_prompt(request), system=system)
 
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:
         candidates = "\n\n".join(
@@ -415,7 +425,7 @@ class RoutedModelProvider:
             for i, o in enumerate(proposals)
         )
         prompt = (
-            f"<original_request>\n{neutralize_consensus_delimiters(self._user_prompt(request))}\n</original_request>\n\n"
+            f"<original_request>\n{neutralize_consensus_delimiters(self.user_prompt(request))}\n</original_request>\n\n"
             f"<candidates>\n{candidates}\n</candidates>"
         )
         return await self._generate(request, model, prompt, system=ROLE_SYSTEM_PROMPTS["arbiter"])
@@ -486,23 +496,6 @@ class RoutedModelProvider:
                     raise ProviderError("CLOUD_NOT_ALLOWED", "DeepSeek requiere cloud_allowed=true")
                 self._resolve_catalog_entry(await self.deepseek.models(), model, "DeepSeek")
                 return await self.deepseek.generate(request, model.model, prompt, system=system)
-            if provider_name == "huggingface_local":
-                if embedding:
-                    raise ProviderError(
-                        "PROVIDER_CAPABILITY_MISMATCH",
-                        "HuggingFaceLocalProvider no admite embeddings en este adapter",
-                    )
-                if not self.config.providers.huggingface_local.enabled:
-                    raise ProviderError("PROVIDER_UNAVAILABLE", "Hugging Face local esta deshabilitado")
-                entry = self._resolve_catalog_entry(
-                    await self.huggingface_local.models(), model, "Hugging Face local"
-                )
-                self._reject_incompatible(
-                    entry,
-                    f"huggingface_local/{model.model}",
-                    "No compatible con HuggingFaceLocalProvider",
-                )
-                return await self.huggingface_local.generate(request, model.model, prompt, system=system)
             if provider_name in self.custom:
                 if not request.model_requirements.cloud_allowed and not is_local_deployment(model.deployment):
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"{model.provider} requiere cloud_allowed=true")

@@ -178,11 +178,24 @@ class OllamaProvider:
                     "compatibility": "compatible",
                     "compatibility_checked_at": None,
                     "compatibility_error": None,
+                    "features": self._declared_features(capabilities),
                 })
             self._catalog_cache.set(result)
             return result
         except httpx.HTTPError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+
+    @staticmethod
+    def _declared_features(capabilities: list[Any]) -> dict[str, bool]:
+        """Features en el formato del sondeo, derivadas de las capacidades que
+        declara el propio runtime de Ollama en /api/show. La lista es
+        exhaustiva para el runtime: la ausencia de "vision"/"tools" significa
+        no soportado, no "sin comprobar". json_mode no se declara y queda fuera.
+        """
+        declared = {str(item).lower() for item in capabilities}
+        if "completion" not in declared:
+            return {}
+        return {"vision": "vision" in declared, "tools": "tools" in declared}
 
     async def _model_metadata(self, model: str) -> dict[str, Any]:
         try:

@@ -39,6 +39,11 @@ routing:
   success_weight: 0.5
   latency_weight: 0.3
   cost_weight: 0.2
+model_enrichment:
+  enabled: true
+  url: https://models.dev/api.json
+  refresh_hours: 24.0
+  timeout_seconds: 20.0
 health:
   sqlite_interval_seconds: 10
   local_dependencies_interval_seconds: 30
@@ -71,15 +76,6 @@ providers:
     input_cost_per_million: 0.0
     output_cost_per_million: 0.0
     catalog_cache_seconds: 30.0
-  huggingface_local:
-    enabled: false
-    models_dir: .local/models
-    timeout_seconds: 300.0
-    default_context_window: 32768
-    default_device: auto
-    default_dtype: null
-    trust_remote_code: false
-    models: []
   custom:
   - id: lmstudio
     enabled: true
@@ -149,6 +145,144 @@ providers:
       compatibility: compatible
       compatibility_checked_at: '2026-06-29T21:16:06.909813+00:00'
       compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: openai/gpt-oss-20b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:37:48.322453+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:37:49.946655+00:00'
+    - name: google/gemma-4-31b-qat
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-17T15:36:37.346097+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-17T15:37:03.631366+00:00'
+    - name: deepseek-coder-33b-base
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:37:55.344728+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:38:10.995492+00:00'
+    - name: deepseek-coder-33b-instruct
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:38:13.575069+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:38:30.092112+00:00'
+    - name: zai-org/glm-4.7-flash
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:39:35.307979+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:39:53.272156+00:00'
+    - name: qwen/qwen3-coder-30b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:39:55.699771+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:40:11.820365+00:00'
+    - name: qwen/qwen3.6-35b-a3b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:40:15.989278+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:40:45.273592+00:00'
+    - name: kimi-k2.7-code-i1
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-17T15:37:10.508765+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":{"message":"Failed to load model \"kimi-k2.7-code-i1\". Error: Failed
+        to load model.","type":"invalid_request_error","param":"model","code":null}}'
+      features: {}
+      features_checked_at: null
+    - name: deepseek/deepseek-r1-0528-qwen3-8b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:42:00.336824+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-16T19:42:10.181408+00:00'
+    - name: kimi-k2.7-code-ud-layers
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-17T15:37:17.995297+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":{"message":"Failed to load model \"kimi-k2.7-code-ud-layers\". Error:
+        Failed to load model.","type":"invalid_request_error","param":"model","code":null}}'
       features: {}
       features_checked_at: null
   - id: nvidia
@@ -1625,30 +1759,48 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-15T16:32:17.920382+00:00'
-      compatibility_error: ''
-      features: {}
-      features_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-17T15:40:32.104439+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+      features_checked_at: '2026-07-17T15:46:29.633421+00:00'
     - name: poolside/laguna-xs-2.1
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:42:34.377192+00:00'
       compatibility_error: null
-      features: {}
-      features_checked_at: null
+      features:
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-16T19:42:41.824909+00:00'
     - name: thinkingmachines/inkling
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:42:45.019664+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-16T19:42:52.130103+00:00'
+    - name: nvidia/nemotron-3-embed-1b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - embedding
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-16T19:42:28.079208+00:00'
       compatibility_error: null
       features: {}
       features_checked_at: null

@@ -49,6 +49,13 @@
                      data-table-filter="#models-catalog-table" aria-label="Filtrar modelos del catálogo">
               <span class="badge badge-neutral">{{ models|length }} modelos</span>
             </div>
+            <div class="filter-chips" role="group" aria-label="Filtrar modelos por capacidad">
+              <button type="button" class="filter-chip" data-caps-toggle="vision" data-caps-table="#models-catalog-table">Visión</button>
+              <button type="button" class="filter-chip" data-caps-toggle="json_mode" data-caps-table="#models-catalog-table">JSON</button>
+              <button type="button" class="filter-chip" data-caps-toggle="tools" data-caps-table="#models-catalog-table">Tools</button>
+              <button type="button" class="filter-chip" data-caps-toggle="compat:compatible" data-caps-table="#models-catalog-table">Solo operativos</button>
+              <small class="filter-chips-hint">Cuentan las capacidades verificadas (sondeo o runtime) y, si no hay verificación, las del catálogo externo; un negativo verificado excluye siempre.</small>
+            </div>
             {% if models %}
               <div class="table-wrap">
                 <table id="models-catalog-table">
@@ -60,12 +67,14 @@
                       <th>Contexto</th>
                       <th>Capacidades</th>
                       <th>Funciones</th>
+                      <th>Precio 1M</th>
                       <th>Compatibilidad</th>
                     </tr>
                   </thead>
                   <tbody>
                     {% for model in models %}
-                      <tr>
+                      <tr data-caps="{{ (model|model_effective_caps)|join(' ') }}"
+                          data-compat="{{ model.compatibility or 'unknown' }}">
                         <td>
                           <strong>{{ model.name }}</strong>
                           <small class="compatibility-error" {% if not model.compatibility_error %}hidden{% endif %}>{{ model.compatibility_error or '' }}</small>
@@ -75,6 +84,14 @@
                         <td>{{ model.context_window or 'N/D' }}</td>
                         <td>{{ (model.capabilities or [])|join(', ') if model.capabilities else 'N/D' }}</td>
                         <td {% if model.features_checked_at %}title="Sondeado {{ model.features_checked_at }}"{% endif %}>{{ model|model_features_text }}</td>
+                        {% set catalog = model.catalog or {} %}
+                        <td {% if catalog %}title="{{ catalog.catalog_id }} ({{ catalog.catalog_provider }}){% if catalog.knowledge_cutoff %} · corte {{ catalog.knowledge_cutoff }}{% endif %}"{% endif %}>
+                          {%- if catalog.get('cost_input_per_million') is not none -%}
+                            ${{ catalog.cost_input_per_million }} / ${{ catalog.cost_output_per_million }}
+                          {%- else -%}
+                            N/D
+                          {%- endif -%}
+                        </td>
                         <td>
                           {% if model.provider|lower in probeable_provider_ids %}
                             <form class="compatibility-probe-form" method="post" action="/dashboard/actions/models/probe">
@@ -138,28 +155,6 @@
                 </div>
               {% else %}
                 <div class="empty-inline">No hay modelos cargados en este momento.</div>
-              {% endif %}
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <h2>Hugging Face local</h2>
-                  <p>{{ config.providers.huggingface_local.models_dir }}</p>
-                </div>
-                <span class="badge badge-{{ 'active' if config.providers.huggingface_local.enabled else 'cancelled' }}">{{ 'Activo' if config.providers.huggingface_local.enabled else 'Inactivo' }}</span>
-              </div>
-              {% if config.providers.huggingface_local.models %}
-                <div class="model-list">
-                  {% for model in config.providers.huggingface_local.models %}
-                    <div>
-                      <span><strong>{{ model.name }}</strong><small>{{ model.path }}</small></span>
-                      <span>{{ model.context_window }} ctx</span>
-                    </div>
-                  {% endfor %}
-                </div>
-              {% else %}
-                <div class="empty-inline">No hay modelos HF locales declarados.</div>
               {% endif %}
             </section>
 

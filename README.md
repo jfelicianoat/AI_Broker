@@ -113,31 +113,7 @@ Tercer bloque operativo implementado: runner de produccion, scripts de servicio 
 - Secciones: `server`, `persistence`, `processing`, `prompt_compression`, `resources`, `health`, `logging`, `providers`
 - Validación en arranque via Pydantic
 
-Ejemplo minimo para modelos Hugging Face locales:
-
-```yaml
-providers:
-  huggingface_local:
-    enabled: true
-    models_dir: .local/models
-    default_device: auto
-    default_dtype: float16
-    trust_remote_code: false
-    models:
-      - name: qwen2.5-7b
-        path: qwen2.5-7b
-        context_window: 32768
-        capabilities:
-          - completion
-```
-
-Descarga previa:
-
-```powershell
-hf download Qwen/Qwen2.5-7B-Instruct --local-dir C:\Procesos\AI_Broker\.local\models\qwen2.5-7b
-```
-
-La inferencia requiere instalar el extra opcional `hf-local`; si faltan `torch` o `transformers`, el health check de `huggingface_local` queda `unavailable`.
+Para modelos locales se usa LM Studio (proveedor `custom` OpenAI-compatible): descarga modelos de Hugging Face en formato GGUF cuantizado y los expone en `http://127.0.0.1:1234/v1`. El antiguo proveedor `huggingface_local` (ejecución in-process con transformers) se retiró en julio 2026 por redundante; está en el historial de git si hiciera falta recuperarlo.
 
 Ejemplo minimo para LM Studio local:
 
@@ -205,7 +181,8 @@ Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase
 - El código (fences e inline), las URLs y los correos se preservan byte a byte; los embeddings nunca se comprimen; si la compresión dejara menos del 20% del texto, se envía el original
 - El prompt original persiste intacto en la base de datos y los artefactos; solo se comprime lo que viaja al proveedor
 - Desactivable desde el panel de configuración del dashboard o desde `broker_config.yaml`; los cambios aplican en caliente
-- Cada compresión efectiva se registra en el log (`prompt.compressed` con caracteres antes/después y ratio)
+- Override por tarea: el campo opcional `prompt_compression` del contrato (`off`/`light`/`medium`/`aggressive`) fija la compresión de esa tarea; el probador lo expone como selector
+- Cada compresión efectiva se registra en el log (`prompt.compressed` con caracteres antes/después y ratio) y como evento persistente de la tarea: el detalle muestra el prompt original y el comprimido que viajó
 
 ```yaml
 prompt_compression:
@@ -215,6 +192,18 @@ prompt_compression:
 ```
 
 Especificación completa: [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md).
+
+### 12. Enriquecimiento del catálogo (models.dev)
+
+- Con `model_enrichment.enabled: true`, el broker descarga a diario el catálogo gratuito de [models.dev](https://models.dev) (sin clave; caché en disco, sin dependencia de internet para arrancar)
+- Aporta por modelo casado: contexto real, capacidades declaradas (visión/JSON/tools), corte de conocimiento, fecha de publicación y precios de referencia por 1M (solo si el casado es con el proveedor equivalente)
+- Jerarquía de evidencia: sondeo real > declarado por el runtime > catálogo externo > heurística por nombre — el catálogo rellena huecos, nunca pisa un dato verificado
+- En la página Modelos: columna "Precio 1M", contexto enriquecido y capacidades de catálogo en la columna Funciones (marcadas "catálogo:") y en los chips de filtro
+
+```yaml
+model_enrichment:
+  enabled: true        # opt-in; url y refresh_hours configurables
+```
 
 ## API
 
@@ -226,8 +215,10 @@ Especificación completa: [`docs/Prompt_Compression.md`](docs/Prompt_Compression
 | `/api/v1/queue` | GET | Snapshot de cola (pending / active / terminal) |
 | `/api/v1/queue` | PATCH | Reordenar tareas pendientes |
 | `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico; el dispatcher normal es autónomo |
-| `/api/v1/models` | GET | Modelos disponibles |
-| `/api/v1/capabilities` | GET | Versión de contrato, presets, scheduling y límites admitidos |
+| `/api/v1/models` | GET | Modelos disponibles, con compatibilidad y capacidades sondeadas (`features`) |
+| `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo (operativo / no operativo / error temporal / pendiente) |
+| `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo; el sondeo real prevalece sobre la inferencia por nombre |
+| `/api/v1/capabilities` | GET | Versión de contrato (2.2), presets, scheduling, límites y `prompt_compression_override` |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/api/v1/dashboard/summary` | GET | Resumen operativo por ventana temporal |
 | `/api/v1/dashboard/tasks` | GET | Tareas paginadas y filtrables |
@@ -320,7 +311,7 @@ El Broker recibe inferencias ya preparadas. Su responsabilidad termina en valida
 
 - Sin autenticación entre cliente y broker (solo LAN privada, CORS desactivado por defecto)
 - Clasificación de datos: `public`, `internal`, `confidential`, `local_only`
-- Modo `local_only`: conserva solo proveedores locales (`ollama` y `huggingface_local`) y deshabilita cloud automáticamente
+- Modo `local_only`: conserva solo proveedores locales (`ollama` y `lmstudio`) y deshabilita cloud automáticamente
 
 ### Recuperación
 
@@ -428,7 +419,7 @@ python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --tim
 │   ├── main.py             # FastAPI app + endpoints
 │   ├── prompt_compressor.py # Compresión de prompts antes de la inferencia
 │   ├── providers/          # Paquete de proveedores: base, ollama, deepseek,
-│   │                       # huggingface, openai_compatible, routing, bootstrap
+│   │                       # openai_compatible, routing, bootstrap
 │   ├── repository.py       # Capa de acceso a datos
 │   ├── resource_scheduler.py  # Planificador adaptativo de recursos
 │   ├── schemas.py          # Modelos Pydantic (contrato completo)

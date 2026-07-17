@@ -275,6 +275,29 @@
     }
   }
 
+  function applyTableFilters(tableSelector) {
+    // Filtro combinado de la tabla de modelos: texto libre + chips de
+    // capacidad (data-caps de cada fila) + estado (data-compat).
+    const table = document.querySelector(tableSelector);
+    if (!table) return;
+    const search = document.querySelector(`[data-table-filter='${tableSelector}']`);
+    const needle = search ? search.value.trim().toLowerCase() : "";
+    const activeChips = Array.from(
+      document.querySelectorAll(`[data-caps-toggle][data-caps-table='${tableSelector}'].active`)
+    ).map((chip) => chip.getAttribute("data-caps-toggle"));
+    const requiredCaps = activeChips.filter((value) => !value.startsWith("compat:"));
+    const requiredCompat = activeChips
+      .filter((value) => value.startsWith("compat:"))
+      .map((value) => value.slice("compat:".length));
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      const textOk = needle === "" || row.textContent.toLowerCase().includes(needle);
+      const rowCaps = (row.getAttribute("data-caps") || "").split(/\s+/).filter(Boolean);
+      const capsOk = requiredCaps.every((cap) => rowCaps.includes(cap));
+      const compatOk = requiredCompat.length === 0 || requiredCompat.includes(row.getAttribute("data-compat") || "");
+      row.hidden = !(textOk && capsOk && compatOk);
+    });
+  }
+
   function intervalFrom(trigger) {
     const match = /every\s+(\d+)s/.exec(trigger || "");
     return match ? Number(match[1]) * 1000 : null;
@@ -336,13 +359,16 @@
     root.querySelectorAll("[data-table-filter]").forEach((input) => {
       if (processed.has(input)) return;
       processed.add(input);
-      input.addEventListener("input", () => {
-        const table = document.querySelector(input.dataset.tableFilter);
-        if (!table) return;
-        const needle = input.value.trim().toLowerCase();
-        table.querySelectorAll("tbody tr").forEach((row) => {
-          row.hidden = needle !== "" && !row.textContent.toLowerCase().includes(needle);
-        });
+      input.addEventListener("input", () => applyTableFilters(input.dataset.tableFilter));
+    });
+    root.querySelectorAll("[data-caps-toggle]").forEach((chip) => {
+      if (processed.has(chip)) return;
+      processed.add(chip);
+      chip.setAttribute("aria-pressed", "false");
+      chip.addEventListener("click", () => {
+        chip.classList.toggle("active");
+        chip.setAttribute("aria-pressed", chip.classList.contains("active") ? "true" : "false");
+        applyTableFilters(chip.getAttribute("data-caps-table"));
       });
     });
     root.querySelectorAll("form.compatibility-probe-form").forEach((form) => {
@@ -399,6 +425,8 @@
       if (processed.has(form)) return;
       processed.add(form);
       restoreTesterForm(form);
+      syncModelComboLabels(form);
+      bindModelCombos(form);
       updateTesterVisibility(form);
       updateTesterFeatureWarnings(form);
       ["strategy", "output_format"].forEach((name) => {
@@ -408,10 +436,6 @@
           updateTesterFeatureWarnings(form);
         });
       });
-      testerModelSelectNames().forEach((name) => {
-        const control = form.querySelector(`select[name='${name}']`);
-        if (control) control.addEventListener("change", () => updateTesterFeatureWarnings(form));
-      });
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         saveTesterForm(form);
@@ -420,7 +444,7 @@
     });
   }
 
-  function testerModelSelectNames() {
+  function testerModelFieldNames() {
     return [
       "single_model",
       "proposer_model_1", "proposer_model_2", "proposer_model_3", "proposer_model_4", "proposer_model_5",
@@ -428,9 +452,57 @@
     ];
   }
 
+  function testerModelCatalog() {
+    // Catálogo del datalist compartido: label visible <-> referencia JSON.
+    const byLabel = new Map();
+    const byValue = new Map();
+    document.querySelectorAll("#tester-models option").forEach((option) => {
+      const entry = {label: option.value, value: option.dataset.value || "", jsonMode: option.dataset.jsonMode || ""};
+      byLabel.set(entry.label, entry);
+      byValue.set(entry.value, entry);
+    });
+    return {byLabel, byValue};
+  }
+
+  function bindModelCombos(form) {
+    const catalog = testerModelCatalog();
+    form.querySelectorAll(".model-combo").forEach((combo) => {
+      const input = combo.querySelector("[data-model-combo]");
+      const hidden = combo.querySelector("[data-model-combo-value]");
+      if (!input || !hidden || processed.has(input)) return;
+      processed.add(input);
+      const sync = () => {
+        const entry = catalog.byLabel.get(input.value.trim());
+        hidden.value = entry ? entry.value : "";
+        // Texto sin correspondencia con el catálogo: aviso visual sutil.
+        input.classList.toggle("model-combo-invalid", input.value.trim() !== "" && !entry);
+        updateTesterFeatureWarnings(form);
+      };
+      input.addEventListener("input", sync);
+      input.addEventListener("change", sync);
+    });
+  }
+
+  function syncModelComboLabels(form) {
+    // Tras restaurar el formulario (los hidden llevan el JSON), repinta los
+    // labels visibles; si el modelo ya no está en el catálogo, se descarta.
+    const catalog = testerModelCatalog();
+    form.querySelectorAll(".model-combo").forEach((combo) => {
+      const input = combo.querySelector("[data-model-combo]");
+      const hidden = combo.querySelector("[data-model-combo-value]");
+      if (!input || !hidden || !hidden.value) return;
+      const entry = catalog.byValue.get(hidden.value);
+      if (entry) input.value = entry.label;
+      else {
+        hidden.value = "";
+        input.value = "";
+      }
+    });
+  }
+
   function updateTesterFeatureWarnings(form) {
     // Aviso en vivo: salida JSON pedida con modelos cuyo sondeo verificó que
-    // no soportan JSON estructurado (data-json-mode="no" en la opción).
+    // no soportan JSON estructurado (data-json-mode="no" en el datalist).
     const box = form.querySelector("[data-feature-warnings]");
     if (!box) return;
     const format = form.querySelector("select[name='output_format']");
@@ -438,14 +510,13 @@
     const mixture = Boolean(strategy) && strategy.value === "mixture_of_agents";
     const flagged = new Set();
     if (format && format.value === "json") {
-      testerModelSelectNames()
+      const catalog = testerModelCatalog();
+      testerModelFieldNames()
         .filter((name) => (name === "single_model") !== mixture)
         .forEach((name) => {
-          const select = form.querySelector(`select[name='${name}']`);
-          const option = select && select.value ? select.selectedOptions[0] : null;
-          if (option && option.dataset.jsonMode === "no") {
-            flagged.add(option.textContent.trim());
-          }
+          const hidden = form.querySelector(`input[name='${name}']`);
+          const entry = hidden && hidden.value ? catalog.byValue.get(hidden.value) : null;
+          if (entry && entry.jsonMode === "no") flagged.add(entry.label);
         });
     }
     box.hidden = flagged.size === 0;

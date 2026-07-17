@@ -185,6 +185,13 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
 .compact-field { max-width: 180px; }
 .proposer-list { display: grid; gap: 8px; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 0 16px 12px; }
+.filter-chip { border: 1px solid var(--border); background: #102131; color: #cbd8e3; border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+.filter-chip:hover { border-color: #3a5a78; }
+.filter-chip.active { border-color: var(--teal); background: #0c2320; color: #9fe8dd; }
+.filter-chips-hint { color: var(--muted); font-size: 11px; }
+.model-combo { display: block; min-width: 0; }
+.model-combo input[type="text"].model-combo-invalid { border-color: #6d343b; }
 .mixture-fields { display: grid; gap: 13px; }
 .form-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .compression-preview { border: 1px solid var(--border); border-radius: 4px; background: #0a1724; font-size: 12px; }
@@ -286,6 +293,11 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .task-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
 .task-result-panel { min-height: 360px; }
 .result-output { margin: 0; padding: 18px; white-space: pre-wrap; color: #dce6ef; font: 13px/1.6 "Segoe UI", system-ui, sans-serif; }
+.prompt-panel { padding-bottom: 12px; }
+.prompt-block > summary { cursor: pointer; padding: 10px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border-soft); }
+.prompt-block[open] > summary { color: #cbd8e3; }
+.prompt-block .result-output { padding-top: 6px; }
+.prompt-hint { padding: 10px 16px 4px; border-top: 1px solid var(--border-soft); }
 .invocation-panel { margin-top: 14px; }
 
 @media (max-width: 1150px) {

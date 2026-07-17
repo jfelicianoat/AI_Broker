@@ -84,6 +84,32 @@
     </aside>
   </section>
 
+  <section class="panel prompt-panel">
+    <div class="panel-heading">
+      <div>
+        <h2>Prompt</h2>
+        <p>Lo que pidió el cliente y lo que viajó a los modelos.</p>
+      </div>
+    </div>
+    {% set original_prompt = (detail.request.get('content') or {}).get('prompt') or '' %}
+    {% set compression_events = detail.events|selectattr('event_type', 'equalto', 'prompt.compressed')|list %}
+    <details class="prompt-block" {% if not compression_events %}open{% endif %}>
+      <summary>Prompt original — {{ original_prompt|length }} caracteres</summary>
+      <pre class="result-output">{{ original_prompt }}</pre>
+    </details>
+    {% if compression_events %}
+      {% set compression = compression_events[0].payload %}
+      {% set original_chars = compression.get('original_chars') or original_prompt|length or 1 %}
+      {% set compressed_chars = compression.get('compressed_chars') or compression.get('text', '')|length %}
+      <details class="prompt-block" open>
+        <summary>Prompt comprimido que viajó a los modelos — {{ compressed_chars }} caracteres (−{{ ((1 - compressed_chars / original_chars) * 100)|round|int }}%)</summary>
+        <pre class="result-output">{{ compression.get('text') }}</pre>
+      </details>
+    {% else %}
+      <p class="form-hint prompt-hint">Sin reducción registrada: el prompt viajó tal cual a los modelos (o la tarea es anterior al registro de compresión).</p>
+    {% endif %}
+  </section>
+
   <section class="panel invocation-panel">
     <div class="panel-heading">
       <div>

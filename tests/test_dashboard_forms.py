@@ -21,8 +21,9 @@ from app.dashboard_forms import (
     _optional_float,
     _parse_custom_provider_models,
     _parse_custom_providers,
-    _parse_huggingface_local_models,
+    _parse_deepseek_provider,
     _parse_model_reference,
+    _parse_ollama_provider,
     _parse_proposers,
     _validation_messages,
 )
@@ -102,24 +103,6 @@ def test_ensure_cloud_allowed_blocks_external_models_only() -> None:
         _ensure_cloud_allowed([local, remote], cloud_allowed=False)
 
 
-def test_parse_huggingface_models_lines_and_errors() -> None:
-    models = _parse_huggingface_local_models(
-        "# comentario\n"
-        "qwen|/modelos/qwen|4096|cpu|fp16\n"
-        "\n"
-        "phi|phi-3-mini\n"
-    )
-    assert [(m.name, m.context_window, m.device, m.dtype) for m in models] == [
-        ("qwen", 4096, "cpu", "fp16"),
-        ("phi", 32768, None, None),
-    ]
-    assert _parse_huggingface_local_models("") == []
-    with pytest.raises(PromptTesterError, match="linea 1"):
-        _parse_huggingface_local_models("solo-nombre-sin-ruta")
-    with pytest.raises(PromptTesterError, match="linea 1"):
-        _parse_huggingface_local_models("qwen|/ruta|contexto-no-numerico")
-
-
 def test_parse_custom_provider_models_preserves_previous_compatibility() -> None:
     previous = {
         "conocido": OpenAICompatibleModelConfig(name="conocido", compatibility="compatible"),
@@ -158,6 +141,51 @@ def test_find_custom_provider_is_case_insensitive() -> None:
     config = _config_with_custom()
     assert _find_custom_provider(config, "LMSTUDIO") is not None
     assert _find_custom_provider(config, "inexistente") is None
+
+
+def test_parse_ollama_provider_updates_only_when_card_is_posted() -> None:
+    config = BrokerConfig()
+    assert config.providers.ollama.enabled is True
+
+    # Sin la tarjeta en el formulario (formularios parciales) no se toca nada:
+    # un checkbox ausente no debe desactivar Ollama.
+    untouched = _parse_ollama_provider(config, {"task_timeout_seconds": "300"})
+    assert untouched["enabled"] is True
+    assert untouched["base_url"] == "http://127.0.0.1:11434"
+
+    updated = _parse_ollama_provider(config, {
+        "ollama_base_url": "http://127.0.0.1:11434/",
+        "ollama_timeout_seconds": "120",
+        "ollama_unload_timeout_seconds": "5",
+        "ollama_catalog_cache_seconds": "10",
+    })
+    assert updated["enabled"] is False
+    assert updated["base_url"] == "http://127.0.0.1:11434"
+    assert updated["timeout_seconds"] == 120.0
+
+
+def test_parse_deepseek_provider_updates_only_when_card_is_posted() -> None:
+    config = BrokerConfig()
+    untouched = _parse_deepseek_provider(config, {})
+    assert untouched["enabled"] is False
+    assert untouched["default_model"] == "deepseek-chat"
+
+    updated = _parse_deepseek_provider(config, {
+        "deepseek_enabled": "on",
+        "deepseek_base_url": "https://api.deepseek.com",
+        "deepseek_api_key_env": "MI_DEEPSEEK_KEY",
+        "deepseek_default_model": "deepseek-reasoner",
+        "deepseek_context_window": "128000",
+        "deepseek_timeout_seconds": "300",
+        "deepseek_input_cost_per_million": "0.27",
+        "deepseek_output_cost_per_million": "1.1",
+    })
+    assert updated["enabled"] is True
+    assert updated["api_key_env"] == "MI_DEEPSEEK_KEY"
+    assert updated["default_model"] == "deepseek-reasoner"
+    assert updated["input_cost_per_million"] == 0.27
+    # Los campos que no viajan en el formulario conservan su valor.
+    assert updated["keyring_username"] == "deepseek_api_key"
 
 
 def test_custom_provider_form_indexes_are_dynamic() -> None:
@@ -265,3 +293,22 @@ def test_validation_messages_flatten_pydantic_errors() -> None:
         messages = _validation_messages(error)
     assert messages
     assert all(":" in message for message in messages)
+
+
+def test_model_features_text_and_effective_caps_merge_catalog_claims() -> None:
+    from app.dashboard_filters import model_effective_caps, model_features_text
+
+    verified_and_catalog = {
+        "features": {"vision": True, "json_mode": False},
+        "catalog": {"vision": False, "json_mode": True, "tools": True},
+    }
+    # json_mode verificado en falso: el claim del catálogo no lo resucita.
+    assert model_features_text(verified_and_catalog) == "visión · catálogo: tools"
+    assert model_effective_caps(verified_and_catalog) == ["vision", "tools"]
+
+    catalog_only = {"catalog": {"vision": True, "json_mode": False, "tools": False}}
+    assert model_features_text(catalog_only) == "catálogo: visión"
+    assert model_effective_caps(catalog_only) == ["vision"]
+
+    assert model_features_text({}) == "sin sondear"
+    assert model_effective_caps({}) == []

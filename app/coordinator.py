@@ -160,6 +160,7 @@ class ConsensusCoordinator:
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
+        self._record_compressed_prompt(repository, task_id, request)
         if request.execution.strategy == ExecutionStrategy.single:
             await self._process_single(repository, task_id, request)
             return
@@ -176,6 +177,36 @@ class ConsensusCoordinator:
             )
             return
         await self._process_consensus(repository, task_id, request)
+
+    def _record_compressed_prompt(self, repository, task_id: str, request: TaskCreateRequest) -> None:
+        """Deja constancia del prompt que viajará a los modelos cuando la
+        compresión lo altera: el detalle de la tarea muestra original y comprimido.
+
+        Se persiste en el momento de ejecutar (no al renderizar) para que el
+        detalle refleje lo que viajó aunque la config de compresión cambie después.
+        """
+        if request.inference_kind == InferenceKind.embedding:
+            return
+        # user_prompt es la misma función que usa la inferencia (incluye el
+        # override por tarea): lo registrado coincide con lo que viaja.
+        prompt_fn = getattr(self.provider, "user_prompt", None)
+        if prompt_fn is None:
+            return
+        try:
+            compressed = prompt_fn(request)
+        except Exception:
+            return
+        if not compressed or compressed == request.content.prompt:
+            return
+        try:
+            repository.add_event(task_id, "prompt.compressed", {
+                "text": compressed,
+                "original_chars": len(request.content.prompt),
+                "compressed_chars": len(compressed),
+            })
+        except Exception:
+            # El registro es informativo: nunca debe tirar la tarea.
+            logger.warning("task.compressed_prompt_event_failed", extra={"task_id": task_id})
 
     async def _process_single(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         model = (await self.provider.select(request, 1, ["single"]))[0]
