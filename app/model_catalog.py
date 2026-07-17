@@ -236,4 +236,36 @@ def model_feature_profile(entry: dict[str, Any]) -> dict[str, Any]:
     if provider_name in {"ollama", "deepseek"} or compatibility in {"compatible", "incompatible"}:
         notes.append("Las capacidades no declaradas por el proveedor se devuelven como unknown.")
 
+    # Catálogo externo (models.dev): más fiable que la heurística por nombre,
+    # menos que el sondeo (que se aplica después y sobreescribe).
+    claimed = entry.get("catalog") or {}
+    for key, targets in (
+        ("vision", (("modalities", "image_input"), ("files", "image_file_input"))),
+        ("json_mode", (("generation", "json_mode"),)),
+        ("tools", (("tools", "function_calling"), ("tools", "tool_choice"))),
+    ):
+        if isinstance(claimed.get(key), bool):
+            value = "supported" if claimed[key] else "unsupported"
+            for group, feature_name in targets:
+                features[group][feature_name] = value
+            notes.append(f"{targets[0][1]} según catálogo externo (models.dev): {value}.")
+
+    # El sondeo del analizador (features del YAML) manda sobre cualquier
+    # inferencia por nombre: es la única evidencia contrastada con el endpoint.
+    verified = entry.get("features") or {}
+    if isinstance(verified.get("vision"), bool):
+        value = "supported" if verified["vision"] else "unsupported"
+        features["modalities"]["image_input"] = value
+        features["files"]["image_file_input"] = value
+        notes.append(f"image_input verificado por sondeo contra el endpoint: {value}.")
+    if isinstance(verified.get("json_mode"), bool):
+        value = "supported" if verified["json_mode"] else "unsupported"
+        features["generation"]["json_mode"] = value
+        notes.append(f"json_mode verificado por sondeo contra el endpoint: {value}.")
+    if isinstance(verified.get("tools"), bool):
+        value = "supported" if verified["tools"] else "unsupported"
+        features["tools"]["function_calling"] = value
+        features["tools"]["tool_choice"] = value
+        notes.append(f"function_calling verificado por sondeo contra el endpoint: {value}.")
+
     return {"features": features, "feature_notes": notes}

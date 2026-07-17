@@ -126,7 +126,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                     ),
                 },
             )
-        if broker_config.providers.ollama.enabled or broker_config.providers.huggingface_local.enabled:
+        if broker_config.providers.ollama.enabled:
             detected_vram = await asyncio.to_thread(detect_total_vram_gb)
             vram_alert = vram_budget_mismatch(broker_config.resources.local_vram_budget_gb, detected_vram)
             if vram_alert:
@@ -411,7 +411,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.1",
+            contract_version="2.2",
             strategies=[ExecutionStrategy.single, ExecutionStrategy.mixture_of_agents],
             presets={
                 "single": [ExecutionPreset.fast],
@@ -430,6 +430,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             max_parallel_invocations=scheduler.max_parallel_invocations(),
             exact_target_model=True,
             task_timeout=True,
+            prompt_compression_override=True,
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)

@@ -61,7 +61,8 @@ class DeepSeekProvider:
             result = [{"name": item["id"], "provider": "deepseek", "deployment": "api", "status": "online",
                        "context_window": self.config.context_window, "capabilities": ["completion"],
                        "context_window_source": "configured",
-                       "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None}
+                       "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None,
+                       "features": self._known_features(str(item["id"]))}
                       for item in response.json().get("data") or []]
             self._catalog_cache.set(result)
             return result
@@ -69,6 +70,14 @@ class DeepSeekProvider:
             raise
         except httpx.HTTPError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+
+    @staticmethod
+    def _known_features(model_id: str) -> dict[str, bool]:
+        """Capacidades documentadas por la API de DeepSeek: sin visión en ambos
+        modelos; JSON estructurado en los dos; function calling solo en chat."""
+        if "reasoner" in model_id.lower():
+            return {"vision": False, "json_mode": True, "tools": False}
+        return {"vision": False, "json_mode": True, "tools": True}
 
     async def generate(
         self, request: TaskCreateRequest, model: str, prompt: str, system: str | None = None

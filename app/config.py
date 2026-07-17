@@ -81,6 +81,17 @@ class ResourceConfig(BaseModel):
     allow_execution_waves: bool = True
 
 
+class ModelEnrichmentConfig(BaseModel):
+    # Enriquecimiento del catálogo con metadatos de models.dev (gratuito, sin
+    # clave): contexto real, precios de referencia, corte de conocimiento y
+    # capacidades declaradas. Nunca pisa datos verificados por sondeo/runtime.
+    # Opt-in: los tests y despliegues sin salida a internet no descargan nada.
+    enabled: bool = False
+    url: str = Field(default="https://models.dev/api.json", min_length=1, max_length=512)
+    refresh_hours: float = Field(default=24.0, gt=0, le=24 * 30)
+    timeout_seconds: float = Field(default=20.0, gt=0, le=300)
+
+
 class RoutingConfig(BaseModel):
     # Selección adaptativa: reordena los candidatos que ya pasaron los filtros
     # (proveedor permitido, cloud, capacidad, contexto) según la evidencia
@@ -153,32 +164,6 @@ class DeepSeekConfig(BaseModel):
     catalog_cache_seconds: float = Field(default=30.0, ge=0)
 
 
-class HuggingFaceLocalModelConfig(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
-    path: str = Field(min_length=1, max_length=1024)
-    context_window: int = Field(default=32_768, gt=0)
-    capabilities: list[str] = Field(default_factory=lambda: ["completion"])
-    device: str | None = Field(default=None, max_length=80)
-    dtype: str | None = Field(default=None, max_length=40)
-    trust_remote_code: bool | None = None
-    # "error" = fallo temporal del proveedor en el último sondeo: no veta el
-    # modelo y la siguiente tanda lo reintenta aunque ya esté analizado.
-    compatibility: Literal["unknown", "compatible", "incompatible", "error"] = "compatible"
-    compatibility_checked_at: str | None = None
-    compatibility_error: str | None = Field(default=None, max_length=2000)
-
-
-class HuggingFaceLocalConfig(BaseModel):
-    enabled: bool = False
-    models_dir: str = ".local/models"
-    timeout_seconds: float = Field(default=300, gt=0)
-    default_context_window: int = Field(default=32_768, gt=0)
-    default_device: str = Field(default="auto", max_length=80)
-    default_dtype: str | None = Field(default=None, max_length=40)
-    trust_remote_code: bool = False
-    models: list[HuggingFaceLocalModelConfig] = Field(default_factory=list)
-
-
 class OpenAICompatibleModelConfig(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     context_window: int = Field(default=128_000, gt=0)
@@ -238,7 +223,6 @@ class OpenAICompatibleProviderConfig(BaseModel):
 class ProvidersConfig(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
-    huggingface_local: HuggingFaceLocalConfig = Field(default_factory=HuggingFaceLocalConfig)
     custom: list[OpenAICompatibleProviderConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -259,6 +243,7 @@ class BrokerConfig(BaseModel):
     prompt_compression: PromptCompressionConfig = Field(default_factory=PromptCompressionConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    model_enrichment: ModelEnrichmentConfig = Field(default_factory=ModelEnrichmentConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)

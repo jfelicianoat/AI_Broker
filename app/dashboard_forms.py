@@ -15,8 +15,6 @@ from pydantic import ValidationError
 
 from app.config import (
     BrokerConfig,
-    HuggingFaceLocalConfig,
-    HuggingFaceLocalModelConfig,
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
 )
@@ -31,6 +29,7 @@ def _prompt_tester_defaults() -> dict[str, str]:
     return {
         "input_mode": "prompt",
         "prompt": "",
+        "prompt_compression": "",
         "strategy": "single",
         "preset": "fast",
         "scheduling": "adaptive",
@@ -73,13 +72,19 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("prompt_compression.enabled", "Compresión de prompts activa"),
         ("prompt_compression.level", "Nivel de compresión de prompts"),
         ("prompt_compression.min_chars", "Mínimo de caracteres para comprimir"),
-        ("providers.huggingface_local.enabled", "Hugging Face local activo"),
-        ("providers.huggingface_local.models_dir", "Directorio HF local"),
-        ("providers.huggingface_local.timeout_seconds", "Timeout HF local"),
-        ("providers.huggingface_local.default_context_window", "Contexto HF local"),
-        ("providers.huggingface_local.default_device", "Device HF local"),
-        ("providers.huggingface_local.default_dtype", "Dtype HF local"),
-        ("providers.huggingface_local.trust_remote_code", "HF trust_remote_code"),
+        ("providers.ollama.enabled", "Ollama activo"),
+        ("providers.ollama.base_url", "Ollama base URL"),
+        ("providers.ollama.timeout_seconds", "Ollama timeout"),
+        ("providers.ollama.unload_timeout_seconds", "Ollama timeout de descarga"),
+        ("providers.ollama.catalog_cache_seconds", "Ollama caché de catálogo"),
+        ("providers.deepseek.enabled", "DeepSeek activo"),
+        ("providers.deepseek.base_url", "DeepSeek base URL"),
+        ("providers.deepseek.timeout_seconds", "DeepSeek timeout"),
+        ("providers.deepseek.api_key_env", "DeepSeek variable API key"),
+        ("providers.deepseek.default_model", "DeepSeek modelo por defecto"),
+        ("providers.deepseek.context_window", "DeepSeek contexto"),
+        ("providers.deepseek.input_cost_per_million", "DeepSeek coste input"),
+        ("providers.deepseek.output_cost_per_million", "DeepSeek coste output"),
     ]
     changes: list[dict[str, str]] = []
     for path, label in checks:
@@ -87,15 +92,6 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         after = _nested_value(updated_data, path)
         if before != after:
             changes.append({"label": label, "before": _display_config_value(before), "after": _display_config_value(after)})
-
-    current_hf_models = _nested_value(current_data, "providers.huggingface_local.models") or []
-    updated_hf_models = _nested_value(updated_data, "providers.huggingface_local.models") or []
-    if _model_names(current_hf_models) != _model_names(updated_hf_models):
-        changes.append({
-            "label": "Modelos HF local",
-            "before": _display_model_list(current_hf_models),
-            "after": _display_model_list(updated_hf_models),
-        })
 
     current_custom = current_data.get("providers", {}).get("custom", [])
     updated_custom = updated_data.get("providers", {}).get("custom", [])
@@ -204,9 +200,43 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
     }
     payload["processing"] = processing
     payload["resources"] = resources
-    payload["providers"]["huggingface_local"] = _parse_huggingface_local_provider(current, form)
+    payload["providers"]["ollama"] = _parse_ollama_provider(current, form)
+    payload["providers"]["deepseek"] = _parse_deepseek_provider(current, form)
     payload["providers"]["custom"] = _parse_custom_providers(current, form)
     return BrokerConfig.model_validate(payload)
+
+
+def _parse_ollama_provider(current: BrokerConfig, form: dict[str, str]) -> dict[str, Any]:
+    cur = current.providers.ollama.model_dump(mode="json")
+    # Formularios que no incluyen la tarjeta (parciales o antiguos) no tocan
+    # la config: sin este guard, un checkbox ausente desactivaría Ollama.
+    if form.get("ollama_base_url") is None:
+        return cur
+    return {
+        **cur,
+        "enabled": _checked(form, "ollama_enabled"),
+        "base_url": form.get("ollama_base_url", "").strip().rstrip("/") or cur["base_url"],
+        "timeout_seconds": _float_field(form, "ollama_timeout_seconds", cur["timeout_seconds"]),
+        "unload_timeout_seconds": _float_field(form, "ollama_unload_timeout_seconds", cur["unload_timeout_seconds"]),
+        "catalog_cache_seconds": _float_field(form, "ollama_catalog_cache_seconds", cur["catalog_cache_seconds"]),
+    }
+
+
+def _parse_deepseek_provider(current: BrokerConfig, form: dict[str, str]) -> dict[str, Any]:
+    cur = current.providers.deepseek.model_dump(mode="json")
+    if form.get("deepseek_base_url") is None:
+        return cur
+    return {
+        **cur,
+        "enabled": _checked(form, "deepseek_enabled"),
+        "base_url": form.get("deepseek_base_url", "").strip().rstrip("/") or cur["base_url"],
+        "timeout_seconds": _float_field(form, "deepseek_timeout_seconds", cur["timeout_seconds"]),
+        "api_key_env": form.get("deepseek_api_key_env", "").strip() or cur["api_key_env"],
+        "default_model": form.get("deepseek_default_model", "").strip() or cur["default_model"],
+        "context_window": _int_field(form, "deepseek_context_window", cur["context_window"]),
+        "input_cost_per_million": _float_field(form, "deepseek_input_cost_per_million", cur["input_cost_per_million"]),
+        "output_cost_per_million": _float_field(form, "deepseek_output_cost_per_million", cur["output_cost_per_million"]),
+    }
 
 
 def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
@@ -287,54 +317,6 @@ def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list
             "models": [item.model_dump(mode="json") for item in models],
         })
     return providers
-
-
-def _parse_huggingface_local_provider(current: BrokerConfig, form: dict[str, str]) -> dict[str, Any]:
-    current_hf = getattr(current.providers, "huggingface_local", HuggingFaceLocalConfig())
-    models_text = form.get("hf_local_models", "").strip()
-    models = _parse_huggingface_local_models(models_text)
-    enabled = _checked(form, "hf_local_enabled")
-    if enabled and not models:
-        raise PromptTesterError("Hugging Face local: anade al menos un modelo.")
-    return {
-        "enabled": enabled,
-        "models_dir": form.get("hf_local_models_dir", "").strip() or current_hf.models_dir,
-        "timeout_seconds": _float_field(form, "hf_local_timeout_seconds", 300.0),
-        "default_context_window": _int_field(form, "hf_local_default_context_window", 32768),
-        "default_device": form.get("hf_local_default_device", "").strip() or "auto",
-        "default_dtype": form.get("hf_local_default_dtype", "").strip() or None,
-        "trust_remote_code": _checked(form, "hf_local_trust_remote_code"),
-        "models": [item.model_dump(mode="json") for item in models],
-    }
-
-
-def _parse_huggingface_local_models(models_text: str) -> list[HuggingFaceLocalModelConfig]:
-    if not models_text:
-        return []
-    models: list[HuggingFaceLocalModelConfig] = []
-    for line_number, raw_line in enumerate(models_text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = [part.strip() for part in line.split("|")]
-        try:
-            if len(parts) < 2 or not parts[0] or not parts[1]:
-                raise ValueError("missing name or path")
-            models.append(HuggingFaceLocalModelConfig(
-                name=parts[0],
-                path=parts[1],
-                context_window=int(parts[2]) if len(parts) > 2 and parts[2] else 32768,
-                device=parts[3] if len(parts) > 3 and parts[3] else None,
-                dtype=parts[4] if len(parts) > 4 and parts[4] else None,
-                capabilities=["completion"],
-                compatibility="compatible",
-            ))
-        except (ValueError, ValidationError) as error:
-            raise PromptTesterError(
-                f"Hugging Face local: modelo invalido en linea {line_number}. "
-                "Usa nombre|ruta|contexto|device|dtype."
-            ) from error
-    return models
 
 
 def _parse_custom_provider_models(
@@ -471,6 +453,12 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
     elif input_mode != "prompt":
         raise PromptTesterError("Modo de entrada no soportado.")
 
+    prompt_compression = form.get("prompt_compression", "").strip()
+    if prompt_compression not in {"", "off", "light", "medium", "aggressive"}:
+        raise PromptTesterError(
+            "Compresión de prompt no soportada: usa la global, off, light, medium o aggressive."
+        )
+
     output_format = form.get("output_format", "markdown")
     output: dict[str, Any] = {"format": output_format, "language": "es"}
     json_schema_text = form.get("json_schema", "").strip()
@@ -540,6 +528,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
     return TaskCreateRequest.model_validate({
         "idempotency_key": f"prompt-tester:{uuid4().hex}",
         "request_id": f"prompt-tester-{uuid4().hex[:12]}",
+        "prompt_compression": prompt_compression or None,
         "content": {
             "prompt": prompt,
             "metadata": {

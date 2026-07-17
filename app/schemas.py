@@ -234,11 +234,14 @@ class TaskCreateRequest(StrictBaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     priority: int = Field(default=100, ge=0, le=1000)
+    # Override por tarea de la compresión de prompts. None = usar la
+    # configuración global del broker; "off" = enviar el prompt tal cual.
+    prompt_compression: Literal["off", "light", "medium", "aggressive"] | None = None
 
     @model_validator(mode="after")
     def enforce_data_boundary(self) -> TaskCreateRequest:
         if self.risk.data_classification == DataClassification.local_only:
-            local_provider_names = {"ollama", "huggingface_local", "lmstudio"}
+            local_provider_names = {"ollama", "lmstudio"}
             target = self.model_requirements.target_model
             if target is not None and (
                 target.provider.lower() not in local_provider_names
@@ -354,6 +357,9 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     max_parallel_invocations: int
     exact_target_model: bool
     task_timeout: bool
+    # La tarea puede fijar su propia compresión de prompt (campo opcional
+    # prompt_compression: off/light/medium/aggressive; ausente = config global).
+    prompt_compression_override: bool
 
 
 class DashboardSummaryResponse(StrictBaseModel):

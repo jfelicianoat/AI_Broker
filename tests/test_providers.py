@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import threading
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -12,8 +11,6 @@ from app.config import (
     BrokerConfig,
     DeepSeekConfig,
     HealthConfig,
-    HuggingFaceLocalConfig,
-    HuggingFaceLocalModelConfig,
     OllamaConfig,
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
@@ -23,7 +20,6 @@ from app.config import (
 )
 from app.providers import (
     DeepSeekProvider,
-    HuggingFaceLocalProvider,
     OllamaProvider,
     OpenAICompatibleProvider,
     ProviderError,
@@ -78,6 +74,29 @@ class OllamaProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(models[0]["context_window"], 32768)
         self.assertEqual(output.content, "respuesta")
         self.assertEqual(state["unloads"], 1)
+
+    async def test_maps_declared_capabilities_to_features(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                return httpx.Response(200, json={"models": [
+                    {"name": "vl-model", "size": 1, "context_length": 8192,
+                     "capabilities": ["completion", "vision"]},
+                    {"name": "tool-model", "size": 1, "context_length": 8192,
+                     "capabilities": ["completion", "tools"]},
+                    {"name": "embedder", "size": 1, "context_length": 8192,
+                     "capabilities": ["embedding"]},
+                ]})
+            return httpx.Response(404)
+
+        provider = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
+        models = {item["name"]: item for item in await provider.models()}
+        await provider.close()
+
+        # Las capacidades declaradas por el runtime son exhaustivas: ausencia = no soportado.
+        self.assertEqual(models["vl-model"]["features"], {"vision": True, "tools": False})
+        self.assertEqual(models["tool-model"]["features"], {"vision": False, "tools": True})
+        # Los modelos sin chat no arrastran features de chat.
+        self.assertEqual(models["embedder"]["features"], {})
 
     async def test_rejects_unknown_model(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -447,6 +466,8 @@ class DeepSeekProviderTests(unittest.IsolatedAsyncioTestCase):
             second = await provider.models()
             self.assertEqual(first, second)
             self.assertEqual(calls["count"], 1)
+            # Capacidades documentadas por DeepSeek: JSON y tools en chat, sin visión.
+            self.assertEqual(first[0]["features"], {"vision": False, "json_mode": True, "tools": True})
 
             provider._catalog_cache.clear()
             with self.assertRaises(ProviderError) as raised:
@@ -1386,116 +1407,36 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         await provider2.close()
 
 
-class HuggingFaceLocalProviderTests(unittest.IsolatedAsyncioTestCase):
-    async def test_lists_configured_local_models(self) -> None:
-        with self.subTest("catalog"):
-            model_dir = os.getcwd()
-            provider = HuggingFaceLocalProvider(HuggingFaceLocalConfig(
-                enabled=True,
-                models=[
-                    HuggingFaceLocalModelConfig(
-                        name="local-qwen",
-                        path=model_dir,
-                        context_window=32768,
-                    )
-                ],
-            ))
-            models = await provider.models()
-            await provider.close()
-
-        self.assertEqual(models[0]["provider"], "huggingface_local")
-        self.assertEqual(models[0]["deployment"], "local")
-        self.assertEqual(models[0]["compatibility"], "compatible")
-        self.assertIn("completion", models[0]["capabilities"])
-
-    async def test_generate_uses_lazy_loaded_runtime_and_reports_tokens(self) -> None:
-        provider = HuggingFaceLocalProvider(HuggingFaceLocalConfig(
-            enabled=True,
-            models=[
-                HuggingFaceLocalModelConfig(
-                    name="local-qwen",
-                    path=os.getcwd(),
-                    context_window=32768,
-                )
-            ],
-        ))
-
-        async def fake_load(item):
-            return object(), object()
-
-        provider._load = fake_load  # type: ignore[method-assign]
-        provider._generate_sync = (  # type: ignore[method-assign]
-            lambda model, tokenizer, prompt, temperature, max_tokens, system=None, stop_event=None: (
-                "respuesta local", 7, 3,
-            )
-        )
-        request = TaskCreateRequest.model_validate({
-            "idempotency_key": "hf-local:generate",
-            "content": {"prompt": "hola"},
-            "model_requirements": {
-                "allowed_providers": ["huggingface_local"],
-                "target_model": {
-                    "provider": "huggingface_local",
-                    "deployment": "local",
-                    "model": "local-qwen",
-                },
-                "fallback_allowed": False,
-            },
-        })
-        output = await provider.generate(request, "local-qwen", "hola")
-        await provider.close()
-
-        self.assertEqual(output.content, "respuesta local")
-        self.assertEqual(output.tokens_input, 7)
-        self.assertEqual(output.tokens_output, 3)
-        self.assertEqual(output.cost_usd, 0.0)
-
-    async def test_cancel_sets_stop_event_so_thread_can_finish(self) -> None:
-        provider = HuggingFaceLocalProvider(HuggingFaceLocalConfig(
-            enabled=True,
-            models=[
-                HuggingFaceLocalModelConfig(
-                    name="local-qwen",
-                    path=os.getcwd(),
-                    context_window=32768,
-                )
-            ],
-        ))
-
-        async def fake_load(item):
-            return object(), object()
-
-        started = threading.Event()
-        captured: dict[str, threading.Event] = {}
-
-        def blocking_sync(model, tokenizer, prompt, temperature, max_tokens, system=None, stop_event=None):
-            assert stop_event is not None
-            captured["stop"] = stop_event
-            started.set()
-            # Simula una generación larga que solo termina si el broker la detiene.
-            if not stop_event.wait(timeout=5):
-                raise AssertionError("stop_event nunca se activó tras la cancelación")
-            return "parcial", 1, 1
-
-        provider._load = fake_load  # type: ignore[method-assign]
-        provider._generate_sync = blocking_sync  # type: ignore[method-assign]
-        request = TaskCreateRequest.model_validate({
-            "idempotency_key": "hf-local:cancel",
-            "content": {"prompt": "hola"},
-            "model_requirements": {"allowed_providers": ["huggingface_local"]},
-        })
-
-        task = asyncio.ensure_future(provider.generate(request, "local-qwen", "hola"))
-        await asyncio.to_thread(started.wait, 5)
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        await asyncio.to_thread(captured["stop"].wait, 5)
-        self.assertTrue(captured["stop"].is_set())
-        await provider.close()
-
-
 class RouterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_prompt_honours_per_task_compression_override(self) -> None:
+        from app.config import PromptCompressionConfig
+
+        class Stub:
+            async def models(self):
+                return []
+
+            async def close(self):
+                return None
+
+        # Config global con compresión desactivada: solo el override comprime.
+        config = BrokerConfig(
+            prompt_compression=PromptCompressionConfig(enabled=False, level="light", min_chars=0),
+        )
+        router = RoutedModelProvider(config, ollama=Stub(), deepseek=Stub(), custom={})
+        prompt = "Por favor, ¿podrías decirme la capital de Francia? Muchas gracias de antemano."
+        plain = TaskCreateRequest(idempotency_key="comp:none", content={"prompt": prompt})
+        off = TaskCreateRequest(idempotency_key="comp:off", content={"prompt": prompt}, prompt_compression="off")
+        aggressive = TaskCreateRequest(
+            idempotency_key="comp:agg", content={"prompt": prompt}, prompt_compression="aggressive",
+        )
+
+        self.assertEqual(router.user_prompt(plain), prompt)
+        self.assertEqual(router.user_prompt(off), prompt)
+        compressed = router.user_prompt(aggressive)
+        self.assertNotEqual(compressed, prompt)
+        self.assertLess(len(compressed), len(prompt))
+        await router.close()
+
     async def test_honours_preferred_model_and_fallback_policy(self) -> None:
         class StubProvider:
             def __init__(self, models):
@@ -1932,67 +1873,6 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         await router.close()
 
         self.assertEqual(selected[0].model, "ok")
-
-    async def test_routes_huggingface_local_provider(self) -> None:
-        class DisabledStub:
-            async def models(self):
-                return []
-
-            async def close(self):
-                return None
-
-        class LocalStub:
-            async def models(self):
-                return [
-                    {
-                        "name": "local-qwen",
-                        "provider": "huggingface_local",
-                        "deployment": "local",
-                        "context_window": 100000,
-                        "capabilities": ["completion"],
-                        "compatibility": "compatible",
-                    }
-                ]
-
-            async def generate(self, request, model, prompt, system=None):
-                from app.providers import ModelOutput
-
-                return ModelOutput("hf local", 1, 1, 0.0, 1.0)
-
-            async def close(self):
-                return None
-
-        router = RoutedModelProvider(
-            BrokerConfig(
-                providers=ProvidersConfig(
-                    ollama=OllamaConfig(enabled=False),
-                    huggingface_local=HuggingFaceLocalConfig(enabled=True),
-                )
-            ),
-            ollama=DisabledStub(),
-            deepseek=DisabledStub(),
-            huggingface_local=LocalStub(),
-        )
-        request = TaskCreateRequest.model_validate({
-            "idempotency_key": "route:hf-local",
-            "content": {"prompt": "hola"},
-            "risk": {"data_classification": "local_only"},
-            "model_requirements": {
-                "allowed_providers": ["huggingface_local"],
-                "target_model": {
-                    "provider": "huggingface_local",
-                    "deployment": "local",
-                    "model": "local-qwen",
-                },
-                "fallback_allowed": False,
-            },
-        })
-        selected = await router.select(request, 1, ["single"])
-        output = await router.propose(request, selected[0], 1)
-        await router.close()
-
-        self.assertEqual(selected[0].provider, "huggingface_local")
-        self.assertEqual(output.content, "hf local")
 
 
 class RoleSystemPromptTests(unittest.IsolatedAsyncioTestCase):

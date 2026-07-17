@@ -38,8 +38,6 @@
 
 <form class="config-form" method="post" action="/dashboard/actions/config">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  {% set hf_local = config.providers.huggingface_local|default(none) %}
-  {% set hf_models = hf_local.models if hf_local else [] %}
   <div class="form-body config-grid">
     <label class="field">
       <span>Timeout global por tarea (segundos)</span>
@@ -104,71 +102,19 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
-        <h3>Hugging Face local</h3>
-        <p>Modelos descargados en disco y ejecutados dentro del proceso del Broker.</p>
+        <h3>Proveedores</h3>
+        <p>Elige un proveedor para ver o cambiar su conexión, o da de alta uno nuevo (OpenAI-compatible). El catálogo de modelos y su estado se consultan en <a href="/dashboard/models">Modelos</a>.</p>
       </div>
-      <span class="badge badge-neutral">huggingface_local</span>
-    </div>
-    <div class="provider-grid">
-      <div class="provider-config">
-        <div class="provider-config-head">
-          <strong>Runtime local</strong>
-          <label>
-            <input type="checkbox" name="hf_local_enabled" {% if hf_local and hf_local.enabled %}checked{% endif %}>
-            Activo
-          </label>
-        </div>
-        <div class="provider-fields">
-          <label class="field provider-wide">
-            <span>Directorio base de modelos</span>
-            <input name="hf_local_models_dir" value="{{ hf_local.models_dir if hf_local else '.local/models' }}" placeholder=".local/models">
-          </label>
-          <label class="field">
-            <span>Timeout segundos</span>
-            <input name="hf_local_timeout_seconds" value="{{ hf_local.timeout_seconds if hf_local else 300 }}" inputmode="decimal">
-          </label>
-          <label class="field">
-            <span>Contexto por defecto</span>
-            <input name="hf_local_default_context_window" value="{{ hf_local.default_context_window if hf_local else 32768 }}" inputmode="numeric">
-          </label>
-          <label class="field">
-            <span>Device por defecto</span>
-            <input name="hf_local_default_device" value="{{ hf_local.default_device if hf_local else 'auto' }}" placeholder="auto">
-          </label>
-          <label class="field">
-            <span>Dtype por defecto</span>
-            <input name="hf_local_default_dtype" value="{{ hf_local.default_dtype if hf_local and hf_local.default_dtype else '' }}" placeholder="float16">
-          </label>
-          <details class="provider-wide provider-models-details">
-            <summary>Modelos declarados ({{ hf_models|length }}) — editar a mano</summary>
-            <label class="field provider-wide">
-              <span>Modelos: nombre|ruta|contexto|device|dtype</span>
-              <textarea name="hf_local_models" rows="5" placeholder="qwen2.5-7b|qwen2.5-7b|32768|auto|float16">{% for model in hf_models %}{{ model.name }}|{{ model.path }}|{{ model.context_window }}|{{ model.device or '' }}|{{ model.dtype or '' }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </label>
-          </details>
-          <div class="check-row provider-wide">
-            <label>
-              <input type="checkbox" name="hf_local_trust_remote_code" {% if hf_local and hf_local.trust_remote_code %}checked{% endif %}>
-              Permitir trust_remote_code
-            </label>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="config-subsection">
-    <div class="subsection-heading">
-      <div>
-        <h3>Proveedores API</h3>
-        <p>Adapters OpenAI-compatible. Elige un proveedor para ver o cambiar su conexión, o da de alta uno nuevo. El catálogo de modelos y su estado se consultan en <a href="/dashboard/models">Modelos</a>.</p>
-      </div>
-      <span class="badge badge-neutral">custom</span>
+      <span class="badge badge-neutral">providers</span>
     </div>
     {% set provider_count = config.providers.custom|length %}
+    {% set ollama = config.providers.ollama %}
+    {% set deepseek = config.providers.deepseek %}
     <label class="field provider-picker-field">
       <span>Proveedor</span>
       <select data-provider-picker aria-label="Elegir proveedor a editar">
+        <option value="ollama">Ollama — integrado, local{% if not ollama.enabled %} (inactivo){% endif %}</option>
+        <option value="deepseek">DeepSeek — integrado, cloud{% if not deepseek.enabled %} (inactivo){% endif %}</option>
         {% for provider in config.providers.custom %}
           <option value="{{ loop.index }}">{{ provider.display_name or provider.id }}{% if not provider.enabled %} (inactivo){% endif %}</option>
         {% endfor %}
@@ -176,10 +122,78 @@
       </select>
     </label>
     <div class="provider-grid">
+      <div class="provider-config" data-provider-card="ollama">
+        <div class="provider-config-head">
+          <strong>Ollama</strong>
+          <label>
+            <input type="checkbox" name="ollama_enabled" {% if ollama.enabled %}checked{% endif %}>
+            Activo
+          </label>
+        </div>
+        <div class="provider-fields">
+          <label class="field provider-wide">
+            <span>Base URL</span>
+            <input name="ollama_base_url" value="{{ ollama.base_url }}" placeholder="http://127.0.0.1:11434">
+          </label>
+          <label class="field">
+            <span>Timeout segundos</span>
+            <input name="ollama_timeout_seconds" value="{{ ollama.timeout_seconds }}" inputmode="decimal">
+          </label>
+          <label class="field">
+            <span>Timeout de descarga de VRAM (s)</span>
+            <input name="ollama_unload_timeout_seconds" value="{{ ollama.unload_timeout_seconds }}" inputmode="decimal">
+          </label>
+          <label class="field">
+            <span>Caché de catálogo (s)</span>
+            <input name="ollama_catalog_cache_seconds" value="{{ ollama.catalog_cache_seconds }}" inputmode="decimal">
+          </label>
+          <p class="form-hint provider-wide">Proveedor integrado: los modelos se descubren solos desde el servidor Ollama (/api/tags) y no requieren analizador.</p>
+        </div>
+      </div>
+      <div class="provider-config" data-provider-card="deepseek" hidden>
+        <div class="provider-config-head">
+          <strong>DeepSeek</strong>
+          <label>
+            <input type="checkbox" name="deepseek_enabled" {% if deepseek.enabled %}checked{% endif %}>
+            Activo
+          </label>
+        </div>
+        <div class="provider-fields">
+          <label class="field provider-wide">
+            <span>Base URL</span>
+            <input name="deepseek_base_url" value="{{ deepseek.base_url }}" placeholder="https://api.deepseek.com">
+          </label>
+          <label class="field">
+            <span>Variable API key</span>
+            <input name="deepseek_api_key_env" value="{{ deepseek.api_key_env }}" placeholder="DEEPSEEK_API_KEY">
+          </label>
+          <label class="field">
+            <span>Modelo por defecto</span>
+            <input name="deepseek_default_model" value="{{ deepseek.default_model }}" placeholder="deepseek-chat">
+          </label>
+          <label class="field">
+            <span>Contexto</span>
+            <input name="deepseek_context_window" value="{{ deepseek.context_window }}" inputmode="numeric">
+          </label>
+          <label class="field">
+            <span>Timeout segundos</span>
+            <input name="deepseek_timeout_seconds" value="{{ deepseek.timeout_seconds }}" inputmode="decimal">
+          </label>
+          <label class="field">
+            <span>Coste input / 1M</span>
+            <input name="deepseek_input_cost_per_million" value="{{ deepseek.input_cost_per_million }}" inputmode="decimal">
+          </label>
+          <label class="field">
+            <span>Coste output / 1M</span>
+            <input name="deepseek_output_cost_per_million" value="{{ deepseek.output_cost_per_million }}" inputmode="decimal">
+          </label>
+          <p class="form-hint provider-wide">Proveedor integrado cloud: requiere la API key en la variable de entorno indicada (o en el keyring del sistema).</p>
+        </div>
+      </div>
       {% for index in range(1, provider_count + 2) %}
         {% set provider = config.providers.custom[index - 1] if provider_count >= index else none %}
         {% set probe_id = provider.id if provider else 'provider-' ~ index %}
-        <div class="provider-config" data-provider-card="{{ index }}" {% if index > 1 %}hidden{% endif %}>
+        <div class="provider-config" data-provider-card="{{ index }}" hidden>
           <div class="provider-config-head">
             <strong>{{ (provider.display_name or provider.id) if provider else 'Nuevo proveedor' }}</strong>
             <label>

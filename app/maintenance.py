@@ -199,6 +199,8 @@ def prune_terminal_task_events(db: Any, *, older_than_days: int) -> int:
 
     El flujo de consenso genera decenas de eventos de progreso por tarea; sin poda,
     `events` degrada progresivamente todas las consultas (conexión SQLite única).
+    `prompt.compressed` queda exento: es el único registro del prompt que viajó
+    realmente a los modelos (una fila por tarea) y debe durar lo que la tarea.
     Devuelve el número de filas eliminadas. `older_than_days <= 0` desactiva la poda.
     """
     if older_than_days <= 0:
@@ -207,7 +209,7 @@ def prune_terminal_task_events(db: Any, *, older_than_days: int) -> int:
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
     cursor = db.execute(
-        "DELETE FROM events WHERE task_id IN ("
+        "DELETE FROM events WHERE event_type != 'prompt.compressed' AND task_id IN ("
         "SELECT id FROM tasks WHERE status IN ('completed', 'failed', 'cancelled') "
         "AND updated_at < ?)",
         (cutoff,),

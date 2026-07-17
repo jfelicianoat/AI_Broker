@@ -2,18 +2,22 @@
 
 {% block title %}AI Broker — Probador de Prompts{% endblock %}
 
-{% macro model_options(models, selected, empty_label='Seleccionar…') -%}
-  <option value="">{{ empty_label }}</option>
-  {% for provider, group in models|groupby('provider') %}
-    <optgroup label="{{ provider }}">
-      {% for model in group %}
-        {% set value = model|model_value %}
-        {% set features = model|model_features_text %}
-        {% set json_mode = (model.features or {}).get('json_mode') %}
-        <option value="{{ value }}" {% if selected == value %}selected{% endif %}{% if json_mode is not none %} data-json-mode="{{ 'yes' if json_mode else 'no' }}"{% endif %}>{{ model|model_compatibility_label }} {{ model.deployment }}/{{ model.name }}{% if features != 'sin sondear' %} — {{ features }}{% endif %}</option>
-      {% endfor %}
-    </optgroup>
+{% macro model_label(model) -%}
+{{ model|model_compatibility_label }} {{ model.provider }}/{{ model.name }} ({{ model.deployment }}){% set features = model|model_features_text %}{% if features != 'sin sondear' %} — {{ features }}{% endif %}
+{%- endmacro %}
+
+{# Combo con autocompletado: el input visible filtra contra el datalist
+   compartido y un hidden lleva la referencia JSON que espera el backend. #}
+{% macro model_combo(name, selected, models, placeholder='Escribe para filtrar modelos…') -%}
+  {% set ns = namespace(label='') %}
+  {% for model in models %}
+    {% if model|model_value == selected %}{% set ns.label = model_label(model) %}{% endif %}
   {% endfor %}
+  <span class="model-combo">
+    <input type="text" list="tester-models" value="{{ ns.label }}" placeholder="{{ placeholder }}"
+           autocomplete="off" spellcheck="false" data-model-combo aria-label="Modelo para {{ name }}">
+    <input type="hidden" name="{{ name }}" value="{{ selected if ns.label else '' }}" data-model-combo-value>
+  </span>
 {%- endmacro %}
 
 {% block topbar_state %}
@@ -24,10 +28,10 @@
 {% endblock %}
 
 {% block content %}
-        {# Los selectores de mixture solo ofrecen modelos no vetados: los
-           incompatibles siguen visibles en "Modelo único" y en la página
-           Modelos, pero no se pueden elegir como proponente ni árbitro. #}
-        {% set mixture_models = models|rejectattr('compatibility', 'equalto', 'incompatible')|list %}
+        {# El probador solo ofrece modelos disponibles: los no operativos
+           (rechazados por el proveedor) se consultan en la página Modelos
+           pero no se pueden elegir en ningún selector. #}
+        {% set available_models = models|rejectattr('compatibility', 'equalto', 'incompatible')|list %}
         {% if catalog_error %}
           <div class="alert warning">{{ catalog_error }}</div>
         {% endif %}
@@ -81,6 +85,12 @@
 
         <form class="tester-grid" method="post" action="/dashboard/actions/prompt-tester">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <datalist id="tester-models">
+            {% for model in available_models %}
+              {% set json_mode = (model.features or {}).get('json_mode') %}
+              <option value="{{ model_label(model) }}" data-value="{{ model|model_value }}"{% if json_mode is not none %} data-json-mode="{{ 'yes' if json_mode else 'no' }}"{% endif %}></option>
+            {% endfor %}
+          </datalist>
           <section class="panel tester-input">
             <div class="panel-heading">
               <div>
@@ -100,6 +110,16 @@
                 <span>Contenido</span>
                 <textarea name="prompt" rows="16" required>{{ form.prompt }}</textarea>
               </label>
+              <label class="field">
+                <span>Compresión del prompt para esta prueba</span>
+                <select name="prompt_compression">
+                  <option value="" {% if not form.prompt_compression %}selected{% endif %}>Según configuración global</option>
+                  <option value="off" {% if form.prompt_compression == 'off' %}selected{% endif %}>Sin compresión — enviar tal cual</option>
+                  <option value="light" {% if form.prompt_compression == 'light' %}selected{% endif %}>light — solo cortesías</option>
+                  <option value="medium" {% if form.prompt_compression == 'medium' %}selected{% endif %}>medium — + muletillas y relleno</option>
+                  <option value="aggressive" {% if form.prompt_compression == 'aggressive' %}selected{% endif %}>aggressive — + artículos, estilo caveman</option>
+                </select>
+              </label>
 
               {% if compression_preview %}
                 <div class="compression-preview {% if compression_preview.applied %}applied{% endif %}">
@@ -114,9 +134,13 @@
                     {% endif %}
                   </div>
                   {% if not compression_preview.enabled %}
-                    <p>La compresión de prompts está desactivada; el texto viajará tal cual. Puedes activarla en <a href="/dashboard/config">Configuración</a>.</p>
+                    {% if compression_preview.override == 'off' %}
+                      <p>Compresión desactivada para esta prueba: el texto viajará tal cual.</p>
+                    {% else %}
+                      <p>La compresión de prompts está desactivada; el texto viajará tal cual. Puedes activarla en <a href="/dashboard/config">Configuración</a> o elegir un nivel solo para esta prueba.</p>
+                    {% endif %}
                   {% elif compression_preview.applied %}
-                    <p>{{ compression_preview.original_chars }} → {{ compression_preview.compressed_chars }} caracteres con nivel <em>{{ compression_preview.level }}</em>. Esto es lo que viajará al modelo; el prompt original se conserva en la tarea.</p>
+                    <p>{{ compression_preview.original_chars }} → {{ compression_preview.compressed_chars }} caracteres con nivel <em>{{ compression_preview.level }}</em>{% if compression_preview.override %} (elegido en el probador){% endif %}. Esto es lo que viajará al modelo; el prompt original se conserva en la tarea.</p>
                     <details open>
                       <summary>Prompt reducido</summary>
                       <pre>{{ compression_preview.text }}</pre>
@@ -148,12 +172,10 @@
               </label>
               <label class="field" data-show-strategy="single">
                 <span>Modelo único exacto</span>
-                <select name="single_model">
-                  {{ model_options(models, form.single_model) }}
-                </select>
+                {{ model_combo('single_model', form.single_model, available_models) }}
               </label>
               <div class="mixture-fields" data-show-strategy="mixture_of_agents">
-                <p class="form-hint">Solo se listan modelos operativos, pendientes o con error temporal; los no operativos (rechazados por el proveedor) quedan fuera.</p>
+                <p class="form-hint">Escribe en cada campo para filtrar. Solo se ofrecen modelos disponibles (operativos, pendientes o con error temporal); los no operativos quedan fuera.</p>
                 <div class="field-pair">
                   <label class="field">
                     <span>Preset mixture</span>
@@ -180,17 +202,13 @@
                     {% set role_key = 'proposer_role_' ~ index %}
                     <div class="proposer-row">
                       <input name="{{ role_key }}" value="{{ form[role_key] }}" aria-label="Rol proponente {{ index }}">
-                      <select name="{{ model_key }}" aria-label="Modelo proponente {{ index }}">
-                        {{ model_options(mixture_models, form[model_key], 'Sin usar') }}
-                      </select>
+                      {{ model_combo(model_key, form[model_key], available_models, 'Sin usar — escribe para filtrar') }}
                     </div>
                   {% endfor %}
                 </div>
                 <label class="field">
                   <span>Árbitro exacto</span>
-                  <select name="arbiter_model">
-                    {{ model_options(mixture_models, form.arbiter_model) }}
-                  </select>
+                  {{ model_combo('arbiter_model', form.arbiter_model, available_models) }}
                 </label>
               </div>
             </div>

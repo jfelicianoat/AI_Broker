@@ -37,6 +37,9 @@ FEATURE_LABELS = {
     "tools": "tools",
 }
 
+# Claves del catálogo externo comparables con las del sondeo.
+CATALOG_FEATURE_KEYS = ("vision", "json_mode", "tools")
+
 
 def _compatibility(value: Any) -> str:
     return str((value or {}).get("compatibility") or "unknown")
@@ -86,13 +89,37 @@ def model_compatibility_class(value: Any) -> str:
 
 
 def model_features_text(value: Any) -> str:
-    """Capacidades sondeadas de un modelo: 'visión · JSON · tools' o el motivo
-    por el que no hay dato. Clave ausente = ese aspecto no se llegó a verificar."""
+    """Capacidades de un modelo: primero las verificadas (sondeo/runtime) y,
+    para claves sin verificar, lo que declara el catálogo externo con su marca."""
     features = (value or {}).get("features") or {}
-    if not features:
-        return "sin sondear"
-    enabled = [FEATURE_LABELS.get(key, key) for key, ok in features.items() if ok]
-    return " · ".join(enabled) if enabled else "solo texto"
+    catalog = (value or {}).get("catalog") or {}
+    verified = [FEATURE_LABELS.get(key, key) for key, ok in features.items() if ok]
+    from_catalog = [
+        FEATURE_LABELS.get(key, key)
+        for key in CATALOG_FEATURE_KEYS
+        if key not in features and catalog.get(key)
+    ]
+    parts = []
+    if verified:
+        parts.append(" · ".join(verified))
+    if from_catalog:
+        parts.append("catálogo: " + " · ".join(from_catalog))
+    if parts:
+        return " · ".join(parts)
+    if features or catalog:
+        return "solo texto"
+    return "sin sondear"
+
+
+def model_effective_caps(value: Any) -> list[str]:
+    """Capacidades para filtrar: verificadas true + declaradas por el catálogo
+    en claves sin verificar. Un negativo verificado excluye aunque el catálogo
+    afirme lo contrario."""
+    features = (value or {}).get("features") or {}
+    catalog = (value or {}).get("catalog") or {}
+    caps = [key for key, ok in features.items() if ok]
+    caps += [key for key in CATALOG_FEATURE_KEYS if key not in features and catalog.get(key)]
+    return caps
 
 
 def status_label(value: Any) -> str:
@@ -110,4 +137,5 @@ def register_filters(env: Any) -> None:
     env.filters["model_compatibility_text"] = model_compatibility_text
     env.filters["model_compatibility_class"] = model_compatibility_class
     env.filters["model_features_text"] = model_features_text
+    env.filters["model_effective_caps"] = model_effective_caps
     env.filters["status_label"] = status_label

@@ -379,12 +379,13 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.1"
+    assert body["contract_version"] == "2.2"
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]
     assert "parallel" in body["scheduling_by_preset"]["slow"]
     assert body["max_active_workflows"] == 1
     assert body["max_parallel_invocations"] == 2
+    assert body["prompt_compression_override"] is True
 
 
 def test_dashboard_read_models_are_paged_filterable_and_source_backed(tmp_path: Path) -> None:
@@ -791,8 +792,11 @@ def test_config_page_uses_provider_picker_and_hides_model_listings(tmp_path: Pat
     with TestClient(create_app(config, config_path=tmp_path / "broker_config.yaml")) as client:
         page = client.get("/dashboard/config").text
 
-    # Combo con el proveedor existente y la opción de alta.
+    # Combo con los integrados, el proveedor existente y la opción de alta.
     assert "data-provider-picker" in page
+    assert 'data-provider-card="ollama"' in page
+    assert 'data-provider-card="deepseek"' in page
+    assert 'name="ollama_base_url"' in page
     assert "LM Studio" in page
     assert "Dar de alta un proveedor nuevo" in page
     # Tarjeta extra vacía para el alta (índice siguiente al último proveedor).
@@ -1300,6 +1304,43 @@ def test_models_dashboard_has_dedicated_screen_and_navigation(tmp_path: Path) ->
     assert "Runtime local" in models.text
 
 
+def test_models_dashboard_capability_filter_chips_and_row_attributes(tmp_path: Path, monkeypatch) -> None:
+    async def catalog_with_features(self):
+        def entry(name: str, compatibility: str, features: dict) -> dict:
+            return {
+                "name": name,
+                "provider": "ollama",
+                "deployment": "bootstrap",
+                "status": "available",
+                "context_window": 1000,
+                "capabilities": ["completion"],
+                "compatibility": compatibility,
+                "compatibility_checked_at": None,
+                "compatibility_error": None,
+                "features": features,
+            }
+
+        return [
+            entry("todo-capaz", "compatible", {"vision": True, "json_mode": True, "tools": True}),
+            entry("solo-texto", "compatible", {"vision": False, "json_mode": False, "tools": False}),
+            entry("sin-sondear", "unknown", {}),
+        ]
+
+    monkeypatch.setattr(BootstrapModelProvider, "models", catalog_with_features)
+    with make_client(tmp_path) as client:
+        page = client.get("/dashboard/models").text
+
+    # Chips de filtrado por capacidad y estado.
+    assert 'data-caps-toggle="vision"' in page
+    assert 'data-caps-toggle="json_mode"' in page
+    assert 'data-caps-toggle="tools"' in page
+    assert 'data-caps-toggle="compat:compatible"' in page
+    # Cada fila lleva sus capacidades verificadas y su estado para el filtro JS.
+    assert 'data-caps="vision json_mode tools"' in page
+    assert 'data-caps=""' in page
+    assert 'data-compat="unknown"' in page
+
+
 def test_prompt_tester_validates_json_without_creating_task(tmp_path: Path) -> None:
     model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
     with make_client(tmp_path) as client:
@@ -1434,7 +1475,7 @@ def test_prompt_tester_shows_compression_preview(tmp_path: Path) -> None:
     assert "no llega al mínimo" in short.text
 
 
-def test_prompt_tester_hides_incompatible_models_from_mixture_selectors(tmp_path: Path, monkeypatch) -> None:
+def test_prompt_tester_hides_incompatible_models_and_uses_filter_combos(tmp_path: Path, monkeypatch) -> None:
     async def catalog_with_incompatible(self):
         def entry(name: str, compatibility: str) -> dict:
             return {
@@ -1455,18 +1496,60 @@ def test_prompt_tester_hides_incompatible_models_from_mixture_selectors(tmp_path
     with make_client(tmp_path) as client:
         page = client.get("/dashboard/prompt-tester").text
 
-    single_select = page.split('name="single_model"')[1].split("</select>")[0]
-    proposer_select = page.split('name="proposer_model_1"')[1].split("</select>")[0]
-    arbiter_select = page.split('name="arbiter_model"')[1].split("</select>")[0]
-    # El modelo único admite cualquier modelo, incluso los vetados para mixture.
-    assert "vetado" in single_select
-    # Proponentes y árbitro no ofrecen modelos incompatibles con mixture.
-    assert "vetado" not in proposer_select
-    assert "vetado" not in arbiter_select
-    assert "apto" in proposer_select
-    assert "apto" in arbiter_select
-    # Los pendientes de analizar siguen disponibles con su marcador.
-    assert "pendiente" in arbiter_select
+    datalist = page.split('<datalist id="tester-models">')[1].split("</datalist>")[0]
+    # Los no operativos no se ofrecen en ningún selector del probador.
+    assert "vetado" not in datalist
+    assert "vetado" not in page.split("</datalist>")[1]
+    # Los operativos y pendientes siguen disponibles.
+    assert "apto" in datalist
+    assert "pendiente" in datalist
+    # Los selectores son combos con autocompletado sobre el datalist compartido:
+    # input visible + hidden con la referencia JSON para el backend.
+    for field in ("single_model", "proposer_model_1", "arbiter_model"):
+        assert f'name="{field}"' in page
+    assert page.count('list="tester-models"') == 7
+    assert page.count("data-model-combo-value") == 7
+
+
+def test_prompt_tester_compression_override_controls_preview_and_request(tmp_path: Path) -> None:
+    model_value = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
+    base_form = {
+        "action": "validate",
+        "input_mode": "prompt",
+        "prompt": "Por favor, ¿podrías resumirme este texto tan largo? Muchas gracias de antemano por tu ayuda.",
+        "strategy": "single",
+        "single_model": model_value,
+    }
+    with make_client(tmp_path) as client:
+        token = dashboard_csrf(client, "/dashboard/prompt-tester")
+        page = client.get("/dashboard/prompt-tester").text
+        off = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={**base_form, "csrf_token": token, "prompt_compression": "off"},
+        )
+        aggressive = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={**base_form, "csrf_token": token, "prompt_compression": "aggressive"},
+        )
+        invalid = client.post(
+            "/dashboard/actions/prompt-tester",
+            data={**base_form, "csrf_token": token, "prompt_compression": "turbo"},
+        )
+
+    # El selector existe con sus opciones.
+    assert 'name="prompt_compression"' in page
+    assert "Según configuración global" in page
+    assert "Sin compresión — enviar tal cual" in page
+    # "off" fuerza el envío tal cual aunque la config global comprima.
+    assert off.status_code == 200
+    assert "Compresión desactivada para esta prueba" in off.text
+    # Un nivel elegido en el probador se aplica y la preview lo dice.
+    assert aggressive.status_code == 200
+    assert "elegido en el probador" in aggressive.text
+    assert "aggressive" in aggressive.text
+    # Valores desconocidos no crean tarea y explican las opciones válidas.
+    assert invalid.status_code == 200
+    assert "Compresión de prompt no soportada" in invalid.text
 
 
 def test_prompt_tester_warns_when_json_output_uses_model_without_json_mode(tmp_path: Path, monkeypatch) -> None:
@@ -1556,6 +1639,60 @@ def test_dashboard_csrf_cookie_slides_on_fragment_polling(tmp_path: Path) -> Non
     assert "ai_broker_dashboard_csrf" in set_cookie
     assert token in set_cookie
     assert "Max-Age=28800" in set_cookie
+
+
+def test_task_detail_shows_original_and_compressed_prompt(tmp_path: Path) -> None:
+    from app.prompt_compressor import PromptCompressor
+    from app.schemas import ModelReference
+
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    app = create_app(config, config_path=tmp_path / "broker_config.yaml")
+
+    class CompressingProvider:
+        prompt_compressor = PromptCompressor(enabled=True, level="aggressive", min_chars=0)
+
+        def user_prompt(self, request):
+            return self.prompt_compressor.compress_text(request.content.prompt)
+
+        async def select(self, request, count, roles):
+            return [ModelReference(provider="ollama", deployment="test", model="literal", role=roles[0])]
+
+        async def propose(self, request, model, ordinal):
+            return ModelOutput("respuesta", 2, 4, 0.0, 1.0)
+
+    app.state.coordinator.provider = CompressingProvider()
+    prompt = "Por favor, ¿podrías decirme cuál es la capital de Francia? Muchas gracias de antemano."
+    with TestClient(app) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "detail:prompts",
+            "content": {"prompt": prompt},
+        }).json()
+        client.post("/api/v1/dispatcher/tick")
+        page = client.get(f"/dashboard/tasks/{created['task_id']}")
+
+    assert page.status_code == 200
+    assert "Prompt original" in page.text
+    assert "capital de Francia" in page.text
+    assert "Prompt comprimido que viajó a los modelos" in page.text
+    assert "Sin reducción registrada" not in page.text
+
+
+def test_task_detail_shows_prompt_fallback_when_no_compression_recorded(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "detail:sin-compresion",
+            "content": {"prompt": "hola"},
+        }).json()
+        client.post("/api/v1/dispatcher/tick")
+        page = client.get(f"/dashboard/tasks/{created['task_id']}")
+
+    assert page.status_code == 200
+    assert "Prompt original" in page.text
+    # El provider bootstrap no comprime: el panel lo dice en vez de callar.
+    assert "Sin reducción registrada" in page.text
 
 
 def test_queue_move_to_top(tmp_path: Path) -> None:
@@ -2472,11 +2609,24 @@ def test_prune_terminal_task_events(tmp_path: Path) -> None:
             "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, 'x', '{}', ?)",
             (task_id, stamp),
         )
+    # El prompt comprimido debe durar lo que la tarea: exento de la poda.
+    db.execute(
+        "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, 'prompt.compressed', '{}', ?)",
+        ("t-old-done", old),
+    )
 
     assert prune_terminal_task_events(db, older_than_days=30) == 1
-    remaining = {row["task_id"] for row in db.query_all("SELECT task_id FROM events")}
-    # Solo cae el evento de la tarea terminal antigua; la viva y la reciente se conservan.
-    assert remaining == {"t-old-live", "t-new-done"}
+    remaining = {
+        (row["task_id"], row["event_type"])
+        for row in db.query_all("SELECT task_id, event_type FROM events")
+    }
+    # Solo cae el evento de progreso de la tarea terminal antigua; la viva, la
+    # reciente y el prompt comprimido de la antigua se conservan.
+    assert remaining == {
+        ("t-old-live", "x"),
+        ("t-new-done", "x"),
+        ("t-old-done", "prompt.compressed"),
+    }
     assert prune_terminal_task_events(db, older_than_days=0) == 0
     db.close()
 

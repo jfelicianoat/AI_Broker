@@ -724,20 +724,25 @@ async def _read_urlencoded_form(request: Request) -> dict[str, str]:
 
 def _compression_preview(config: BrokerConfig, payload: TaskCreateRequest) -> dict[str, Any] | None:
     """Vista previa fiel de la reducción de prompt: mismo compresor y misma
-    regla que el router (los embeddings nunca se comprimen)."""
+    regla que el router, incluido el override por tarea (los embeddings nunca
+    se comprimen)."""
     if payload.inference_kind == InferenceKind.embedding:
         return None
     settings = config.prompt_compression
+    override = payload.prompt_compression
+    enabled = settings.enabled if override is None else override != "off"
+    level = settings.level if override is None or override == "off" else override
     compressor = PromptCompressor(
-        enabled=settings.enabled,
-        level=settings.level,
+        enabled=enabled,
+        level=level,
         min_chars=settings.min_chars,
     )
     result = compressor.compress(payload.content.prompt)
     applied = result.applied and result.compressed_chars < result.original_chars
     return {
-        "enabled": settings.enabled,
-        "level": settings.level,
+        "enabled": enabled,
+        "level": level,
+        "override": override,
         "min_chars": settings.min_chars,
         "applied": applied,
         "original_chars": result.original_chars,
