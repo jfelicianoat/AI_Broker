@@ -125,6 +125,20 @@ class Database:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS routing_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                signal_bucket TEXT NOT NULL,
+                chosen_strategy TEXT NOT NULL,
+                final_strategy TEXT NOT NULL,
+                escalated INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                latency_ms REAL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
             CREATE INDEX IF NOT EXISTS idx_tasks_queue
             ON tasks(status, queue_position, priority, created_at)
             """,
@@ -144,6 +158,10 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_invocations_usage
             ON model_invocations(status, updated_at, provider)
             """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_routing_cases_bucket
+            ON routing_cases(signal_bucket, created_at)
+            """,
         ]
         with self._lock:
             for statement in statements:
@@ -153,6 +171,9 @@ class Database:
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN idempotency_key TEXT")
             if "request_hash" not in task_columns:
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN request_hash TEXT")
+            if "agent_state_json" not in task_columns:
+                # Conversación del agente persistida al pausar por tools del cliente.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN agent_state_json TEXT")
             invocation_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(model_invocations)").fetchall()
             }

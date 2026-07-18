@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -7,9 +8,11 @@ import httpx
 
 from app.config import DeepSeekConfig
 from app.providers.base import (
+    AgentTurn,
     CredentialResolver,
     ModelOutput,
     ProviderError,
+    ToolCall,
     _CatalogCache,
     _estimation_text,
     estimate_tokens_upper_bound,
@@ -131,3 +134,59 @@ class DeepSeekProvider:
         cost = (input_tokens * self.config.input_cost_per_million + output_tokens * self.config.output_cost_per_million) / 1_000_000
         return ModelOutput(content, input_tokens, output_tokens, cost,
                            (datetime.now(timezone.utc) - started).total_seconds() * 1000)
+
+    async def chat_tools(
+        self,
+        request: TaskCreateRequest,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AgentTurn:
+        """Una ronda de /chat/completions con tools (formato OpenAI)."""
+        started = datetime.now(timezone.utc)
+        try:
+            response = await self.client.post("/chat/completions", headers=self._headers(), json={
+                "model": model, "messages": messages,
+                "temperature": request.generation.temperature,
+                "max_tokens": request.generation.max_output_tokens,
+                "stream": False, "tools": tools, "tool_choice": "auto",
+            })
+            response.raise_for_status()
+            payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
+        message = ((payload.get("choices") or [{}])[0].get("message")) or {}
+        tool_calls: list[ToolCall] = []
+        for index, raw in enumerate(message.get("tool_calls") or []):
+            function = raw.get("function") or {}
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            tool_calls.append(ToolCall(
+                id=str(raw.get("id") or f"call_{index}"),
+                name=str(function.get("name") or ""),
+                arguments=arguments if isinstance(arguments, dict) else {},
+            ))
+        usage = payload.get("usage") or {}
+        input_tokens = int(usage.get("prompt_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or 0)
+        content = message.get("content")
+        return AgentTurn(
+            content=content if isinstance(content, str) and content.strip() else None,
+            tool_calls=tuple(tool_calls),
+            tokens_input=input_tokens,
+            tokens_output=output_tokens,
+            cost_usd=(input_tokens * self.config.input_cost_per_million
+                      + output_tokens * self.config.output_cost_per_million) / 1_000_000,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            raw_assistant_message=message,
+        )

@@ -40,6 +40,7 @@ from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
+    AGENT_SKILLS,
     BrokerCapabilitiesResponse,
     DashboardResourcesResponse,
     DashboardSummaryResponse,
@@ -57,6 +58,7 @@ from app.schemas import (
     TaskCreateRequest,
     TaskStateResponse,
     TaskStatus,
+    ToolResultsRequest,
     UsageResponse,
 )
 from app.startup import (
@@ -322,6 +324,21 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
 
+    @app.post("/api/v1/tasks/{task_id}/tool_results", response_model=TaskStateResponse)
+    def submit_tool_results(task_id: str, payload: ToolResultsRequest, request: Request) -> TaskStateResponse:
+        """Passthrough: el cliente entrega los resultados de sus tools de dominio
+        y el broker reanuda el bucle del agente re-encolando la tarea."""
+        verify_admin_access(request, broker_config)
+        try:
+            repository.resume_with_tool_results(
+                task_id, [item.model_dump() for item in payload.tool_results],
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return repository.get_task(task_id)
+
     @app.get("/api/v1/queue", response_model=QueueResponse)
     def get_queue() -> QueueResponse:
         # Lectura abierta a propósito: solo ids, estados y posiciones — sin
@@ -411,11 +428,16 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.2",
-            strategies=[ExecutionStrategy.single, ExecutionStrategy.mixture_of_agents],
+            contract_version="2.4",
+            strategies=[
+                ExecutionStrategy.single,
+                ExecutionStrategy.mixture_of_agents,
+                ExecutionStrategy.agent,
+            ] + ([ExecutionStrategy.auto] if broker_config.strategy_router.enabled else []),
             presets={
                 "single": [ExecutionPreset.fast],
                 "mixture_of_agents": [ExecutionPreset.fast, ExecutionPreset.slow],
+                "agent": [ExecutionPreset.fast],
             },
             scheduling_by_preset={
                 "fast": [SchedulingPolicy.sequential],
@@ -431,6 +453,18 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             exact_target_model=True,
             task_timeout=True,
             prompt_compression_override=True,
+            agent_skills=list(AGENT_SKILLS),
+            proposer_skills=True,
+            client_tool_passthrough=True,
+            auto_strategy=broker_config.strategy_router.enabled,
+            confidence_escalation=(
+                broker_config.strategy_router.enabled
+                and broker_config.strategy_router.confidence_escalation
+            ),
+            adaptive_strategy_learning=(
+                broker_config.strategy_router.enabled
+                and broker_config.strategy_router.adaptive_learning
+            ),
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)

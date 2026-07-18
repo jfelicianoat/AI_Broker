@@ -37,6 +37,7 @@ from app.dashboard_forms import (
     _build_prompt_tester_request,
     _config_review_items,
     _find_custom_provider,
+    _prompt_tester_agent_precheck,
     _prompt_tester_defaults,
     _prompt_tester_feature_warnings,
     _prompt_tester_impact,
@@ -55,6 +56,7 @@ from app.schemas import (
     TaskCreateRequest,
     TaskStatus,
 )
+from app.strategy_router import describe_bucket, heuristic_for_bucket, recommend_from_cases
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
@@ -195,6 +197,18 @@ def create_dashboard_router(
                 "probeable_provider_ids": _probeable_provider_ids(config),
                 "model_probe": _model_probe_notice(model_probe, model_name, model_error),
                 "nav_active": "modelos",
+            },
+        )
+
+    @protected.get("/dashboard/routing", response_class=HTMLResponse)
+    async def routing_dashboard(request: Request):
+        return _template_response(
+            request,
+            "routing.html",
+            {
+                "router": config.strategy_router,
+                "buckets": _routing_insights(repository, config),
+                "nav_active": "enrutamiento",
             },
         )
 
@@ -523,11 +537,13 @@ def create_dashboard_router(
         impact_preview = None
         compression_preview = None
         payload: TaskCreateRequest | None = None
+        agent_catalog, _ = await models()
         try:
             payload = _build_prompt_tester_request(form)
             request_preview = payload.model_dump(mode="json")
             impact_preview = _prompt_tester_impact(payload)
             compression_preview = _compression_preview(config, payload)
+            _prompt_tester_agent_precheck(payload, agent_catalog)
             if action == "enqueue":
                 task, created = repository.create_task(
                     payload,
@@ -750,6 +766,47 @@ def _compression_preview(config: BrokerConfig, payload: TaskCreateRequest) -> di
         "saved_percent": round((1 - result.ratio) * 100, 1),
         "text": result.text,
     }
+
+
+def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[dict[str, Any]]:
+    """Qué ha aprendido el meta-router por tipo de petición: casos agregados +
+    la recomendación que aplicaría ahora con la evidencia y config actuales."""
+    router = config.strategy_router
+    insights: list[dict[str, Any]] = []
+    for bucket in repository.routing_case_buckets():
+        cases = repository.routing_cases_for_bucket(bucket["signal_bucket"])
+        recommendation = None
+        if cases:
+            heuristic = heuristic_for_bucket(bucket["signal_bucket"])
+            rec = recommend_from_cases(
+                heuristic, cases,
+                min_cases=router.learning_min_cases,
+                escalation_threshold=router.learning_escalation_threshold,
+                failure_threshold=router.learning_failure_threshold,
+            )
+            recommendation = {"strategy": rec[0], "reason": rec[1]} if rec else None
+        escalation_rate = (
+            bucket["escalated"] / bucket["single_chosen"] if bucket["single_chosen"] else 0.0
+        )
+        strategies = [
+            {
+                "name": name, "total": data["total"], "completed": data["completed"],
+                "success_rate": round(data["completed"] / data["total"] * 100) if data["total"] else 0,
+            }
+            for name, data in sorted(
+                bucket["strategies"].items(), key=lambda kv: kv[1]["total"], reverse=True,
+            )
+        ]
+        insights.append({
+            "label": describe_bucket(bucket["signal_bucket"]),
+            "heuristic": heuristic_for_bucket(bucket["signal_bucket"]),
+            "total": bucket["total"],
+            "escalation_rate": round(escalation_rate * 100),
+            "single_chosen": bucket["single_chosen"],
+            "strategies": strategies,
+            "recommendation": recommendation,
+        })
+    return insights
 
 
 def _model_dashboard_stats(

@@ -162,6 +162,26 @@ class ModelOutput:
         return {"assistant_content": self.content}
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AgentTurn:
+    """Resultado de una ronda de chat con tools: o el modelo pide tools
+    (tool_calls no vacío) o entrega su respuesta final (content)."""
+    content: str | None
+    tool_calls: tuple[ToolCall, ...]
+    tokens_input: int
+    tokens_output: int
+    cost_usd: float
+    latency_ms: float
+    raw_assistant_message: dict[str, Any]
+
+
 # Cota superior de tokens por bytes UTF-8: los tokenizers BPE reales producen
 # ~1 token por cada 3-4 bytes de texto natural; se usa 2 bytes/token como margen
 # de seguridad (nunca subestima en texto real, sin el 4x de penalización de 1:1).

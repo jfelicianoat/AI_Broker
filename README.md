@@ -205,6 +205,32 @@ model_enrichment:
   enabled: true        # opt-in; url y refresh_hours configurables
 ```
 
+### 13. Estrategia agent (skills técnicas)
+
+- Estrategia de ejecución `agent` (junto a `single` y `mixture_of_agents`): el modelo usa herramientas en un bucle de tool-calling hasta responder
+- Skills genéricas y neutrales al dominio: `web_search` (DuckDuckGo, sin clave), `fetch_url` (lee una URL pública como texto, con guardia SSRF que rechaza hosts privados/loopback), `calculator` (aritmética exacta con AST restringido) y `current_datetime` (fecha/hora UTC y local)
+- Guardarraíles: `max_iterations` (1-20) y el presupuesto `max_cost_usd` cortan el loop; requiere un modelo con tools verificado
+- Cada llamada a skill se persiste como evento `agent.tool_call` y se muestra en el detalle de tarea (panel "Actividad del agente"); disponible en el probador como estrategia "Agente con skills"
+- Los resultados de skill son datos externos no confiables: el system prompt del agente ignora instrucciones embebidas, como el sandboxing del árbitro en el consenso
+- Proponentes del mixture con skills (`execution.proposer_skills`): cada proponente puede verificar datos con herramientas antes de proponer (opt-in, el árbitro no usa tools); en el probador es la casilla "Dar herramientas a los proponentes"
+- Passthrough de tools del cliente (`execution.agent.client_tools`): el cliente declara sus tools de dominio; al llamarlas, la tarea pasa a `waiting_for_tools` con las llamadas pendientes, el cliente las resuelve con `POST /tasks/{id}/tool_results` y el broker reanuda el bucle. El broker nunca ejecuta tools del cliente: mantiene la neutralidad de dominio
+
+### 14. Meta-router de estrategia (`strategy: auto`)
+
+- Con `strategy_router.enabled`, una tarea `strategy: auto` deja que el broker elija entre `single`, `agent` o `mixture_of_agents`
+- Clasificación técnica (no de dominio): datos actuales/cálculo/URL → agente; deliberativa y con presupuesto → mixture; directa → modelo único
+- Cada decisión se registra como evento `strategy.routed` (señales + motivos), visible en el detalle de tarea y como caso para el aprendizaje futuro
+- Tres piezas activables por separado en config: (1) clasificador heurístico, (2) escalado por confianza y (3) aprendizaje adaptativo; `record_cases` alimenta el aprendizaje desde el principio
+- Escalado por confianza: un modelo juez puntúa la respuesta `single`; si baja de `escalation_min_confidence`, la tarea escala a mixture (eventos `strategy.confidence` y `strategy.escalated`)
+- Aprendizaje adaptativo: cada tarea auto-enrutada guarda un caso en `routing_cases`; con suficiente evidencia por tipo de petición, el router afina su decisión (p. ej. si el `single` suele escalar, va directo a mixture y ahorra el intento). Marcado `learned: true` en el evento de enrutamiento
+
+```yaml
+strategy_router:
+  enabled: true          # habilita strategy: auto
+  heuristic_classifier: true   # pieza 1
+  record_cases: true           # guarda casos para la pieza 3
+```
+
 ## API
 
 | Endpoint | Método | Descripción |
@@ -212,13 +238,14 @@ model_enrichment:
 | `/api/v1/tasks` | POST | Crear tarea (`202`) o recuperar la misma operación idempotente (`200`) |
 | `/api/v1/tasks/{id}` | GET | Estado y resultado de tarea |
 | `/api/v1/tasks/{id}` | DELETE | Cancelación idempotente |
+| `/api/v1/tasks/{id}/tool_results` | POST | Passthrough: entregar resultados de tools del cliente y reanudar la tarea |
 | `/api/v1/queue` | GET | Snapshot de cola (pending / active / terminal) |
 | `/api/v1/queue` | PATCH | Reordenar tareas pendientes |
 | `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico; el dispatcher normal es autónomo |
 | `/api/v1/models` | GET | Modelos disponibles, con compatibilidad y capacidades sondeadas (`features`) |
 | `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo (operativo / no operativo / error temporal / pendiente) |
 | `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo; el sondeo real prevalece sobre la inferencia por nombre |
-| `/api/v1/capabilities` | GET | Versión de contrato (2.2), presets, scheduling, límites y `prompt_compression_override` |
+| `/api/v1/capabilities` | GET | Versión de contrato (2.3), estrategias, presets, `prompt_compression_override` y `agent_skills` |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/api/v1/dashboard/summary` | GET | Resumen operativo por ventana temporal |
 | `/api/v1/dashboard/tasks` | GET | Tareas paginadas y filtrables |

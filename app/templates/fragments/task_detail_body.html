@@ -110,6 +110,62 @@
     {% endif %}
   </section>
 
+  {% set routed = (detail.events|selectattr('event_type', 'equalto', 'strategy.routed')|list) %}
+  {% if routed %}
+    {% set decision = routed[0].payload %}
+    <div class="alert info">
+      <strong>Estrategia elegida por el broker: {{ decision.chosen_strategy }}</strong>
+      {% if decision.reasons %}<p>{{ decision.reasons|join('; ') }}.</p>{% endif %}
+    </div>
+  {% endif %}
+  {% set escalated = (detail.events|selectattr('event_type', 'equalto', 'strategy.escalated')|list) %}
+  {% if escalated %}
+    <div class="alert warning">
+      <strong>Escalado a mixture por baja confianza</strong>
+      <p>La respuesta del modelo único puntuó {{ '%.2f'|format(escalated[0].payload.confidence) }} de confianza; el broker escaló al consenso.</p>
+    </div>
+  {% endif %}
+  {% if detail.task.status.value == 'waiting_for_tools' and detail.result and detail.result.get('pending_tool_calls') %}
+    <div class="alert info">
+      <strong>Esperando resultados de herramientas del cliente</strong>
+      <p>El agente ha solicitado herramientas que debe ejecutar tu aplicación. Envía los resultados a <code>POST /api/v1/tasks/{{ detail.task.task_id }}/tool_results</code> para reanudar.</p>
+      <ul>
+        {% for call in detail.result.pending_tool_calls %}
+          <li><strong>{{ call.name }}</strong> <small>(id {{ call.id }})</small> — {{ call.arguments | tojson }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+  {% set tool_events = detail.events|selectattr('event_type', 'equalto', 'agent.tool_call')|list %}
+  {% if tool_events or (detail.result and detail.result.get('agent')) %}
+    <section class="panel agent-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Actividad del agente</h2>
+          {% set agent_result = (detail.result or {}).get('agent') or {} %}
+          <p>{{ agent_result.get('iterations', tool_events|length) }} iteración(es){% if agent_result.get('stop_reason') %} · fin: {{ agent_result.stop_reason }}{% endif %}{% if agent_result.get('skills') %} · skills: {{ agent_result.skills|join(', ') }}{% endif %}</p>
+        </div>
+      </div>
+      {% if tool_events %}
+        <ol class="agent-timeline">
+          {% for event in tool_events|sort(attribute='created_at') %}
+            {% set payload = event.payload %}
+            <li>
+              <div class="agent-step-head">
+                <span class="badge badge-neutral">#{{ payload.get('iteration', loop.index) }}</span>
+                <strong>{{ payload.get('skill') }}</strong>
+                <small>{{ payload.get('arguments') | tojson }}</small>
+              </div>
+              <pre class="agent-step-result">{{ payload.get('result_preview') }}{% if payload.get('result_chars', 0) > 500 %} […{{ payload.result_chars }} caracteres]{% endif %}</pre>
+            </li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <div class="empty-inline">El agente respondió sin usar herramientas.</div>
+      {% endif %}
+    </section>
+  {% endif %}
+
   <section class="panel invocation-panel">
     <div class="panel-heading">
       <div>

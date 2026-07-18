@@ -92,6 +92,38 @@ class ModelEnrichmentConfig(BaseModel):
     timeout_seconds: float = Field(default=20.0, gt=0, le=300)
 
 
+class StrategyRouterConfig(BaseModel):
+    """Meta-router: elige estrategia (single/mixture/agent) para las tareas que
+    llegan con `strategy: auto`. La clasificación es técnica (¿necesita datos
+    actuales?, ¿es ambigua?, ¿pide visión?), nunca interpretación de dominio.
+
+    Tres piezas activables por separado (plan escalonado):
+    - heuristic_classifier (pieza 1): reglas deterministas, baratas y trazables.
+    - confidence_escalation (pieza 2): single primero, escala a mixture si la
+      respuesta sale de baja confianza.
+    - adaptive_learning (pieza 3): afina la elección con la evidencia de casos
+      previos. `record_cases` guarda esos casos desde el principio (piezas 1 y 2)
+      para que la 3 no arranque de cero aunque se active más tarde.
+    """
+    enabled: bool = False
+    heuristic_classifier: bool = True
+    confidence_escalation: bool = False
+    adaptive_learning: bool = False
+    record_cases: bool = True
+    # Umbrales del clasificador heurístico (caracteres del prompt).
+    mixture_min_prompt_chars: int = Field(default=600, ge=0)
+    # Por debajo de este presupuesto no se escala a mixture (es caro).
+    mixture_min_budget_usd: float = Field(default=0.0, ge=0)
+    # Pieza 2: si el juez puntúa la respuesta single por debajo de este umbral
+    # (0-1), la tarea escala a mixture.
+    escalation_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Pieza 3: mínimo de casos por bucket para que el aprendizaje pueda decidir,
+    # y umbrales de escalado/fracaso a partir de los cuales se cambia de estrategia.
+    learning_min_cases: int = Field(default=5, ge=1, le=10000)
+    learning_escalation_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    learning_failure_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
+
+
 class RoutingConfig(BaseModel):
     # Selección adaptativa: reordena los candidatos que ya pasaron los filtros
     # (proveedor permitido, cloud, capacidad, contexto) según la evidencia
@@ -243,6 +275,7 @@ class BrokerConfig(BaseModel):
     prompt_compression: PromptCompressionConfig = Field(default_factory=PromptCompressionConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    strategy_router: StrategyRouterConfig = Field(default_factory=StrategyRouterConfig)
     model_enrichment: ModelEnrichmentConfig = Field(default_factory=ModelEnrichmentConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
