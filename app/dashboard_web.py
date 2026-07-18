@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -65,6 +66,21 @@ templates = Jinja2Templates(directory=TEMPLATES_ROOT)
 register_filters(templates.env)
 
 PROBE_PROGRESS: dict[str, dict[str, Any]] = {}
+PROBE_PROGRESS_TTL_SECONDS = 60 * 60
+
+
+def _purge_stale_probe_progress(now: datetime) -> None:
+    """El progreso de sondeos vive en memoria de proceso y nadie lo consulta
+    pasada la tanda: sin purga, cada sondeo dejaría su entrada para siempre
+    en un servidor que corre semanas."""
+    for key in list(PROBE_PROGRESS):
+        raw = PROBE_PROGRESS[key].get("updated_at")
+        try:
+            updated = datetime.fromisoformat(raw) if raw else None
+        except (TypeError, ValueError):
+            updated = None
+        if updated is None or (now - updated).total_seconds() > PROBE_PROGRESS_TTL_SECONDS:
+            PROBE_PROGRESS.pop(key, None)
 
 
 def create_dashboard_router(
@@ -96,6 +112,17 @@ def create_dashboard_router(
             if is_page:
                 raise HTTPException(status_code=303, headers={"Location": "/dashboard/login"}) from None
             raise error
+        # Sesión deslizante: si la petición trae la cookie admin, se anota una
+        # renovación que _template_response reemite con timestamp fresco. Así
+        # una sesión en uso no caduca a las 8 horas de la firma original y no
+        # se pierde el contenido de un formulario largo contra un 403.
+        if request.cookies.get(ADMIN_COOKIE_NAME):
+            try:
+                token = resolve_admin_token(config)
+            except AdminTokenLookupError:
+                token = None
+            if token:
+                request.state.admin_cookie_renewal = admin_cookie_value(token)
 
     public = APIRouter()
     # Todo el panel salvo el login exige credencial por construcción: una ruta
@@ -113,6 +140,25 @@ def create_dashboard_router(
         except ProviderError as error:
             return [], f"{error.code}: catalogo no disponible"
 
+    def _config_fingerprint() -> str:
+        """Huella del YAML en disco: viaja oculta en el formulario de config
+        para detectar que otra pestaña (u otro proceso) guardó entre medias."""
+        try:
+            return hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
+        except OSError:
+            return "missing"
+
+    def _config_conflict_error(form: dict[str, str]) -> str | None:
+        supplied = form.get("config_fingerprint", "").strip()
+        if not supplied or supplied == _config_fingerprint():
+            return None
+        return (
+            "La configuración cambió después de abrir este formulario (otra "
+            "pestaña u otro proceso la guardó). No se ha guardado nada para no "
+            "pisar esos cambios: recarga la página (F5) y aplica los tuyos "
+            "sobre la versión actual."
+        )
+
     def _config_page_context(
         *,
         cfg: BrokerConfig | None = None,
@@ -125,6 +171,7 @@ def create_dashboard_router(
             "config_saved": config_saved,
             "config_errors": config_errors or [],
             "config_review": config_review if config_review is not None else [],
+            "config_fingerprint": _config_fingerprint(),
             "nav_active": "configuracion",
         }
 
@@ -363,6 +410,7 @@ def create_dashboard_router(
                 "config_saved": False,
                 "config_errors": [],
                 "config_review": [],
+                "config_fingerprint": _config_fingerprint(),
             },
         )
 
@@ -371,6 +419,10 @@ def create_dashboard_router(
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
         errors: list[str] = []
+        # Validar no escribe, así que se permite sobre base obsoleta; guardar no.
+        conflict = _config_conflict_error(form)
+        if conflict and form.get("config_action") != "validate":
+            return _template_response(request, "config.html", _config_page_context(config_errors=[conflict]))
         try:
             updated = _build_dashboard_config(config, form)
             if form.get("config_action") == "validate":
@@ -398,6 +450,7 @@ def create_dashboard_router(
         errors: list[str] = []
         progress_id = form.get("probe_progress_id", "").strip()
         if progress_id:
+            _purge_stale_probe_progress(_utc_now())
             PROBE_PROGRESS[progress_id] = {
                 "phase": "preparing",
                 "provider_id": provider_id,
@@ -409,6 +462,11 @@ def create_dashboard_router(
                 "updated_at": _utc_now().isoformat(),
             }
         try:
+            # El sondeo también reescribe el YAML desde el formulario: mismo
+            # riesgo de pisar un guardado concurrente que el botón Guardar.
+            conflict = _config_conflict_error(form)
+            if conflict:
+                raise PromptTesterError(conflict)
             updated = _build_dashboard_config(config, form)
             provider_config = _find_custom_provider(updated, provider_id)
             if provider_config is None:
@@ -629,15 +687,7 @@ def create_dashboard_router(
             return response
         login_throttle.reset(throttle_key)
         response = RedirectResponse("/dashboard", status_code=303)
-        response.set_cookie(
-            ADMIN_COOKIE_NAME,
-            admin_cookie_value(expected),
-            httponly=True,
-            samesite="strict",
-            secure=False,
-            path="/dashboard",
-            max_age=ADMIN_SESSION_SECONDS,
-        )
+        _set_admin_cookie(response, admin_cookie_value(expected))
         return response
 
     @protected.post("/dashboard/actions/tasks/{task_id}/cancel", status_code=204)
@@ -685,7 +735,22 @@ def _template_response(request: Request, name: str, context: dict[str, Any]):
     # Se reenvía siempre, aunque el valor no cambie: cada render renueva el
     # max_age (caducidad deslizante) para que una sesión activa no expire.
     set_csrf_cookie(response, token)
+    renewal = getattr(request.state, "admin_cookie_renewal", None)
+    if renewal:
+        _set_admin_cookie(response, renewal)
     return response
+
+
+def _set_admin_cookie(response: Any, value: str) -> None:
+    response.set_cookie(
+        ADMIN_COOKIE_NAME,
+        value,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        path="/dashboard",
+        max_age=ADMIN_SESSION_SECONDS,
+    )
 
 
 def set_csrf_cookie(response: Any, token: str) -> None:

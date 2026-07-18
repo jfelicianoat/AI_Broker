@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
   [string]$RuleName = "AI Broker LAN",
-  [int]$Port = 8080
+  [int]$Port = 8765
 )
 
 $ErrorActionPreference = "Stop"

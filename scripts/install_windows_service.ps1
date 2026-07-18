@@ -27,4 +27,4 @@ New-Item -ItemType Directory -Force -Path $logs | Out-Null
 
 Write-Host "Servicio instalado: $ServiceName"
 Write-Host "Arranque: Start-Service '$ServiceName'"
-Write-Host "Readiness: python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready"
+Write-Host "Readiness: python scripts/check_readiness.py --url http://127.0.0.1:8765/health/ready"

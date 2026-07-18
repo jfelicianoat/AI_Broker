@@ -665,7 +665,7 @@ Skills disponibles (en `capabilities.agent_skills`): `web_search` (DuckDuckGo, s
 
 Por decisión del hilo, no hay autenticación entre las dos máquinas. En consecuencia:
 
-- Escuchar solo en la interfaz LAN seleccionada, nunca publicar el puerto 8080 en Internet.
+- Escuchar solo en la interfaz LAN seleccionada, nunca publicar el puerto 8765 en Internet.
 - CORS desactivado salvo orígenes exactos configurados para el dashboard.
 - Las API keys se guardan mediante `keyring` en Windows Credential Manager y nunca en SQLite, YAML o logs. `.env` solo puede aportar una clave inicial para migrarla al almacén seguro.
 - La primera entrega del dashboard no permite leer ni sustituir claves. La gestión se mantiene en Windows Credential Manager mediante CLI hasta disponer de autenticación administrativa y auditoría específicas.

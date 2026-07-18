@@ -190,7 +190,7 @@ server:
 
   host: "IP_LAN_DEL_BROKER"  # No exponer a Internet
 
-  port: 8080
+  port: 8765
 
 # Fuera de loopback el broker NO arranca sin token admin (fail-closed).
 # Define AI_BROKER_ADMIN_TOKEN (o guarda el token en el keyring) antes de
@@ -229,7 +229,7 @@ python scripts/run_broker.py --config broker_config.yaml
 
 # O usando uvicorn directamente (--factory: no existe app global app.main:app)
 
-uvicorn app.main:create_app --factory --host IP_LAN_DEL_BROKER --port 8080
+uvicorn app.main:create_app --factory --host IP_LAN_DEL_BROKER --port 8765
 
 ```
 
@@ -237,13 +237,13 @@ uvicorn app.main:create_app --factory --host IP_LAN_DEL_BROKER --port 8080
 
 #### Verificar Funcionamiento
 
-1. Abrir `http://IP_MAQUINA_BROKER:8080/` en navegador
+1. Abrir `http://IP_MAQUINA_BROKER:8765/` en navegador
 
 2. Verificar que aparece el dashboard
 
 3. Comprobar que se listan los modelos de Ollama
 
-4. Probar endpoint: `http://IP_MAQUINA_BROKER:8080/api/v1/models`
+4. Probar endpoint: `http://IP_MAQUINA_BROKER:8765/api/v1/models`
 
 
 
@@ -291,7 +291,7 @@ broker:
 
   hostname: "IP_DE_TU_MAQUINA_BROKER"  # Cambiar por IP real
 
-  port: 8080
+  port: 8765
 
 
 
@@ -357,13 +357,13 @@ ipconfig
 
 ```bash
 
-# En máquina del Broker, permitir puerto 8080
+# En máquina del Broker, permitir puerto 8765
 
 # Windows Defender Firewall > Reglas de entrada > Nueva regla
 
 # Tipo: Puerto
 
-# Puerto: 8080
+# Puerto: 8765
 
 # Acción: Permitir conexión
 
@@ -377,7 +377,7 @@ ipconfig
 
 # Desde máquina principal, probar conexión
 
-curl http://192.168.1.50:8080/health
+curl http://192.168.1.50:8765/health
 
 
 
@@ -431,7 +431,7 @@ curl http://192.168.1.50:8080/health
 
 # Test directo de API
 
-curl -X POST http://192.168.1.50:8080/api/v1/extract \\
+curl -X POST http://192.168.1.50:8765/api/v1/extract \\
 
   -H "Content-Type: application/json" \\
 
@@ -469,9 +469,9 @@ curl -X POST http://192.168.1.50:8080/api/v1/extract \\
 
 - **Red:** Verificar IP y puerto en `config.yaml`
 
-- **Firewall:** Comprobar que puerto 8080 está abierto
+- **Firewall:** Comprobar que puerto 8765 está abierto
 
-- **Broker:** Verificar que está ejecutándose (`curl http://IP:8080/health`)
+- **Broker:** Verificar que está ejecutándose (`curl http://IP:8765/health`)
 
 
 
@@ -601,7 +601,7 @@ paths:
 
 broker:
   hostname: "broker-machine.local"
-  port: 8080
+  port: 8765
   poll_interval_seconds: 2
   retry_attempts: 3
 
@@ -617,7 +617,7 @@ processing:
 # Broker
 server:
   host: "192.168.1.50"   # IP de la interfaz LAN, no 0.0.0.0
-  port: 8080
+  port: 8765
   workers: 1
   cors_enabled: false
 
@@ -674,7 +674,7 @@ El Broker consulta primero `DEEPSEEK_API_KEY` y después Credential Manager. Si 
 
 - Ejecutar el Broker con un worker Uvicorn. `--reload` se usa solo durante desarrollo.
 - Instalarlo como servicio de Windows con inicio automático y recuperación tras fallo; el servicio no se considera listo hasta que `/health/ready` responda `200`.
-- Permitir TCP 8080 exclusivamente desde la subred privada o desde la IP de la máquina principal.
+- Permitir TCP 8765 exclusivamente desde la subred privada o desde la IP de la máquina principal.
 - No configurar redirección de puertos en el router.
 - Escuchar fuera de loopback exige token admin (env `AI_BROKER_ADMIN_TOKEN` o keyring): sin credencial el broker rechaza el arranque. Con token configurado, las mutaciones y las lecturas que contienen prompts/resultados (API y dashboard) piden credencial; `server.allow_unauthenticated_lan: true` es el único opt-out y queda registrado con warning. Si el servicio sale de la LAN, TLS pasa a ser obligatorio antes del despliegue.
 

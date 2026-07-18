@@ -38,6 +38,7 @@
 
 <form class="config-form" method="post" action="/dashboard/actions/config">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="config_fingerprint" value="{{ config_fingerprint }}">
   <div class="form-body config-grid">
     <label class="field">
       <span>Timeout global por tarea (segundos)</span>

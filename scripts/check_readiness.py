@@ -9,7 +9,7 @@ import urllib.request
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wait until AI Broker readiness is healthy/degraded")
-    parser.add_argument("--url", default="http://127.0.0.1:8080/health/ready")
+    parser.add_argument("--url", default="http://127.0.0.1:8765/health/ready")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--interval", type=float, default=1.0)
     args = parser.parse_args()
