@@ -562,6 +562,51 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     assert saved.resources.allow_execution_waves is True
 
 
+def test_dashboard_configuration_rejects_concurrent_edit(tmp_path: Path) -> None:
+    import re
+
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-conflict.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    form = {
+        "task_timeout_seconds": "900",
+        "max_parallel_invocations": "3",
+        "queue_max_size": "250",
+        "local_vram_budget_gb": "48",
+        "vram_safety_margin_gb": "4",
+        "max_loaded_local_models": "auto",
+        "allow_execution_waves": "on",
+    }
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        first = client.post("/dashboard/actions/config", data={"csrf_token": token, **form})
+        # Formulario abierto antes del primer guardado: su huella ya no casa.
+        stale = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, "config_fingerprint": "0" * 16, **{**form, "queue_max_size": "99"}},
+        )
+        page = client.get("/dashboard/config")
+        fingerprint = re.search(r'name="config_fingerprint" value="([0-9a-f]{16})"', page.text)
+        assert fingerprint is not None
+        fresh = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "config_fingerprint": fingerprint.group(1),
+                **{**form, "queue_max_size": "300"},
+            },
+        )
+
+    assert first.status_code == 200
+    assert stale.status_code == 200
+    assert "La configuración cambió" in stale.text
+    assert fresh.status_code == 200
+    assert "Configuración guardada" in fresh.text
+    assert load_config(config_path).processing.queue_max_size == 300
+
+
 def test_dashboard_configuration_can_be_reviewed_without_saving(tmp_path: Path) -> None:
     config_path = tmp_path / "broker_config.yaml"
     config = BrokerConfig(
@@ -2665,7 +2710,7 @@ def test_save_config_is_atomic_and_keeps_backup(tmp_path: Path) -> None:
     assert backup.exists()
     assert load_config(target).server.port == 9999
     # El .bak conserva la versión anterior íntegra y parseable.
-    assert load_config(backup).server.port == 8080
+    assert load_config(backup).server.port == 8765
 
 
 def test_server_config_rejects_multiple_workers() -> None:

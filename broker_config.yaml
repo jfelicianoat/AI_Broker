@@ -1,6 +1,6 @@
 server:
   host: 127.0.0.1
-  port: 8080
+  port: 8765
   workers: 1
   cors_enabled: false
   admin_token_env: AI_BROKER_ADMIN_TOKEN

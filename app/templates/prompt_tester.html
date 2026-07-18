@@ -17,6 +17,7 @@
     <input type="text" list="tester-models" value="{{ ns.label }}" placeholder="{{ placeholder }}"
            autocomplete="off" spellcheck="false" data-model-combo aria-label="Modelo para {{ name }}">
     <input type="hidden" name="{{ name }}" value="{{ selected if ns.label else '' }}" data-model-combo-value>
+    <small class="model-combo-hint" data-model-combo-hint role="alert" hidden>Ese texto no corresponde a ningún modelo del catálogo: elige una opción de la lista o el campo se enviará vacío.</small>
   </span>
 {%- endmacro %}
 

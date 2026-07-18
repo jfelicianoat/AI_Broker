@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
-    port: int = 8080
+    port: int = 8765
     workers: int = 1
     cors_enabled: bool = False
     # Token de administración: si existe (env o keyring), las mutaciones y las

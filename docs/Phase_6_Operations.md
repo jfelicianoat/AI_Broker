@@ -75,7 +75,7 @@ Prerequisito recomendado: NSSM disponible en PATH o pasando `-Nssm C:\ruta\nssm.
 ```powershell
 .\scripts\install_windows_service.ps1 -ServiceName "AI-Broker" -ProjectRoot "D:\Desarrollo\Proyectos TFM\AI_Broker"
 Start-Service "AI-Broker"
-python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60
+python scripts/check_readiness.py --url http://127.0.0.1:8765/health/ready --timeout 60
 ```
 
 Para retirar el servicio:
@@ -97,15 +97,15 @@ Fija `workers=1` para preservar el invariante de un unico workflow Broker activo
 Regla sugerida solo para perfil privado y `LocalSubnet`:
 
 ```powershell
-.\scripts\configure_firewall_lan.ps1 -Port 8080 -WhatIf
-.\scripts\configure_firewall_lan.ps1 -Port 8080
+.\scripts\configure_firewall_lan.ps1 -Port 8765 -WhatIf
+.\scripts\configure_firewall_lan.ps1 -Port 8765
 ```
 
 No exponer el Broker a Internet. Si se necesita acceso remoto, debe ir detras de VPN o tunel privado controlado.
 
 ## Checklist antes de arrancar clientes
 
-1. `python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60`
+1. `python scripts/check_readiness.py --url http://127.0.0.1:8765/health/ready --timeout 60`
 2. Confirmar que `dependencies.sqlite.status = healthy`.
 3. Confirmar que `/health/live` responde.
 4. Confirmar que el puerto publicado coincide con `broker_config.yaml`.

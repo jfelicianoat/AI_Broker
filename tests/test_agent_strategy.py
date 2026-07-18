@@ -93,7 +93,7 @@ def test_agent_max_iterations_guardrail_stops_the_loop(tmp_path: Path, monkeypat
 def test_fetch_url_rejects_private_hosts() -> None:
     import asyncio
 
-    for url in ("http://localhost:8080/dashboard", "http://127.0.0.1/x", "http://192.168.1.1/"):
+    for url in ("http://localhost:8765/dashboard", "http://127.0.0.1/x", "http://192.168.1.1/"):
         result = asyncio.run(run_skill("fetch_url", {"url": url}))
         assert "ERROR de fetch_url" in result
         assert "no público" in result or "resolver" in result

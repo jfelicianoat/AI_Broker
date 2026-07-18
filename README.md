@@ -399,10 +399,10 @@ Para desarrollo con autoreload (la app se construye con la factory; no existe
 una instancia global `app.main:app`):
 
 ```bash
-uvicorn app.main:create_app --factory --reload --port 8080
+uvicorn app.main:create_app --factory --reload --port 8765
 ```
 
-Abre `http://127.0.0.1:8080/dashboard` para usar el panel operativo. Para una previsualización aislada con SQLite temporal y provider de prueba:
+Abre `http://127.0.0.1:8765/dashboard` para usar el panel operativo. Para una previsualización aislada con SQLite temporal y provider de prueba:
 
 ```powershell
 python scripts/preview_dashboard.py --port 8765 --database "$env:TEMP\ai-broker-preview.db"
@@ -428,8 +428,8 @@ Servicio Windows y readiness:
 python scripts/run_broker.py --config broker_config.yaml
 .\scripts\install_windows_service.ps1 -ServiceName "AI-Broker" -ProjectRoot "D:\Desarrollo\Proyectos TFM\AI_Broker"
 Start-Service "AI-Broker"
-python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60
-.\scripts\configure_firewall_lan.ps1 -Port 8080 -WhatIf
+python scripts/check_readiness.py --url http://127.0.0.1:8765/health/ready --timeout 60
+.\scripts\configure_firewall_lan.ps1 -Port 8765 -WhatIf
 ```
 
 ## Estructura del proyecto
