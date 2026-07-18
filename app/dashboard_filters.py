@@ -12,6 +12,7 @@ STATUS_LABELS = {
     "generating": "Generando",
     "proposing": "Proponiendo",
     "synthesizing": "Sintetizando",
+    "waiting_for_tools": "Esperando herramientas",
     "completed": "Completada",
     "failed": "Fallida",
     "cancelled": "Cancelada",

@@ -73,6 +73,56 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
+        <h3>Meta-router de estrategia</h3>
+        <p>Con <code>strategy: auto</code>, el broker elige entre modelo único, agente o mixture. Cada decisión se registra como caso para el aprendizaje futuro.</p>
+      </div>
+      <span class="badge badge-neutral">strategy_router</span>
+    </div>
+    <div class="form-body config-grid">
+      {% set router = config.strategy_router %}
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="strategy_router_enabled" {% if router.enabled %}checked{% endif %}>
+          Activar meta-router (habilita strategy: auto)
+        </label>
+        <label>
+          <input type="checkbox" name="strategy_router_heuristic" {% if router.heuristic_classifier %}checked{% endif %}>
+          Pieza 1 — clasificador heurístico
+        </label>
+        <label>
+          <input type="checkbox" name="strategy_router_confidence" {% if router.confidence_escalation %}checked{% endif %}>
+          Pieza 2 — escalado por confianza (single → mixture si baja confianza)
+        </label>
+        <label>
+          <input type="checkbox" name="strategy_router_learning" {% if router.adaptive_learning %}checked{% endif %}>
+          Pieza 3 — aprendizaje adaptativo (aprende de casos previos)
+        </label>
+        <label>
+          <input type="checkbox" name="strategy_router_record_cases" {% if router.record_cases %}checked{% endif %}>
+          Registrar casos (alimenta la pieza 3 desde ya)
+        </label>
+      </div>
+      <label class="field">
+        <span>Mín. caracteres para mixture</span>
+        <input name="strategy_router_mixture_min_prompt_chars" value="{{ router.mixture_min_prompt_chars }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Mín. presupuesto USD para mixture</span>
+        <input name="strategy_router_mixture_min_budget_usd" value="{{ router.mixture_min_budget_usd }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Umbral de confianza (0-1) para escalar</span>
+        <input name="strategy_router_escalation_min_confidence" value="{{ router.escalation_min_confidence }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Mín. casos por tipo para aprender</span>
+        <input name="strategy_router_learning_min_cases" value="{{ router.learning_min_cases }}" inputmode="numeric">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
         <h3>Compresión de prompts</h3>
         <p>Reduce tokens del prompt (cortesías, muletillas, relleno) antes de enviarlo a los LLMs. El código y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
       </div>

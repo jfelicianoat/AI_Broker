@@ -12,6 +12,7 @@ from app.model_stats import ModelKey, ModelStats
 from app.prompt_compressor import PromptCompressor
 from app.providers.base import (
     ROLE_SYSTEM_PROMPTS,
+    AgentTurn,
     ModelOutput,
     ProviderError,
     context_fits_with_capped_output,
@@ -418,6 +419,69 @@ class RoutedModelProvider:
         if request.execution.strategy == ExecutionStrategy.mixture_of_agents:
             system = role_system_prompt(model.role) or ROLE_SYSTEM_PROMPTS["proposer"]
         return await self._generate(request, model, self.user_prompt(request), system=system)
+
+    def _resolve_agent_provider(self, model: ModelReference) -> Any:
+        """Proveedor con soporte de chat+tools para el modelo agéntico."""
+        provider_name = model.provider.lower()
+        if provider_name in self.custom:
+            provider: Any = self.custom[provider_name]
+        elif provider_name == "ollama":
+            provider = self.ollama
+        elif provider_name == "deepseek":
+            provider = self.deepseek
+        else:
+            provider = None
+        if provider is None or not hasattr(provider, "chat_tools"):
+            raise ProviderError(
+                "MODEL_CAPABILITY_MISMATCH",
+                f"El proveedor {model.provider} no soporta ejecución agéntica con tools",
+            )
+        return provider
+
+    async def ensure_agent_capable(self, model: ModelReference) -> None:
+        """Falla pronto (antes de arrancar el loop) si el modelo no puede ser
+        un agente: proveedor sin chat+tools, o tools verificado como no
+        soportado por el sondeo/runtime. Un 'sin verificar' se deja pasar: no
+        hay evidencia de que falle y el propio loop lo descubriría."""
+        self._resolve_agent_provider(model)
+        entry = next(
+            (
+                item for item in await self.models()
+                if item.get("name") == model.model
+                and str(item.get("provider") or "").lower() == model.provider.lower()
+            ),
+            None,
+        )
+        if entry is None:
+            return
+        features = entry.get("features") or {}
+        catalog = entry.get("catalog") or {}
+        tools_support = features.get("tools")
+        if tools_support is None and isinstance(catalog.get("tools"), bool):
+            tools_support = catalog.get("tools")
+        if tools_support is False:
+            raise ProviderError(
+                "MODEL_CAPABILITY_MISMATCH",
+                f"El modelo {model.provider}/{model.model} no soporta tools (function calling); "
+                "elige otro modelo o usa la estrategia single.",
+            )
+
+    async def agent_turn(
+        self,
+        request: TaskCreateRequest,
+        model: ModelReference,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        allow_parallel: bool = False,
+    ) -> AgentTurn:
+        """Una ronda de chat con tools para el loop agéntico. Cuenta como una
+        invocación LLM: usa el semáforo paralelo cuando el llamante lo permite
+        (proponentes de un mixture slow), serial en el resto de casos."""
+        provider = self._resolve_agent_provider(model)
+        slot = self._parallel_inference_slot if allow_parallel else self._serial_inference_slot
+        async with slot:
+            return await provider.chat_tools(request, model.model, messages, tools)
 
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:
         candidates = "\n\n".join(

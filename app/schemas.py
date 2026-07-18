@@ -23,6 +23,7 @@ class TaskStatus(str, Enum):
     debating = "debating"
     synthesizing = "synthesizing"
     verifying = "verifying"
+    waiting_for_tools = "waiting_for_tools"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -44,6 +45,16 @@ def is_local_deployment(deployment: str | None) -> bool:
 class ExecutionStrategy(str, Enum):
     single = "single"
     mixture_of_agents = "mixture_of_agents"
+    agent = "agent"
+    # El broker elige la estrategia concreta (meta-router); requiere
+    # strategy_router.enabled en la configuración.
+    auto = "auto"
+
+
+# Skills técnicas genéricas ejecutables por el broker en la estrategia agent.
+# Son deliberadamente neutrales al dominio: la orquestación de negocio sigue
+# perteneciendo a las apps cliente.
+AGENT_SKILLS = ("web_search", "fetch_url", "calculator", "current_datetime")
 
 
 class ExecutionPreset(str, Enum):
@@ -190,6 +201,40 @@ class SelectionPolicy(StrictBaseModel):
         return self
 
 
+class ClientToolDefinition(StrictBaseModel):
+    """Herramienta de dominio que aporta el cliente: el broker la ofrece al
+    modelo pero NO la ejecuta — pausa la tarea y devuelve la llamada para que
+    el cliente la resuelva (passthrough)."""
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    description: str = Field(min_length=1, max_length=1024)
+    parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+
+
+class AgentExecutionConfig(StrictBaseModel):
+    # Guardarraíles del loop agéntico: sin tope de iteraciones un modelo que
+    # nunca concluye consumiría presupuesto y tiempo indefinidamente.
+    skills: list[Literal["web_search", "fetch_url", "calculator", "current_datetime"]] = Field(
+        default_factory=lambda: list(AGENT_SKILLS), max_length=8,  # type: ignore[arg-type]
+    )
+    max_iterations: int = Field(default=6, ge=1, le=20)
+    # Tools del cliente (passthrough): al llamarlas, la tarea pasa a
+    # waiting_for_tools y el cliente las resuelve vía POST /tasks/{id}/tool_results.
+    client_tools: list[ClientToolDefinition] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_skills(self) -> AgentExecutionConfig:
+        if not self.skills and not self.client_tools:
+            raise ValueError("agent strategy requires at least one skill or client tool")
+        self.skills = list(dict.fromkeys(self.skills))
+        names = [tool.name for tool in self.client_tools]
+        if len(names) != len(set(names)):
+            raise ValueError("client_tools names must be unique")
+        reserved = set(AGENT_SKILLS)
+        if reserved.intersection(names):
+            raise ValueError("client_tools cannot reuse built-in skill names")
+        return self
+
+
 class ExecutionConfig(StrictBaseModel):
     strategy: ExecutionStrategy = ExecutionStrategy.single
     preset: ExecutionPreset = ExecutionPreset.fast
@@ -200,6 +245,13 @@ class ExecutionConfig(StrictBaseModel):
     timeout_seconds: int = Field(default=600, ge=1)
     early_stop: bool = True
     selection: SelectionPolicy = Field(default_factory=SelectionPolicy)
+    agent: AgentExecutionConfig = Field(default_factory=AgentExecutionConfig)
+    # Skills que cada proponente del mixture puede usar antes de proponer
+    # (verifica datos, calcula, consulta fecha). Vacío = comportamiento clásico:
+    # una sola generación por proponente, sin tools. No afecta al árbitro.
+    proposer_skills: list[Literal["web_search", "fetch_url", "calculator", "current_datetime"]] = Field(
+        default_factory=list, max_length=8,
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -213,8 +265,13 @@ class ExecutionConfig(StrictBaseModel):
     def validate_strategy(self) -> ExecutionConfig:
         if self.strategy == ExecutionStrategy.single and self.preset != ExecutionPreset.fast:
             raise ValueError("single strategy only supports preset fast")
+        if self.strategy == ExecutionStrategy.agent and self.preset != ExecutionPreset.fast:
+            raise ValueError("agent strategy only supports preset fast")
         if self.strategy == ExecutionStrategy.mixture_of_agents:
             self.max_proposers = min(self.max_proposers, self.selection.proposer_count)
+            self.proposer_skills = list(dict.fromkeys(self.proposer_skills))
+        elif self.proposer_skills:
+            raise ValueError("proposer_skills solo aplica a la estrategia mixture_of_agents")
         return self
 
 
@@ -237,6 +294,15 @@ class TaskCreateRequest(StrictBaseModel):
     # Override por tarea de la compresión de prompts. None = usar la
     # configuración global del broker; "off" = enviar el prompt tal cual.
     prompt_compression: Literal["off", "light", "medium", "aggressive"] | None = None
+
+    @model_validator(mode="after")
+    def validate_agent_constraints(self) -> TaskCreateRequest:
+        if self.execution.strategy == ExecutionStrategy.agent:
+            if self.inference_kind != InferenceKind.chat:
+                raise ValueError("agent strategy only supports chat inference")
+            if self.output.format == OutputFormat.json:
+                raise ValueError("agent strategy does not support json output format yet")
+        return self
 
     @model_validator(mode="after")
     def enforce_data_boundary(self) -> TaskCreateRequest:
@@ -308,6 +374,15 @@ class QueueReorderRequest(StrictBaseModel):
     task_ids: list[str] = Field(min_length=1)
 
 
+class ToolResultItem(StrictBaseModel):
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    content: str = Field(max_length=200_000)
+
+
+class ToolResultsRequest(StrictBaseModel):
+    tool_results: list[ToolResultItem] = Field(min_length=1, max_length=16)
+
+
 class UsageResponse(StrictBaseModel):
     month: str
     providers: dict[str, dict[str, float]]
@@ -360,6 +435,19 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # La tarea puede fijar su propia compresión de prompt (campo opcional
     # prompt_compression: off/light/medium/aggressive; ausente = config global).
     prompt_compression_override: bool
+    # Estrategia agent con skills técnicas ejecutadas por el broker.
+    agent_skills: list[str]
+    # Los proponentes de un mixture pueden usar esas mismas skills antes de proponer.
+    proposer_skills: bool
+    # Passthrough: la estrategia agent acepta tools del cliente y pausa la tarea
+    # (waiting_for_tools) hasta que el cliente las resuelve vía tool_results.
+    client_tool_passthrough: bool
+    # El broker elige la estrategia si se pide strategy: auto (meta-router).
+    auto_strategy: bool
+    # Pieza 2: single puede escalar a mixture si sale de baja confianza.
+    confidence_escalation: bool
+    # Pieza 3: el router aprende de casos previos para afinar la estrategia.
+    adaptive_strategy_learning: bool
 
 
 class DashboardSummaryResponse(StrictBaseModel):

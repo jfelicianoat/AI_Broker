@@ -587,9 +587,37 @@ La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de
 
 En `single`, el progreso se limita a `queued`, `routing`, `generating` y un estado terminal. En `mixture_of_agents/fast|slow` también existen `resource_planning`, `proposing` y `synthesizing` como etapas técnicas internas. `slow` persiste plan, wave y concurrencia observada. Extracción, chunking y workflows de conocimiento pertenecen al Orchestrator.
 
-### Novedades del contrato 2.2 (julio 2026)
+### Novedades del contrato 2.4 (julio 2026)
 
-`GET /api/v1/capabilities` devuelve `contract_version: "2.2"`. Todos los cambios son aditivos: un cliente del contrato 2.1 sigue funcionando sin tocar nada.
+`GET /api/v1/capabilities` devuelve `contract_version: "2.4"`. Todos los cambios son aditivos: un cliente de contratos anteriores sigue funcionando sin tocar nada.
+
+**Meta-router de estrategia (`strategy: auto`).** Con `strategy_router.enabled` en la configuración, una tarea con `execution.strategy: "auto"` deja que el broker elija estrategia concreta. La clasificación es **técnica**, no de dominio: necesita datos actuales / cálculo / URL → `agent`; deliberativa (comparar, analizar, prompt largo, datos sensibles) y con presupuesto → `mixture_of_agents`; directa → `single`. La decisión se persiste como evento `strategy.routed` (con señales y motivos), visible en el detalle de la tarea. Router apagado o `strategy: auto` sin él → se resuelve a `single`. Diseñado en tres piezas activables por separado en config: (1) clasificador heurístico, (2) escalado por confianza y (3) aprendizaje adaptativo —las tres implementadas—; `record_cases` guarda los casos desde el principio. Flag `auto_strategy` en `capabilities` (solo true si el router está activo); `auto` aparece en `strategies` solo entonces.
+
+**Escalado por confianza (pieza 2).** Con `strategy_router.confidence_escalation`, cuando el router elige `single`, un modelo juez puntúa la respuesta de 0 a 1; si queda por debajo de `escalation_min_confidence` (0.6 por defecto), la tarea escala a `mixture_of_agents` y el resultado final es el del consenso. Se registran los eventos `strategy.confidence` (puntuación) y `strategy.escalated`. El coste del single + juez se descuenta del presupuesto del mixture. El juez falla abierto: si no devuelve un número usable, no escala. Flag `confidence_escalation` en `capabilities`.
+
+**Aprendizaje adaptativo (pieza 3).** Con `strategy_router.adaptive_learning`, cada tarea auto-enrutada guarda un caso en `routing_cases` (bucket de señales → estrategia elegida → estrategia final → escaló → estado → coste/latencia). Al clasificar, si el bucket de la petición acumula suficientes casos (`learning_min_cases`), la evidencia puede **cambiar la decisión heurística**: si el `single` de ese bucket escaló a menudo (`learning_escalation_threshold`), enruta directo a `mixture` y ahorra el intento single+juez; si la estrategia heurística falla mucho (`learning_failure_threshold`), elige la estrategia con mejor tasa de éxito. La decisión aprendida se marca con `learned: true` en el evento `strategy.routed`. Sin métricas de calidad inventadas: aprende solo de escalados y fracasos observados. Flag `adaptive_strategy_learning` en `capabilities`. Los casos se registran desde la pieza 1 (con `record_cases`) aunque el aprendizaje esté apagado, para no arrancar de cero al activarlo.
+
+**Passthrough de tools del cliente.** La estrategia `agent` acepta `execution.agent.client_tools` (lista de `{name, description, parameters}` — definiciones de function calling que el broker ofrece al modelo pero NO ejecuta). Cuando el modelo llama a una de ellas, la tarea pasa al estado `waiting_for_tools` y su `result.pending_tool_calls` lista las llamadas (`{id, name, arguments}`). El cliente las ejecuta y las resuelve con `POST /api/v1/tasks/{id}/tool_results` con cuerpo `{"tool_results": [{"tool_call_id", "content"}]}` (los ids deben cubrir exactamente los pendientes, si no `409`); el broker reanuda el bucle re-encolando la tarea. Las skills integradas se siguen ejecutando en el broker; solo las tools del cliente pausan. La contabilidad (iteraciones, tokens, coste) se acumula a través de las pausas y `max_iterations` se respeta en total. `client_tool_passthrough: true` en `capabilities` anuncia el soporte. Estado `waiting_for_tools`: no bloquea la cola ni se re-encola en recuperación (espera input externo, no está interrumpida). Flag para clientes: manejar `waiting_for_tools` como estado no terminal en el que hay que actuar.
+
+Contrato 2.3 añadió la estrategia `agent` con skills y los proponentes de mixture con skills.
+
+**Estrategia `agent` (skills técnicas).** Nueva `execution.strategy: "agent"` (solo preset `fast`, solo inference `chat`, sin salida JSON por ahora). El broker ejecuta un loop de tool-calling: el modelo pide herramientas, el broker las ejecuta y le devuelve el resultado como datos, hasta que el modelo responde o se alcanza un guardarraíl. Config en `execution.agent`:
+
+```json
+{
+  "idempotency_key": "mi-app:456",
+  "content": {"prompt": "¿Qué modelos anunció Anthropic esta semana?"},
+  "execution": {
+    "strategy": "agent",
+    "agent": {"skills": ["web_search", "fetch_url"], "max_iterations": 6}
+  },
+  "model_requirements": {"target_model": {"provider": "lmstudio", "deployment": "local", "model": "..."}}
+}
+```
+
+Skills disponibles (en `capabilities.agent_skills`): `web_search` (DuckDuckGo, sin clave), `fetch_url` (descarga una URL pública como texto; guardia SSRF que rechaza hosts privados/loopback), `calculator` (aritmética exacta evaluada con AST restringido — sin nombres, atributos ni llamadas) y `current_datetime` (fecha/hora actual en UTC y local).
+
+**Proponentes del mixture con skills.** `execution.proposer_skills` (lista de skills; solo en `mixture_of_agents`, vacío por defecto = comportamiento clásico) hace que cada proponente ejecute un bucle de tool-calling —verificar datos, calcular, consultar fecha— antes de emitir su propuesta; el árbitro sigue sintetizando sin herramientas. En preset `slow` los bucles de los proponentes corren en paralelo (semáforo de VRAM). Cada llamada persiste un evento `agent.tool_call` con el `role` del proponente. Requiere proponentes con tools verificado (mismo fail-clean que la estrategia agent). Flag `proposer_skills: true` en `capabilities`. Guardarraíles: `max_iterations` (1-20) y el `max_cost_usd` global cortan el loop. Soportan chat+tools los proveedores OpenAI-compatible (LM Studio, NVIDIA…), **Ollama** (vía `/api/chat` nativo) y **DeepSeek**. Si el modelo elegido tiene tools verificado como no soportado (sondeo/runtime/catálogo), la tarea se rechaza **antes de encolar** (probador) o falla como primer paso con `MODEL_CAPABILITY_MISMATCH` (API), nunca a mitad del loop; un modelo sin verificar se deja intentar. Cada llamada a skill se persiste como evento `agent.tool_call` (skill, argumentos, tamaño y preview del resultado), visible en el detalle de tarea. El resultado incluye `result.agent = {iterations, stop_reason, skills}` (`stop_reason`: completed / max_iterations / budget_exhausted). Los resultados de skill son datos externos no confiables: el system prompt del agente ignora instrucciones embebidas, misma filosofía que el sandboxing del árbitro.
 
 **Compresión de prompt por tarea.** `POST /api/v1/tasks` acepta el campo opcional de nivel superior `prompt_compression` con valores `"off"`, `"light"`, `"medium"` o `"aggressive"`. Ausente o `null` = usar la configuración global del broker; `"off"` = enviar el prompt tal cual aunque la compresión global esté activa; un nivel concreto sustituye al global (el mínimo de caracteres sigue siendo el de la configuración). El flag `prompt_compression_override: true` en `/api/v1/capabilities` permite detectar el soporte.
 

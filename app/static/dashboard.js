@@ -446,7 +446,7 @@
 
   function testerModelFieldNames() {
     return [
-      "single_model",
+      "single_model", "agent_model",
       "proposer_model_1", "proposer_model_2", "proposer_model_3", "proposer_model_4", "proposer_model_5",
       "arbiter_model"
     ];

@@ -379,13 +379,23 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.2"
+    assert body["contract_version"] == "2.4"
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
+    assert body["presets"]["agent"] == ["fast"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]
     assert "parallel" in body["scheduling_by_preset"]["slow"]
     assert body["max_active_workflows"] == 1
     assert body["max_parallel_invocations"] == 2
     assert body["prompt_compression_override"] is True
+    assert "web_search" in body["agent_skills"]
+    assert "agent" in body["strategies"]
+    assert body["proposer_skills"] is True
+    assert body["client_tool_passthrough"] is True
+    # El meta-router está desactivado por defecto: no se anuncia strategy auto.
+    assert body["auto_strategy"] is False
+    assert body["confidence_escalation"] is False
+    assert body["adaptive_strategy_learning"] is False
+    assert "auto" not in body["strategies"]
 
 
 def test_dashboard_read_models_are_paged_filterable_and_source_backed(tmp_path: Path) -> None:
@@ -1505,10 +1515,10 @@ def test_prompt_tester_hides_incompatible_models_and_uses_filter_combos(tmp_path
     assert "pendiente" in datalist
     # Los selectores son combos con autocompletado sobre el datalist compartido:
     # input visible + hidden con la referencia JSON para el backend.
-    for field in ("single_model", "proposer_model_1", "arbiter_model"):
+    for field in ("single_model", "agent_model", "proposer_model_1", "arbiter_model"):
         assert f'name="{field}"' in page
-    assert page.count('list="tester-models"') == 7
-    assert page.count("data-model-combo-value") == 7
+    assert page.count('list="tester-models"') == 8
+    assert page.count("data-model-combo-value") == 8
 
 
 def test_prompt_tester_compression_override_controls_preview_and_request(tmp_path: Path) -> None:
