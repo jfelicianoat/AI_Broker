@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.admin_auth import (
     ADMIN_COOKIE_NAME,
@@ -44,6 +45,8 @@ from app.dashboard_forms import (
     _prompt_tester_impact,
     _validation_messages,
 )
+from app.ingestion.detection import ALLOWED_FORMATS
+from app.ingestion.service import AttachmentError
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
@@ -93,6 +96,7 @@ def create_dashboard_router(
     config: BrokerConfig,
     config_path: Path,
     health_loader: Callable[[], Awaitable[HealthResponse]],
+    ingestion=None,
 ) -> APIRouter:
     login_throttle = LoginThrottle()
 
@@ -203,6 +207,21 @@ def create_dashboard_router(
     async def config_page(request: Request, config_saved: bool = False):
         return _template_response(request, "config.html", _config_page_context(config_saved=config_saved))
 
+    def _ready_file_options() -> list[dict[str, Any]]:
+        """Ficheros ingeridos listos para adjuntar desde el probador."""
+        if ingestion is None or not config.ingestion.enabled:
+            return []
+        return [
+            {
+                "id": record.id,
+                "filename": record.filename,
+                "kind": record.kind,
+                "tokens_estimate": record.meta.get("tokens_estimate"),
+            }
+            for record in ingestion.list_files()
+            if record.status == "ready"
+        ]
+
     @protected.get("/dashboard/prompt-tester", response_class=HTMLResponse)
     async def prompt_tester(request: Request):
         catalog, catalog_error = await models()
@@ -219,6 +238,8 @@ def create_dashboard_router(
                 "compression_preview": None,
                 "feature_warnings": [],
                 "accepted": None,
+                "ready_files": _ready_file_options(),
+                "sandbox_enabled": config.sandbox.enabled,
                 "nav_active": "probador",
             },
         )
@@ -258,6 +279,99 @@ def create_dashboard_router(
                 "nav_active": "enrutamiento",
             },
         )
+
+    def _file_views() -> list[dict[str, Any]]:
+        if ingestion is None:
+            return []
+        views: list[dict[str, Any]] = []
+        for record in ingestion.list_files():
+            size_mb = record.size_bytes / (1024 * 1024)
+            views.append({
+                "id": record.id,
+                "filename": record.filename,
+                "kind": record.kind,
+                "engine": record.meta.get("engine", record.engine),
+                "status": record.status,
+                "status_class": {
+                    "ready": "badge-completed",
+                    "failed": "badge-failed",
+                    "converting": "badge-queued",
+                }.get(record.status, "badge-neutral"),
+                "size_human": f"{size_mb:.1f} MB" if size_mb >= 1 else f"{record.size_bytes / 1024:.0f} KB",
+                "tokens_estimate": record.meta.get("tokens_estimate"),
+                "pages": record.meta.get("pages"),
+                "error": (record.error or {}).get("message"),
+                "error_code": (record.error or {}).get("code"),
+                "created_at": record.created_at,
+                "markdown_url": f"/api/v1/files/{record.id}/markdown" if record.status == "ready" else None,
+            })
+        return views
+
+    def _files_page_context(*, upload_error: str | None = None) -> dict[str, Any]:
+        return {
+            "files": _file_views(),
+            "ingestion_enabled": config.ingestion.enabled,
+            "ingestion_config": config.ingestion,
+            "formats": ALLOWED_FORMATS,
+            "upload_error": upload_error,
+            "nav_active": "ficheros",
+        }
+
+    @protected.get("/dashboard/files", response_class=HTMLResponse)
+    async def files_page(request: Request):
+        return _template_response(request, "files.html", _files_page_context())
+
+    @protected.get("/dashboard/fragments/files", response_class=HTMLResponse)
+    async def files_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/files_table.html",
+            context={"files": _file_views()},
+        )
+
+    @protected.post("/dashboard/actions/files/upload", response_class=HTMLResponse)
+    async def upload_dashboard_file(request: Request):
+        form = await request.form()
+        form_fields = {key: value for key, value in form.items() if isinstance(value, str)}
+        _verify_dashboard_mutation(request, form_fields)
+        if ingestion is None or not config.ingestion.enabled:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        upload = form.get("file")
+        if upload is None or isinstance(upload, str) or not getattr(upload, "filename", ""):
+            return _template_response(
+                request, "files.html", _files_page_context(upload_error="Selecciona un fichero."),
+            )
+        max_bytes = config.ingestion.max_file_mb * 1024 * 1024
+        data = await upload.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return _template_response(
+                request, "files.html",
+                _files_page_context(
+                    upload_error=f"El fichero supera el límite de {config.ingestion.max_file_mb} MB.",
+                ),
+            )
+        try:
+            record, created = await run_in_threadpool(
+                ingestion.store_upload, upload.filename or "fichero", data,
+            )
+        except ValueError as error:  # IngestionError / UnsupportedFormat
+            return _template_response(
+                request, "files.html", _files_page_context(upload_error=str(error)),
+            )
+        if created:
+            ingestion.launch(record.id)
+        return RedirectResponse("/dashboard/files", status_code=303)
+
+    @protected.post("/dashboard/actions/files/{file_id}/delete", status_code=204)
+    async def delete_dashboard_file(request: Request, file_id: str) -> Response:
+        _verify_dashboard_mutation(request)
+        if ingestion is None:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        try:
+            ingestion.delete_file(file_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="FILE_NOT_FOUND") from error
+        return Response(status_code=204, headers={"HX-Trigger": "dashboard-refresh"})
 
     @protected.get("/dashboard/comparison", response_class=HTMLResponse)
     async def comparison(request: Request, task_id: str | None = None):
@@ -598,6 +712,17 @@ def create_dashboard_router(
         agent_catalog, _ = await models()
         try:
             payload = _build_prompt_tester_request(form)
+            if not config.sandbox.enabled and (
+                "run_code" in payload.execution.agent.skills
+                or "run_code" in payload.execution.proposer_skills
+            ):
+                raise PromptTesterError(
+                    "La skill 'Ejecutar código' requiere el sandbox activado (sandbox.enabled)."
+                )
+            if payload.content.attachments and ingestion is not None:
+                # Mismo fail-fast que POST /api/v1/tasks: no se encola con
+                # adjuntos que no estén 'ready'.
+                ingestion.check_attachments(payload)
             request_preview = payload.model_dump(mode="json")
             impact_preview = _prompt_tester_impact(payload)
             compression_preview = _compression_preview(config, payload)
@@ -616,6 +741,8 @@ def create_dashboard_router(
                 }
         except PromptTesterError as error:
             errors.append(str(error))
+        except AttachmentError as error:
+            errors.append(f"Adjunto no disponible ({error.code}): {error}")
         except ValidationError as error:
             errors.extend(_validation_messages(error))
         except IdempotencyConflict:
@@ -639,6 +766,8 @@ def create_dashboard_router(
                     _prompt_tester_feature_warnings(payload, catalog) if payload is not None else []
                 ),
                 "accepted": accepted,
+                "ready_files": _ready_file_options(),
+                "sandbox_enabled": config.sandbox.enabled,
                 "nav_active": "probador",
             },
         )

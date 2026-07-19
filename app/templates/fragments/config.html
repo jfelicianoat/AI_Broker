@@ -153,6 +153,100 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
+        <h3>Ingesta de ficheros</h3>
+        <p>Documentos, imágenes, audio y vídeo convertidos a Markdown antes de la inferencia. Los ficheros se gestionan en <a href="/dashboard/files">Ficheros</a>.</p>
+      </div>
+      <span class="badge badge-neutral">ingestion</span>
+    </div>
+    <div class="form-body config-grid">
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="ingestion_enabled" {% if config.ingestion.enabled %}checked{% endif %}>
+          Activar ingesta de ficheros
+        </label>
+        <label>
+          <input type="checkbox" name="ingestion_ocr_enabled" {% if config.ingestion.ocr_enabled %}checked{% endif %}>
+          OCR de PDFs escaneados e imágenes
+        </label>
+        <label>
+          <input type="checkbox" name="ingestion_images_enabled" {% if config.ingestion.images.enabled %}checked{% endif %}>
+          Describir figuras con LLM de visión
+        </label>
+        <label>
+          <input type="checkbox" name="ingestion_transcription_enabled" {% if config.ingestion.transcription.enabled %}checked{% endif %}>
+          Transcribir audio y vídeo (Whisper)
+        </label>
+      </div>
+      <label class="field">
+        <span>Tamaño máximo de fichero (MB)</span>
+        <input name="ingestion_max_file_mb" value="{{ config.ingestion.max_file_mb }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Timeout de conversión (s)</span>
+        <input name="ingestion_conversion_timeout_seconds" value="{{ config.ingestion.conversion_timeout_seconds }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Endpoint de visión (OpenAI-compatible)</span>
+        <input name="ingestion_images_base_url" value="{{ config.ingestion.images.base_url }}">
+      </label>
+      <label class="field">
+        <span>Modelo de visión</span>
+        <input name="ingestion_images_model" value="{{ config.ingestion.images.model }}" placeholder="google/gemma-4-31b-qat">
+      </label>
+      <label class="field">
+        <span>Modelo Whisper</span>
+        <select name="ingestion_whisper_model">
+          {% for size in ['tiny', 'base', 'small', 'medium', 'large-v3'] %}
+            <option value="{{ size }}" {% if config.ingestion.transcription.model_size == size %}selected{% endif %}>{{ size }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>Ruta de ffmpeg</span>
+        <input name="ingestion_ffmpeg_path" value="{{ config.ingestion.transcription.ffmpeg_path }}">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Sandbox de código</h3>
+        <p>Skill <code>run_code</code> del agente: ejecuta Python en contenedores Docker desechables, siempre sin red, sin ficheros del host y sin privilegios. Requiere Docker Desktop en marcha.</p>
+      </div>
+      <span class="badge badge-neutral">sandbox</span>
+    </div>
+    <div class="form-body config-grid">
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="sandbox_enabled" {% if config.sandbox.enabled %}checked{% endif %}>
+          Activar sandbox (habilita la skill run_code)
+        </label>
+      </div>
+      <label class="field">
+        <span>Imagen Docker</span>
+        <input name="sandbox_image" value="{{ config.sandbox.image }}" placeholder="ai-broker-sandbox:latest">
+      </label>
+      <label class="field">
+        <span>Binario docker</span>
+        <input name="sandbox_docker_path" value="{{ config.sandbox.docker_path }}">
+      </label>
+      <label class="field">
+        <span>Timeout por ejecución (s)</span>
+        <input name="sandbox_timeout_seconds" value="{{ config.sandbox.timeout_seconds }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Memoria (MB)</span>
+        <input name="sandbox_memory_mb" value="{{ config.sandbox.memory_mb }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>CPUs</span>
+        <input name="sandbox_cpus" value="{{ config.sandbox.cpus }}" inputmode="numeric">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
         <h3>Proveedores</h3>
         <p>Elige un proveedor para ver o cambiar su conexión, o da de alta uno nuevo (OpenAI-compatible). El catálogo de modelos y su estado se consultan en <a href="/dashboard/models">Modelos</a>.</p>
       </div>

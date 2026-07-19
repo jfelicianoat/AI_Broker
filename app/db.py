@@ -139,6 +139,28 @@ class Database:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS ingested_files (
+                id TEXT PRIMARY KEY,
+                sha256 TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                engine TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_json TEXT,
+                original_path TEXT NOT NULL,
+                markdown_path TEXT,
+                meta_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_ingested_files_sha
+            ON ingested_files(sha256, status)
+            """,
+            """
             CREATE INDEX IF NOT EXISTS idx_tasks_queue
             ON tasks(status, queue_position, priority, created_at)
             """,

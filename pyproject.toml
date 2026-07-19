@@ -9,12 +9,22 @@ dependencies = [
     "jinja2>=3.1.4",
     "keyring>=25.0.0",
     "pydantic>=2.7.0",
+    # Parseo multipart de POST /api/v1/files (subida de adjuntos).
+    "python-multipart>=0.0.9",
     "pyyaml>=6.0.1",
     "structlog>=24.1.0",
     "uvicorn[standard]>=0.30.0",
 ]
 
 [project.optional-dependencies]
+# Motores de conversión de la ingesta de ficheros (imports perezosos: sin
+# ellos el broker arranca y los ficheros afectados fallan con ENGINE_MISSING).
+# La transcripción de vídeo requiere además ffmpeg en el PATH.
+ingestion = [
+    "docling>=2.15.0",
+    "markitdown[docx,xlsx,pptx]>=0.1.1",
+    "faster-whisper>=1.1.0",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-cov>=5.0.0",

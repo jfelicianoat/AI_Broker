@@ -156,9 +156,29 @@ venv\\Scripts\\activate
 
 
 
-# Instalar dependencias
+# Instalar dependencias (versiones exactas verificadas por la suite)
 
-pip install fastapi uvicorn httpx pyyaml jinja2 python-multipart structlog psutil python-dotenv
+pip install -r requirements.lock
+pip install -e . --no-deps
+
+
+
+# OPCIONAL — Ingesta de ficheros adjuntos (PDF/Office/imagen/audio):
+# instala Docling, MarkItDown y faster-whisper (varios GB, incluye torch).
+# Sin esto el broker funciona igual; los ficheros afectados fallan con
+# ENGINE_MISSING y un hint de instalación.
+
+pip install "ai-broker[ingestion]"
+
+# Para transcribir VÍDEO además hace falta ffmpeg:
+#   winget install Gyan.FFmpeg
+# y si no queda en el PATH, apunta ingestion.transcription.ffmpeg_path
+# del broker_config.yaml al ffmpeg.exe instalado.
+
+# OPCIONAL — Sandbox de código (skill run_code del agente):
+# requiere Docker Desktop (WSL2) instalado y en marcha, y la imagen:
+#   docker build -t ai-broker-sandbox:latest sandbox/
+# En broker_config.yaml: sandbox.enabled: true
 
 
 
@@ -429,14 +449,17 @@ curl http://192.168.1.50:8765/health
 
 ```bash
 
-# Test directo de API
+# Test directo de API (contrato real: POST /api/v1/tasks, respuesta 202)
 
-curl -X POST http://192.168.1.50:8765/api/v1/extract \\
+curl -X POST http://192.168.1.50:8765/api/v1/tasks \\
 
   -H "Content-Type: application/json" \\
 
-  -d '{"task_id": "test", "profile": {...}, "content": {...}}'
+  -d '{"idempotency_key": "deploy:test-1", "content": {"prompt": "Di hola"}}'
 
+# Consultar el resultado con el task_id devuelto:
+
+curl http://192.168.1.50:8765/api/v1/tasks/TASK_ID
 ```
 
 

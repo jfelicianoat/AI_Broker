@@ -61,11 +61,18 @@ class ConsensusCoordinator:
         scheduler: ResourceScheduler,
         artifacts: ArtifactStore | None = None,
         provider: Any | None = None,
+        ingestion: Any | None = None,
+        sandbox: Any | None = None,
     ) -> None:
         self.db = db
         self.scheduler = scheduler
         self.artifacts = artifacts or ArtifactStore()
         self.provider = provider or BootstrapModelProvider()
+        # IngestionService opcional: expande los adjuntos broker_file a Markdown
+        # dentro del prompt en el momento del despacho.
+        self.ingestion = ingestion
+        # SandboxExecutor opcional: habilita la skill run_code del agente.
+        self.sandbox = sandbox
 
     def initialize_run(self, task_id: str, request: TaskCreateRequest) -> str | None:
         if request.execution.strategy == ExecutionStrategy.single:
@@ -118,6 +125,20 @@ class ConsensusCoordinator:
 
     async def process_task(self, repository, task_id: str) -> None:
         request = repository.get_task_request(task_id)
+        if self.ingestion is not None and request.content.attachments:
+            try:
+                # En un hilo: la expansión lee de disco el Markdown de cada adjunto.
+                request = await asyncio.to_thread(self.ingestion.expand_request, request)
+            except Exception as error:
+                code = getattr(error, "code", "ATTACHMENT_EXPANSION_FAILED")
+                repository.update_task(
+                    task_id,
+                    TaskStatus.failed,
+                    progress={"phase": TaskStatus.failed.value},
+                    error={"code": code, "message": str(error), "retryable": False},
+                    clear_queue_position=True,
+                )
+                return
         effective_timeout = min(
             request.execution.timeout_seconds,
             self.scheduler.config.processing.task_timeout_seconds,
@@ -619,7 +640,7 @@ class ConsensusCoordinator:
                 if call.name not in skills:
                     tool_result = f"ERROR: la herramienta '{call.name}' no está habilitada para esta tarea."
                 else:
-                    tool_result = await run_skill(call.name, call.arguments)
+                    tool_result = await run_skill(call.name, call.arguments, sandbox=self.sandbox)
                 tool_calls += 1
                 repository.add_event(task_id, "agent.tool_call", {
                     "iteration": iteration,

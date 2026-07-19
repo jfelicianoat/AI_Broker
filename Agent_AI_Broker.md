@@ -10,11 +10,15 @@
 
 **Backend:** FastAPI (Python 3.10+)
 
-**Frontend:** Jinja2 Templates + Tailwind CSS (CDN) + HTMX (CDN)
+**Frontend:** Jinja2 Templates + HTMX con CSS/JS 100% locales (sin CDN)
 
 **HTTP Client:** httpx (async, para Ollama y APIs externas)
 
-**Tema:** Oscuro por defecto con Tailwind Dark Mode
+**Ingesta de ficheros:** Docling (PDF/OCR), MarkItDown (Office), faster-whisper (audio/vídeo) — imports perezosos
+
+**Sandbox de código:** contenedores Docker desechables (skill `run_code` del agente)
+
+**Tema:** Oscuro por defecto
 
 
 
@@ -31,6 +35,10 @@
 4. **Control de Presupuesto:** Monitorización de gasto en APIs externas
 
 5. **Dashboard Interactivo:** Gestión visual en tiempo real con HTMX
+
+6. **Ingesta de Adjuntos:** Conversión de documentos/imágenes/audio/vídeo a Markdown antes de la inferencia
+
+7. **Ejecución Aislada:** Código generado por modelos ejecutado en sandbox Docker sin red ni acceso al host
 
 
 
@@ -235,63 +243,31 @@ El probador debe construir un `TaskCreateRequest` v2 y usar `POST /api/v1/tasks`
 
 El resultado se muestra raw y escapado, junto con uso, modelo efectivo, fallback y metadata de consenso. El historial procede de SQLite y sobrevive a recargas o reinicios. La especificación operativa está en `docs/Prompt_Tester.md`.
 
+Estado actual (julio 2026): implementado, incluyendo estrategia `agent` con casillas de skills (con "Ejecutar código (sandbox)" visible solo con el sandbox activo), proponentes con skills, selector de compresión por prueba, y casillas de **ficheros adjuntos** (los ficheros `ready` de la ingesta se adjuntan como `broker_file` con sus tokens estimados a la vista).
+
 
 
 ## API Endpoints del Broker
 
 
 
-### Core Processing API
+### Core Processing API (endpoints reales)
 
-```python
-
-@app.post("/api/v1/extract")
-
-async def extract_knowledge(request: ExtractRequest):
-
-    # Enrutar a modelo óptimo
-
-    # Procesar con LLM seleccionado
-
-    # Retornar resultado estructurado
-
-
-
-@app.get("/api/v1/models")
-
-async def list_available_models():
-
-    # Consultar Ollama local dinámicamente
-
-    # Añadir APIs externas configuradas
-
-    # Retornar lista completa con estados
-
-
-
-@app.get("/api/v1/queue")
-
-async def get_queue_status():
-
-    # Snapshot actual de la cola
-
-    # Tareas pendientes, procesando, completadas
-
-    # Métricas de rendimiento
-
-
-
-@app.delete("/api/v1/queue/{task_id}")
-
-async def abort_task(task_id: str):
-
-    # Cancelar request HTTP activo
-
-    # Liberar VRAM forzando descarga de modelo
-
-    # Actualizar estado de cola
-
-```
+| Endpoint | Método | Uso |
+|----------|--------|-----|
+| `/api/v1/tasks` | POST | Crear tarea (`202`; replay idempotente `200`; conflicto `409`) |
+| `/api/v1/tasks/{id}` | GET / DELETE | Estado y resultado / cancelación idempotente |
+| `/api/v1/tasks/{id}/tool_results` | POST | Resolver tools del cliente (`waiting_for_tools`) y reanudar |
+| `/api/v1/files` | POST | Subir adjunto (multipart, `202`, dedupe SHA-256) |
+| `/api/v1/files/{id}` | GET | Estado de conversión, metadatos y `tokens_estimate` |
+| `/api/v1/files/{id}/markdown` | GET | Markdown resultante cuando `status=ready` |
+| `/api/v1/queue` | GET / PATCH | Snapshot de cola / reordenar pendientes |
+| `/api/v1/models` | GET | Catálogo con compatibilidad, `features` sondeadas y `catalog` |
+| `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
+| `/api/v1/models/context` | GET | Ventana de contexto y matriz de capacidades |
+| `/api/v1/capabilities` | GET | Detección de soporte: contrato, estrategias, flags |
+| `/api/v1/usage` | GET | Uso mensual por proveedor |
+| `/health` `/health/live` `/health/ready` | GET | Salud, liveness, readiness |
 
 
 
@@ -575,7 +551,7 @@ La base `state/broker.db` almacena tareas, claves/hash idempotentes, orden, inte
 
 ### Enrutamiento y contexto
 
-**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt` en persistencia, rechaza attachments sin mapeo lossless, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio. Con el servicio opcional de compresión de prompts activo (`prompt_compression` en `broker_config.yaml`, ver [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md)), la copia del prompt de chat que viaja al proveedor se comprime; los embeddings nunca se comprimen. Cada tarea puede fijar su propia compresión con el campo opcional `prompt_compression` del contrato (ver «Novedades del contrato 2.2»).
+**Fase 4 implementada:** el contrato distingue `chat` y `embedding`; conserva exactamente `content.prompt` en persistencia, filtra modelos por capacidad/contexto y normaliza una respuesta técnica sin interpretar contenido de negocio. Los attachments sin mapeo lossless siguen rechazados; desde el contrato 2.4 existe un mapeo lossless para ficheros ingeridos (`type: "broker_file"`, ver «Novedades del contrato 2.4»): el fichero llega al modelo como Markdown dentro del prompt. Con el servicio opcional de compresión de prompts activo (`prompt_compression` en `broker_config.yaml`, ver [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md)), la copia del prompt de chat que viaja al proveedor se comprime; los embeddings nunca se comprimen. Cada tarea puede fijar su propia compresión con el campo opcional `prompt_compression` del contrato (ver «Novedades del contrato 2.2»).
 
 1. Respetar `preferred_model` cuando esté disponible y soporte la ventana necesaria.
 2. Si no está disponible y `fallback_allowed` es falso, terminar con `MODEL_UNAVAILABLE`.
@@ -590,6 +566,16 @@ En `single`, el progreso se limita a `queued`, `routing`, `generating` y un esta
 ### Novedades del contrato 2.4 (julio 2026)
 
 `GET /api/v1/capabilities` devuelve `contract_version: "2.4"`. Todos los cambios son aditivos: un cliente de contratos anteriores sigue funcionando sin tocar nada.
+
+**Ingesta de ficheros adjuntos (julio 2026).** Flujo en tres pasos para que una tarea trabaje sobre documentos, imágenes, audio o vídeo:
+
+1. `POST /api/v1/files` (multipart, campo `file`) → `202` con `{file_id, status, sha256, created, status_url}`. El broker valida extensión + magic bytes (`415 INGEST_UNSUPPORTED_FORMAT` / `INGEST_CONTENT_MISMATCH`), tamaño (`413 INGEST_TOO_LARGE`) y deduplica por SHA-256 (`created: false` = ya existía, sin re-conversión).
+2. Sondear `GET /api/v1/files/{id}` hasta `status: "ready"` (o `"failed"` con `error.code`: `ENGINE_MISSING`, `CONVERSION_FAILED`, `CONVERSION_TIMEOUT`). En `ready`, `meta` incluye `markdown_chars` y `tokens_estimate` (cota superior conservadora, misma fórmula que el preflight de contexto) para elegir modelo/estrategia antes de crear la tarea; `markdown_url` sirve el documento convertido.
+3. Crear la tarea con `content.attachments: [{"type": "broker_file", "metadata": {"file_id": "..."}}]` (o `uri: "broker://files/{id}"`). Ficheros no listos → `409 ATTACHED_FILE_NOT_READY`; inexistentes → `404 ATTACHED_FILE_NOT_FOUND`; fallidos → `409 ATTACHED_FILE_FAILED`. Cualquier otro `type` de attachment sigue rechazado en validación.
+
+En el despacho, el Markdown se inyecta en el prompt dentro de `<attached_document id name>` con neutralización anti-inyección y aviso de contenido no confiable; `request_json` conserva el prompt original del cliente. Con adjuntos, la compresión de prompt pasa a `off` salvo override explícito de la tarea. Formatos soportados en `capabilities.ingestion_formats` (agrupados por tipo); flag `file_ingestion: true`. Detalle completo: [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md).
+
+**Sandbox de código (skill `run_code`, julio 2026).** La estrategia `agent` (y `proposer_skills` del mixture) acepta la skill `run_code`: el modelo escribe Python y el broker lo ejecuta en un contenedor Docker desechable — sin red, sin ficheros del host, rootfs de solo lectura, usuario sin privilegios, límites de tiempo/memoria/CPU/procesos — devolviendo stdout/stderr/exit code como resultado de tool (el modelo puede corregir y reintentar). Doble opt-in: `run_code` no está en las skills por defecto y requiere `sandbox.enabled` en la configuración del broker; sin sandbox, crear una tarea que la pida devuelve `409 SANDBOX_DISABLED`. Detección: flag `sandbox_run_code` en `capabilities` (y `run_code` aparece en `agent_skills` solo con sandbox activo). Detalle completo: [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md).
 
 **Meta-router de estrategia (`strategy: auto`).** Con `strategy_router.enabled` en la configuración, una tarea con `execution.strategy: "auto"` deja que el broker elija estrategia concreta. La clasificación es **técnica**, no de dominio: necesita datos actuales / cálculo / URL → `agent`; deliberativa (comparar, analizar, prompt largo, datos sensibles) y con presupuesto → `mixture_of_agents`; directa → `single`. La decisión se persiste como evento `strategy.routed` (con señales y motivos), visible en el detalle de la tarea. Router apagado o `strategy: auto` sin él → se resuelve a `single`. Diseñado en tres piezas activables por separado en config: (1) clasificador heurístico, (2) escalado por confianza y (3) aprendizaje adaptativo —las tres implementadas—; `record_cases` guarda los casos desde el principio. Flag `auto_strategy` en `capabilities` (solo true si el router está activo); `auto` aparece en `strategies` solo entonces.
 
