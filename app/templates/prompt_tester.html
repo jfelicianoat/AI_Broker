@@ -17,6 +17,7 @@
     <input type="text" list="tester-models" value="{{ ns.label }}" placeholder="{{ placeholder }}"
            autocomplete="off" spellcheck="false" data-model-combo aria-label="Modelo para {{ name }}">
     <input type="hidden" name="{{ name }}" value="{{ selected if ns.label else '' }}" data-model-combo-value>
+    <small class="model-combo-hint" data-model-combo-hint role="alert" hidden>Ese texto no corresponde a ningún modelo del catálogo: elige una opción de la lista o el campo se enviará vacío.</small>
   </span>
 {%- endmacro %}
 
@@ -121,6 +122,26 @@
                 </select>
               </label>
 
+              <div class="field">
+                <span>Ficheros adjuntos (convertidos a Markdown)</span>
+                {% if ready_files %}
+                  <div class="attach-list">
+                    {% for file in ready_files %}
+                      <label class="check-row">
+                        <input type="checkbox" name="attach_file_{{ file.id }}"
+                               {% if form.get('attach_file_' ~ file.id) %}checked{% endif %}>
+                        <span>{{ file.filename }}
+                          <small>{{ file.kind }}{% if file.tokens_estimate %} · ~{{ file.tokens_estimate }} tokens{% endif %}</small>
+                        </span>
+                      </label>
+                    {% endfor %}
+                  </div>
+                  <small class="form-hint">El contenido se inyecta en el prompt al despachar; con adjuntos la compresión pasa a "off" salvo que elijas un nivel explícito.</small>
+                {% else %}
+                  <small class="form-hint">No hay ficheros listos. Súbelos en <a href="/dashboard/files">Ficheros</a>.</small>
+                {% endif %}
+              </div>
+
               {% if compression_preview %}
                 <div class="compression-preview {% if compression_preview.applied %}applied{% endif %}">
                   <div class="compression-preview-head">
@@ -168,12 +189,35 @@
                 <select name="strategy">
                   <option value="single" {% if form.strategy == 'single' %}selected{% endif %}>Modelo único</option>
                   <option value="mixture_of_agents" {% if form.strategy == 'mixture_of_agents' %}selected{% endif %}>Mixture of LLMs</option>
+                  <option value="agent" {% if form.strategy == 'agent' %}selected{% endif %}>Agente con skills</option>
                 </select>
               </label>
               <label class="field" data-show-strategy="single">
                 <span>Modelo único exacto</span>
                 {{ model_combo('single_model', form.single_model, available_models) }}
               </label>
+              <div class="mixture-fields" data-show-strategy="agent">
+                <p class="form-hint">El modelo puede usar herramientas (buscar en la web, leer una URL) en un bucle hasta responder. Requiere un modelo con tools verificado.</p>
+                <label class="field">
+                  <span>Modelo del agente</span>
+                  {{ model_combo('agent_model', form.agent_model, available_models) }}
+                </label>
+                <div class="field-pair">
+                  <label class="field">
+                    <span>Máx. iteraciones</span>
+                    <input name="agent_max_iterations" value="{{ form.agent_max_iterations }}" type="number" min="1" max="20" step="1">
+                  </label>
+                </div>
+                <div class="check-row">
+                  <label><input type="checkbox" name="agent_skill_web_search" {% if form.agent_skill_web_search %}checked{% endif %}> Búsqueda web</label>
+                  <label><input type="checkbox" name="agent_skill_fetch_url" {% if form.agent_skill_fetch_url %}checked{% endif %}> Leer URL</label>
+                  <label><input type="checkbox" name="agent_skill_calculator" {% if form.agent_skill_calculator %}checked{% endif %}> Calculadora</label>
+                  <label><input type="checkbox" name="agent_skill_current_datetime" {% if form.agent_skill_current_datetime %}checked{% endif %}> Fecha/hora</label>
+                  {% if sandbox_enabled %}
+                    <label><input type="checkbox" name="agent_skill_run_code" {% if form.agent_skill_run_code %}checked{% endif %}> Ejecutar código (sandbox)</label>
+                  {% endif %}
+                </div>
+              </div>
               <div class="mixture-fields" data-show-strategy="mixture_of_agents">
                 <p class="form-hint">Escribe en cada campo para filtrar. Solo se ofrecen modelos disponibles (operativos, pendientes o con error temporal); los no operativos quedan fuera.</p>
                 <div class="field-pair">
@@ -210,6 +254,19 @@
                   <span>Árbitro exacto</span>
                   {{ model_combo('arbiter_model', form.arbiter_model, available_models) }}
                 </label>
+                <div class="agent-skills-block">
+                  <label><input type="checkbox" name="proposer_skills_enabled" {% if form.proposer_skills_enabled %}checked{% endif %}> Dar herramientas a los proponentes (verifican datos antes de proponer)</label>
+                  <p class="form-hint">Cada proponente puede buscar en la web, leer URLs, calcular o consultar la fecha antes de emitir su propuesta. Requiere proponentes con tools verificado. El árbitro no usa herramientas.</p>
+                  <div class="check-row">
+                    <label><input type="checkbox" name="proposer_skill_web_search" {% if form.proposer_skill_web_search %}checked{% endif %}> Búsqueda web</label>
+                    <label><input type="checkbox" name="proposer_skill_fetch_url" {% if form.proposer_skill_fetch_url %}checked{% endif %}> Leer URL</label>
+                    <label><input type="checkbox" name="proposer_skill_calculator" {% if form.proposer_skill_calculator %}checked{% endif %}> Calculadora</label>
+                    <label><input type="checkbox" name="proposer_skill_current_datetime" {% if form.proposer_skill_current_datetime %}checked{% endif %}> Fecha/hora</label>
+                    {% if sandbox_enabled %}
+                      <label><input type="checkbox" name="proposer_skill_run_code" {% if form.proposer_skill_run_code %}checked{% endif %}> Ejecutar código (sandbox)</label>
+                    {% endif %}
+                  </div>
+                </div>
               </div>
             </div>
           </section>

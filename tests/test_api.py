@@ -379,13 +379,23 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.2"
+    assert body["contract_version"] == "2.4"
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
+    assert body["presets"]["agent"] == ["fast"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]
     assert "parallel" in body["scheduling_by_preset"]["slow"]
     assert body["max_active_workflows"] == 1
     assert body["max_parallel_invocations"] == 2
     assert body["prompt_compression_override"] is True
+    assert "web_search" in body["agent_skills"]
+    assert "agent" in body["strategies"]
+    assert body["proposer_skills"] is True
+    assert body["client_tool_passthrough"] is True
+    # El meta-router está desactivado por defecto: no se anuncia strategy auto.
+    assert body["auto_strategy"] is False
+    assert body["confidence_escalation"] is False
+    assert body["adaptive_strategy_learning"] is False
+    assert "auto" not in body["strategies"]
 
 
 def test_dashboard_read_models_are_paged_filterable_and_source_backed(tmp_path: Path) -> None:
@@ -550,6 +560,51 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     assert config.resources.max_loaded_local_models == "auto"
     assert saved.processing.task_timeout_seconds == 900
     assert saved.resources.allow_execution_waves is True
+
+
+def test_dashboard_configuration_rejects_concurrent_edit(tmp_path: Path) -> None:
+    import re
+
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-conflict.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    form = {
+        "task_timeout_seconds": "900",
+        "max_parallel_invocations": "3",
+        "queue_max_size": "250",
+        "local_vram_budget_gb": "48",
+        "vram_safety_margin_gb": "4",
+        "max_loaded_local_models": "auto",
+        "allow_execution_waves": "on",
+    }
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        first = client.post("/dashboard/actions/config", data={"csrf_token": token, **form})
+        # Formulario abierto antes del primer guardado: su huella ya no casa.
+        stale = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, "config_fingerprint": "0" * 16, **{**form, "queue_max_size": "99"}},
+        )
+        page = client.get("/dashboard/config")
+        fingerprint = re.search(r'name="config_fingerprint" value="([0-9a-f]{16})"', page.text)
+        assert fingerprint is not None
+        fresh = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "config_fingerprint": fingerprint.group(1),
+                **{**form, "queue_max_size": "300"},
+            },
+        )
+
+    assert first.status_code == 200
+    assert stale.status_code == 200
+    assert "La configuración cambió" in stale.text
+    assert fresh.status_code == 200
+    assert "Configuración guardada" in fresh.text
+    assert load_config(config_path).processing.queue_max_size == 300
 
 
 def test_dashboard_configuration_can_be_reviewed_without_saving(tmp_path: Path) -> None:
@@ -1505,10 +1560,10 @@ def test_prompt_tester_hides_incompatible_models_and_uses_filter_combos(tmp_path
     assert "pendiente" in datalist
     # Los selectores son combos con autocompletado sobre el datalist compartido:
     # input visible + hidden con la referencia JSON para el backend.
-    for field in ("single_model", "proposer_model_1", "arbiter_model"):
+    for field in ("single_model", "agent_model", "proposer_model_1", "arbiter_model"):
         assert f'name="{field}"' in page
-    assert page.count('list="tester-models"') == 7
-    assert page.count("data-model-combo-value") == 7
+    assert page.count('list="tester-models"') == 8
+    assert page.count("data-model-combo-value") == 8
 
 
 def test_prompt_tester_compression_override_controls_preview_and_request(tmp_path: Path) -> None:
@@ -2655,7 +2710,7 @@ def test_save_config_is_atomic_and_keeps_backup(tmp_path: Path) -> None:
     assert backup.exists()
     assert load_config(target).server.port == 9999
     # El .bak conserva la versión anterior íntegra y parseable.
-    assert load_config(backup).server.port == 8080
+    assert load_config(backup).server.port == 8765
 
 
 def test_server_config_rejects_multiple_workers() -> None:

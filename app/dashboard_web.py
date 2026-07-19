@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from app.admin_auth import (
     ADMIN_COOKIE_NAME,
@@ -37,11 +39,14 @@ from app.dashboard_forms import (
     _build_prompt_tester_request,
     _config_review_items,
     _find_custom_provider,
+    _prompt_tester_agent_precheck,
     _prompt_tester_defaults,
     _prompt_tester_feature_warnings,
     _prompt_tester_impact,
     _validation_messages,
 )
+from app.ingestion.detection import ALLOWED_FORMATS
+from app.ingestion.service import AttachmentError
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
@@ -55,6 +60,7 @@ from app.schemas import (
     TaskCreateRequest,
     TaskStatus,
 )
+from app.strategy_router import describe_bucket, heuristic_for_bucket, recommend_from_cases
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
@@ -63,6 +69,21 @@ templates = Jinja2Templates(directory=TEMPLATES_ROOT)
 register_filters(templates.env)
 
 PROBE_PROGRESS: dict[str, dict[str, Any]] = {}
+PROBE_PROGRESS_TTL_SECONDS = 60 * 60
+
+
+def _purge_stale_probe_progress(now: datetime) -> None:
+    """El progreso de sondeos vive en memoria de proceso y nadie lo consulta
+    pasada la tanda: sin purga, cada sondeo dejaría su entrada para siempre
+    en un servidor que corre semanas."""
+    for key in list(PROBE_PROGRESS):
+        raw = PROBE_PROGRESS[key].get("updated_at")
+        try:
+            updated = datetime.fromisoformat(raw) if raw else None
+        except (TypeError, ValueError):
+            updated = None
+        if updated is None or (now - updated).total_seconds() > PROBE_PROGRESS_TTL_SECONDS:
+            PROBE_PROGRESS.pop(key, None)
 
 
 def create_dashboard_router(
@@ -75,6 +96,7 @@ def create_dashboard_router(
     config: BrokerConfig,
     config_path: Path,
     health_loader: Callable[[], Awaitable[HealthResponse]],
+    ingestion=None,
 ) -> APIRouter:
     login_throttle = LoginThrottle()
 
@@ -94,6 +116,17 @@ def create_dashboard_router(
             if is_page:
                 raise HTTPException(status_code=303, headers={"Location": "/dashboard/login"}) from None
             raise error
+        # Sesión deslizante: si la petición trae la cookie admin, se anota una
+        # renovación que _template_response reemite con timestamp fresco. Así
+        # una sesión en uso no caduca a las 8 horas de la firma original y no
+        # se pierde el contenido de un formulario largo contra un 403.
+        if request.cookies.get(ADMIN_COOKIE_NAME):
+            try:
+                token = resolve_admin_token(config)
+            except AdminTokenLookupError:
+                token = None
+            if token:
+                request.state.admin_cookie_renewal = admin_cookie_value(token)
 
     public = APIRouter()
     # Todo el panel salvo el login exige credencial por construcción: una ruta
@@ -111,6 +144,25 @@ def create_dashboard_router(
         except ProviderError as error:
             return [], f"{error.code}: catalogo no disponible"
 
+    def _config_fingerprint() -> str:
+        """Huella del YAML en disco: viaja oculta en el formulario de config
+        para detectar que otra pestaña (u otro proceso) guardó entre medias."""
+        try:
+            return hashlib.sha256(config_path.read_bytes()).hexdigest()[:16]
+        except OSError:
+            return "missing"
+
+    def _config_conflict_error(form: dict[str, str]) -> str | None:
+        supplied = form.get("config_fingerprint", "").strip()
+        if not supplied or supplied == _config_fingerprint():
+            return None
+        return (
+            "La configuración cambió después de abrir este formulario (otra "
+            "pestaña u otro proceso la guardó). No se ha guardado nada para no "
+            "pisar esos cambios: recarga la página (F5) y aplica los tuyos "
+            "sobre la versión actual."
+        )
+
     def _config_page_context(
         *,
         cfg: BrokerConfig | None = None,
@@ -123,6 +175,7 @@ def create_dashboard_router(
             "config_saved": config_saved,
             "config_errors": config_errors or [],
             "config_review": config_review if config_review is not None else [],
+            "config_fingerprint": _config_fingerprint(),
             "nav_active": "configuracion",
         }
 
@@ -154,6 +207,21 @@ def create_dashboard_router(
     async def config_page(request: Request, config_saved: bool = False):
         return _template_response(request, "config.html", _config_page_context(config_saved=config_saved))
 
+    def _ready_file_options() -> list[dict[str, Any]]:
+        """Ficheros ingeridos listos para adjuntar desde el probador."""
+        if ingestion is None or not config.ingestion.enabled:
+            return []
+        return [
+            {
+                "id": record.id,
+                "filename": record.filename,
+                "kind": record.kind,
+                "tokens_estimate": record.meta.get("tokens_estimate"),
+            }
+            for record in ingestion.list_files()
+            if record.status == "ready"
+        ]
+
     @protected.get("/dashboard/prompt-tester", response_class=HTMLResponse)
     async def prompt_tester(request: Request):
         catalog, catalog_error = await models()
@@ -170,6 +238,8 @@ def create_dashboard_router(
                 "compression_preview": None,
                 "feature_warnings": [],
                 "accepted": None,
+                "ready_files": _ready_file_options(),
+                "sandbox_enabled": config.sandbox.enabled,
                 "nav_active": "probador",
             },
         )
@@ -197,6 +267,111 @@ def create_dashboard_router(
                 "nav_active": "modelos",
             },
         )
+
+    @protected.get("/dashboard/routing", response_class=HTMLResponse)
+    async def routing_dashboard(request: Request):
+        return _template_response(
+            request,
+            "routing.html",
+            {
+                "router": config.strategy_router,
+                "buckets": _routing_insights(repository, config),
+                "nav_active": "enrutamiento",
+            },
+        )
+
+    def _file_views() -> list[dict[str, Any]]:
+        if ingestion is None:
+            return []
+        views: list[dict[str, Any]] = []
+        for record in ingestion.list_files():
+            size_mb = record.size_bytes / (1024 * 1024)
+            views.append({
+                "id": record.id,
+                "filename": record.filename,
+                "kind": record.kind,
+                "engine": record.meta.get("engine", record.engine),
+                "status": record.status,
+                "status_class": {
+                    "ready": "badge-completed",
+                    "failed": "badge-failed",
+                    "converting": "badge-queued",
+                }.get(record.status, "badge-neutral"),
+                "size_human": f"{size_mb:.1f} MB" if size_mb >= 1 else f"{record.size_bytes / 1024:.0f} KB",
+                "tokens_estimate": record.meta.get("tokens_estimate"),
+                "pages": record.meta.get("pages"),
+                "error": (record.error or {}).get("message"),
+                "error_code": (record.error or {}).get("code"),
+                "created_at": record.created_at,
+                "markdown_url": f"/api/v1/files/{record.id}/markdown" if record.status == "ready" else None,
+            })
+        return views
+
+    def _files_page_context(*, upload_error: str | None = None) -> dict[str, Any]:
+        return {
+            "files": _file_views(),
+            "ingestion_enabled": config.ingestion.enabled,
+            "ingestion_config": config.ingestion,
+            "formats": ALLOWED_FORMATS,
+            "upload_error": upload_error,
+            "nav_active": "ficheros",
+        }
+
+    @protected.get("/dashboard/files", response_class=HTMLResponse)
+    async def files_page(request: Request):
+        return _template_response(request, "files.html", _files_page_context())
+
+    @protected.get("/dashboard/fragments/files", response_class=HTMLResponse)
+    async def files_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/files_table.html",
+            context={"files": _file_views()},
+        )
+
+    @protected.post("/dashboard/actions/files/upload", response_class=HTMLResponse)
+    async def upload_dashboard_file(request: Request):
+        form = await request.form()
+        form_fields = {key: value for key, value in form.items() if isinstance(value, str)}
+        _verify_dashboard_mutation(request, form_fields)
+        if ingestion is None or not config.ingestion.enabled:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        upload = form.get("file")
+        if upload is None or isinstance(upload, str) or not getattr(upload, "filename", ""):
+            return _template_response(
+                request, "files.html", _files_page_context(upload_error="Selecciona un fichero."),
+            )
+        max_bytes = config.ingestion.max_file_mb * 1024 * 1024
+        data = await upload.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return _template_response(
+                request, "files.html",
+                _files_page_context(
+                    upload_error=f"El fichero supera el límite de {config.ingestion.max_file_mb} MB.",
+                ),
+            )
+        try:
+            record, created = await run_in_threadpool(
+                ingestion.store_upload, upload.filename or "fichero", data,
+            )
+        except ValueError as error:  # IngestionError / UnsupportedFormat
+            return _template_response(
+                request, "files.html", _files_page_context(upload_error=str(error)),
+            )
+        if created:
+            ingestion.launch(record.id)
+        return RedirectResponse("/dashboard/files", status_code=303)
+
+    @protected.post("/dashboard/actions/files/{file_id}/delete", status_code=204)
+    async def delete_dashboard_file(request: Request, file_id: str) -> Response:
+        _verify_dashboard_mutation(request)
+        if ingestion is None:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        try:
+            ingestion.delete_file(file_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="FILE_NOT_FOUND") from error
+        return Response(status_code=204, headers={"HX-Trigger": "dashboard-refresh"})
 
     @protected.get("/dashboard/comparison", response_class=HTMLResponse)
     async def comparison(request: Request, task_id: str | None = None):
@@ -349,6 +524,7 @@ def create_dashboard_router(
                 "config_saved": False,
                 "config_errors": [],
                 "config_review": [],
+                "config_fingerprint": _config_fingerprint(),
             },
         )
 
@@ -357,6 +533,10 @@ def create_dashboard_router(
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
         errors: list[str] = []
+        # Validar no escribe, así que se permite sobre base obsoleta; guardar no.
+        conflict = _config_conflict_error(form)
+        if conflict and form.get("config_action") != "validate":
+            return _template_response(request, "config.html", _config_page_context(config_errors=[conflict]))
         try:
             updated = _build_dashboard_config(config, form)
             if form.get("config_action") == "validate":
@@ -384,6 +564,7 @@ def create_dashboard_router(
         errors: list[str] = []
         progress_id = form.get("probe_progress_id", "").strip()
         if progress_id:
+            _purge_stale_probe_progress(_utc_now())
             PROBE_PROGRESS[progress_id] = {
                 "phase": "preparing",
                 "provider_id": provider_id,
@@ -395,6 +576,11 @@ def create_dashboard_router(
                 "updated_at": _utc_now().isoformat(),
             }
         try:
+            # El sondeo también reescribe el YAML desde el formulario: mismo
+            # riesgo de pisar un guardado concurrente que el botón Guardar.
+            conflict = _config_conflict_error(form)
+            if conflict:
+                raise PromptTesterError(conflict)
             updated = _build_dashboard_config(config, form)
             provider_config = _find_custom_provider(updated, provider_id)
             if provider_config is None:
@@ -523,11 +709,24 @@ def create_dashboard_router(
         impact_preview = None
         compression_preview = None
         payload: TaskCreateRequest | None = None
+        agent_catalog, _ = await models()
         try:
             payload = _build_prompt_tester_request(form)
+            if not config.sandbox.enabled and (
+                "run_code" in payload.execution.agent.skills
+                or "run_code" in payload.execution.proposer_skills
+            ):
+                raise PromptTesterError(
+                    "La skill 'Ejecutar código' requiere el sandbox activado (sandbox.enabled)."
+                )
+            if payload.content.attachments and ingestion is not None:
+                # Mismo fail-fast que POST /api/v1/tasks: no se encola con
+                # adjuntos que no estén 'ready'.
+                ingestion.check_attachments(payload)
             request_preview = payload.model_dump(mode="json")
             impact_preview = _prompt_tester_impact(payload)
             compression_preview = _compression_preview(config, payload)
+            _prompt_tester_agent_precheck(payload, agent_catalog)
             if action == "enqueue":
                 task, created = repository.create_task(
                     payload,
@@ -542,6 +741,8 @@ def create_dashboard_router(
                 }
         except PromptTesterError as error:
             errors.append(str(error))
+        except AttachmentError as error:
+            errors.append(f"Adjunto no disponible ({error.code}): {error}")
         except ValidationError as error:
             errors.extend(_validation_messages(error))
         except IdempotencyConflict:
@@ -565,6 +766,8 @@ def create_dashboard_router(
                     _prompt_tester_feature_warnings(payload, catalog) if payload is not None else []
                 ),
                 "accepted": accepted,
+                "ready_files": _ready_file_options(),
+                "sandbox_enabled": config.sandbox.enabled,
                 "nav_active": "probador",
             },
         )
@@ -613,15 +816,7 @@ def create_dashboard_router(
             return response
         login_throttle.reset(throttle_key)
         response = RedirectResponse("/dashboard", status_code=303)
-        response.set_cookie(
-            ADMIN_COOKIE_NAME,
-            admin_cookie_value(expected),
-            httponly=True,
-            samesite="strict",
-            secure=False,
-            path="/dashboard",
-            max_age=ADMIN_SESSION_SECONDS,
-        )
+        _set_admin_cookie(response, admin_cookie_value(expected))
         return response
 
     @protected.post("/dashboard/actions/tasks/{task_id}/cancel", status_code=204)
@@ -669,7 +864,22 @@ def _template_response(request: Request, name: str, context: dict[str, Any]):
     # Se reenvía siempre, aunque el valor no cambie: cada render renueva el
     # max_age (caducidad deslizante) para que una sesión activa no expire.
     set_csrf_cookie(response, token)
+    renewal = getattr(request.state, "admin_cookie_renewal", None)
+    if renewal:
+        _set_admin_cookie(response, renewal)
     return response
+
+
+def _set_admin_cookie(response: Any, value: str) -> None:
+    response.set_cookie(
+        ADMIN_COOKIE_NAME,
+        value,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        path="/dashboard",
+        max_age=ADMIN_SESSION_SECONDS,
+    )
 
 
 def set_csrf_cookie(response: Any, token: str) -> None:
@@ -750,6 +960,47 @@ def _compression_preview(config: BrokerConfig, payload: TaskCreateRequest) -> di
         "saved_percent": round((1 - result.ratio) * 100, 1),
         "text": result.text,
     }
+
+
+def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[dict[str, Any]]:
+    """Qué ha aprendido el meta-router por tipo de petición: casos agregados +
+    la recomendación que aplicaría ahora con la evidencia y config actuales."""
+    router = config.strategy_router
+    insights: list[dict[str, Any]] = []
+    for bucket in repository.routing_case_buckets():
+        cases = repository.routing_cases_for_bucket(bucket["signal_bucket"])
+        recommendation = None
+        if cases:
+            heuristic = heuristic_for_bucket(bucket["signal_bucket"])
+            rec = recommend_from_cases(
+                heuristic, cases,
+                min_cases=router.learning_min_cases,
+                escalation_threshold=router.learning_escalation_threshold,
+                failure_threshold=router.learning_failure_threshold,
+            )
+            recommendation = {"strategy": rec[0], "reason": rec[1]} if rec else None
+        escalation_rate = (
+            bucket["escalated"] / bucket["single_chosen"] if bucket["single_chosen"] else 0.0
+        )
+        strategies = [
+            {
+                "name": name, "total": data["total"], "completed": data["completed"],
+                "success_rate": round(data["completed"] / data["total"] * 100) if data["total"] else 0,
+            }
+            for name, data in sorted(
+                bucket["strategies"].items(), key=lambda kv: kv[1]["total"], reverse=True,
+            )
+        ]
+        insights.append({
+            "label": describe_bucket(bucket["signal_bucket"]),
+            "heuristic": heuristic_for_bucket(bucket["signal_bucket"]),
+            "total": bucket["total"],
+            "escalation_rate": round(escalation_rate * 100),
+            "single_chosen": bucket["single_chosen"],
+            "strategies": strategies,
+            "recommendation": recommendation,
+        })
+    return insights
 
 
 def _model_dashboard_stats(

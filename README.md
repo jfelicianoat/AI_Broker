@@ -1,350 +1,122 @@
-# AI Broker — Consensus Gateway
+# AI Broker
 
 [![CI](https://github.com/jfelicianoat/AI_Broker/actions/workflows/ci.yml/badge.svg)](https://github.com/jfelicianoat/AI_Broker/actions/workflows/ci.yml)
 
-Gateway inteligente de inferencia multi-LLM con ejecución por consenso (*mixture of agents*), planificación adaptativa de recursos, cola durable y trazabilidad completa vía event sourcing.
+Tu central privada de inteligencia artificial: un único punto de entrada que recibe peticiones, documentos, imágenes, audio y vídeo, elige los mejores modelos de IA disponibles (locales o en la nube) y devuelve la respuesta — con la posibilidad de que varios modelos deliberen entre sí, de que un agente use herramientas y ejecute código en un entorno aislado, y con trazabilidad completa de todo lo que ocurre.
 
-Cada push a `main` ejecuta el CI (GitHub Actions) en Windows y Ubuntu: Ruff, Mypy y la suite completa (183 tests) con cobertura mínima exigida del 90%, instalando desde `requirements.lock` en un entorno limpio.
+---
 
-Estado actual: fases 1–4 operativas, base 5.0 completada y panel operativo 5.2 disponible sobre los read models de 5.1. El Broker usa proveedores reales, descubre el catálogo de Ollama, ejecuta chat o embeddings, admite destino exacto y aplica timeout global. `fast` es serial; `slow` puede lanzar proponentes concurrentes dentro de un solo workflow. El proveedor `bootstrap` queda reservado para pruebas.
+## 1. ¿Qué es el AI Broker?
 
-La selección de modelos es **adaptativa**: los candidatos que pasan los filtros (proveedor, privacidad cloud/local, capacidad, contexto) se reordenan por un score multiobjetivo — fiabilidad histórica (tasa de éxito con suavizado de Laplace), latencia y coste medios — calculado sobre la evidencia real de `model_invocations` en una ventana configurable (`routing:` en `broker_config.yaml`). Un modelo sin historial puntúa neutro (el arranque en frío no castiga) y `target_model`/`preferred_model` mantienen prioridad absoluta sobre el score.
+**Para empezar:** imagina una recepción con un recepcionista muy competente. Tú le entregas un encargo — una pregunta, un informe en PDF, la grabación de una reunión — y él decide a qué especialista dárselo, o si el asunto es delicado, reúne a un comité de especialistas para que cada uno dé su opinión y un moderador redacte la conclusión. Nunca pierde un encargo, apunta todo lo que pasa, y te avisa cuando está listo. Eso es el AI Broker, con modelos de IA como especialistas.
 
-## Stack
+**Un nivel más abajo:** es un servicio que corre en tu propio ordenador (no depende de ninguna nube para funcionar), expone una API y un panel web local, y gestiona una cola de tareas de inferencia. Cada tarea declara qué necesita (privacidad, coste máximo, formato de salida) y el broker decide qué modelo o modelos la ejecutan, entre los que tengas en Ollama, LM Studio o proveedores de API como DeepSeek o NVIDIA.
 
-| Capa | Tecnología |
-|------|------------|
-| Framework | FastAPI (Python 3.10+) |
-| Validación | Pydantic v2 (schemas estrictos, `extra="forbid"`) |
-| Persistencia | SQLite + WAL + event sourcing |
-| Serialización | JSON canónico con `separators=(',',':')` |
-| Scheduling | Un workflow activo; `fast` serial y `slow` con paralelismo interno acotado |
-| LLMs | Ollama (local), Hugging Face local, DeepSeek (cloud), extensible |
-| Panel | Jinja2 + fragmentos hipermedia y recursos locales |
+**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.4) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
 
-## Estado de fase 5.3
+## 2. Qué sabe hacer
 
-La base del Probador de Prompts esta implementada en `GET /dashboard/prompt-tester` y `POST /dashboard/actions/prompt-tester`. Permite validar y encolar pruebas `single` con modelo exacto o `mixture_of_agents/fast|slow` con seleccion manual de proponentes, roles y arbitro. Usa `TaskCreateRequest`, `TaskRepository` y la cola durable normal; no llama directamente a providers.
+**En pocas palabras:** le puedes pedir cosas de cuatro maneras — que responda un solo modelo, que deliberen varios, que un agente investigue con herramientas, o que el propio broker elija la mejor manera. Y le puedes adjuntar casi cualquier fichero: lo convierte a texto antes de trabajar con él.
 
-Pendiente del probador: historial HTML filtrado por `origin = prompt_tester`, cancelacion/repeticion desde la propia pantalla, resultado raw, metricas, fallback y metadata de consenso.
+| Capacidad | En una frase |
+|---|---|
+| Estrategia `single` | Un modelo responde directamente |
+| Estrategia `mixture_of_agents` | Varios modelos proponen, un árbitro sintetiza la mejor respuesta |
+| Estrategia `agent` | El modelo usa herramientas (buscar en web, leer URLs, calcular, ejecutar código) en bucle hasta resolver |
+| Estrategia `auto` | El meta-router clasifica la petición y elige la estrategia por ti |
+| Ficheros adjuntos | PDF (incluso escaneados, con OCR), Office, imágenes, audio y vídeo → Markdown |
+| Sandbox de código | El agente ejecuta Python real en contenedores Docker desechables y aislados |
+| Selección adaptativa | Los modelos se eligen por evidencia real: fiabilidad, latencia y coste históricos |
 
-## Estado de fase 5.4
+**Detalle técnico por estrategia:**
 
-La base del Comparador esta implementada en `GET /dashboard/comparison`. Lista tareas `mixture_of_agents`, muestra proponentes y arbitro persistidos, uso/coste/latencia, plan solicitado/efectivo y carriles temporales basados en `model_invocations.started_at/completed_at`. Solo marca solapamiento cuando los timestamps persistidos lo demuestran; no muestra confianza, atribucion ni paralelismo simulado.
+- **`single`** — inferencia transparente: el prompt viaja sin interpretación (compresión opcional aparte), el resultado vuelve opaco. Soporta `chat` y `embedding`, formato `markdown`/`text`/`json` (con JSON Schema obligatorio), y destino exacto vía `target_model.provider/deployment/model`.
+- **`mixture_of_agents`** (presets `fast`/`slow`) — pipeline `resource_planning → proposing → synthesizing`. Cada proponente recibe un system prompt por rol (`generalist`, `specialist`, `skeptic`, `analyst`, `reviewer`); el árbitro recibe la petición original y los candidatos dentro de delimitadores XML neutralizados (`<original_request>`, `<candidate_N>`) que impiden que un candidato inyecte instrucciones. `fast` es serial; `slow` ejecuta proponentes en `parallel`, `waves` o `sequential` según la VRAM reservable. Quórum mínimo de 2 proponentes o la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`. Con `proposer_skills`, cada proponente puede usar herramientas antes de proponer (el árbitro nunca).
+- **`agent`** — bucle de tool-calling con guardarraíles `max_iterations` (1–20) y `max_cost_usd`. Skills integradas: `web_search` (DuckDuckGo, sin clave), `fetch_url` (con guardia SSRF que resuelve DNS y rechaza hosts no públicos), `calculator` (AST restringido, sin nombres ni llamadas), `current_datetime` y `run_code` (sandbox Docker, opt-in). Passthrough de tools del cliente: la tarea se pausa en `waiting_for_tools`, el cliente resuelve con `POST /tasks/{id}/tool_results` y el bucle se reanuda con la conversación congelada en `agent_state_json`.
+- **`auto`** — el meta-router aplica tres piezas activables por separado: clasificador heurístico determinista (señales técnicas: recencia, cálculo, URL, deliberación, longitud), escalado por confianza (un juez puntúa la respuesta single 0–1; por debajo del umbral escala a mixture con el presupuesto restante), y aprendizaje adaptativo (casos persistidos en `routing_cases` agrupados por huella de señales; con evidencia suficiente el router corrige a la heurística). Toda decisión queda como evento `strategy.routed` con señales, motivos y flag `learned`.
 
-Pendiente del comparador: filtros/paginacion completos, detalles por candidato, comparacion entre varias tareas, visual QA en navegador y endurecimiento de seguridad 5.5.
+## 3. Ficheros adjuntos: de documento a conocimiento
 
-## Estado de fase 5.5
+**Para empezar:** puedes darle al broker un PDF de 200 páginas, la foto de un documento, un Excel o la grabación de una reunión. Él lo convierte a texto ordenado, y ese texto acompaña a tu pregunta cuando llega al modelo. Si el PDF es un escaneo, lo "lee" con OCR; si es un vídeo, extrae el audio y lo transcribe; si el documento tiene gráficos, un modelo de visión los describe y la descripción queda insertada en su sitio.
 
-La base de seguridad del dashboard esta implementada: las acciones mutables bajo `/dashboard/actions/*` validan token CSRF de doble envio y `Origin`/`Referer` frente a `Host`. Las paginas HTML sirven token en meta/formulario y el runtime local lo envia como `X-CSRF-Token`. La app añade cabeceras `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` y `Referrer-Policy`.
+**El flujo:** subes el fichero (`POST /api/v1/files` o la página **Ficheros** del panel) → el broker lo convierte en segundo plano (`received → converting → ready/failed`) → creas la tarea referenciando el `file_id` → al despachar, el Markdown del documento se inyecta en el prompt. Subir dos veces el mismo fichero no repite el trabajo (dedupe por SHA-256), y cada fichero listo muestra sus **tokens estimados** para que elijas modelo con conocimiento de causa.
 
-Autenticacion administrativa: si existe un token (variable `AI_BROKER_ADMIN_TOKEN` o keyring `ai-broker/dashboard_admin_token`), las acciones mutables exigen sesion admin. El operador inicia sesion en `GET /dashboard/login` (cookie HttpOnly con hash del token) o envia el token en la cabecera `X-Admin-Token`. Sin token configurado, el panel queda abierto (modo LAN privada original).
+| Tipo | Formatos | Motor |
+|---|---|---|
+| PDF (nativo o escaneado) | `.pdf` | Docling, OCR por página (RapidOCR/EasyOCR) |
+| Office / eBook / web | `.docx .xlsx .pptx .epub .msg .html .htm .ipynb` | MarkItDown |
+| Texto y marcado | `.txt .md .rst .adoc .org .tex .log` | passthrough |
+| Código y datos | `.py .js .ts .sql .json .yaml .csv .tsv` y más | passthrough en fence |
+| Imagen | `.png .jpg .jpeg .webp .tiff .bmp` | OCR + descripción por LLM de visión |
+| Audio | `.mp3 .wav .m4a .flac .ogg .opus .aac` | faster-whisper local |
+| Vídeo | `.mp4 .mkv .mov .avi .webm .m4v .wmv` | ffmpeg (extrae audio) + faster-whisper |
 
-```powershell
-python -c "import getpass,keyring; keyring.set_password('ai-broker','dashboard_admin_token',getpass.getpass('Admin token: '))"
-```
+**Detalle técnico:** la validación de subida comprueba extensión **y** magic bytes (un `.pdf` que no empieza por `%PDF` se rechaza con `INGEST_CONTENT_MISMATCH`), sanea nombres contra path traversal y aplica límites de tamaño/páginas/timeout. La detección escaneo-vs-nativo es por página, no por documento. Las figuras extraídas de un PDF se envían una a una a un endpoint OpenAI-compatible de visión con el texto adyacente como contexto, y la descripción sustituye al marcador en la posición original (`> **[Figura N — descripción generada por IA]:** …`). En el despacho, el Markdown se inyecta dentro de `<attached_document>` con neutralización de delimitadores (el documento no puede cerrar su propio tag) y una advertencia explícita al modelo de que es contenido no confiable con posibles errores de OCR; el `request_json` persistido conserva el prompt original del cliente. Con adjuntos, la compresión de prompts pasa a `off` salvo override explícito: comprimir tablas o código de un documento los corrompería. Los motores (Docling, MarkItDown, faster-whisper) se importan en perezoso: si falta uno, solo ese fichero falla con `ENGINE_MISSING` y el broker sigue operando. Corpus dorado de regresión en `tests/fixtures/ingestion/`.
 
-Pendiente de 5.5: CSP sin `unsafe-inline` cuando los carriles no dependan de estilos inline, QA visual automatizada y auditoria persistente de acciones administrativas.
+## 4. Sandbox: código de la IA sin riesgo para tu máquina
 
-## Estado de fase 6
+**Para empezar:** los modelos de IA escriben código, y a veces conviene ejecutarlo — para analizar los datos de un Excel adjunto, para comprobar que el código que te van a entregar funciona. Ejecutar código escrito por una IA directamente en tu ordenador sería temerario. El broker lo ejecuta en una "habitación acolchada": un contenedor desechable que no tiene internet, no ve tus ficheros y se destruye al terminar.
 
-Primer bloque operativo implementado: backup, verificacion y restore del estado durable. El backup genera un zip atomico con snapshot SQLite consistente, artefactos de tareas y manifest con SHA-256 por archivo. La restauracion verifica el backup antes de escribir y exige `--replace` si va a sobrescribir una base o artefactos existentes.
+**Cómo se usa:** activa la skill "Ejecutar código (sandbox)" en una tarea de agente. El modelo escribe Python, el broker lo ejecuta aislado y le devuelve la salida (o el error, para que lo corrija y reintente). La imagen por defecto (`ai-broker-sandbox:latest`, construible con `docker build -t ai-broker-sandbox:latest sandbox/`) incluye pandas, numpy, matplotlib y openpyxl.
 
-Segundo bloque operativo implementado: logging JSON Lines con rotacion por tamaño. El access log registra metodo, ruta, estado, duracion y cliente; no registra cuerpos, prompts ni respuestas. La configuracion vive en `logging` dentro de `broker_config.yaml`.
+**Detalle técnico:** cada ejecución lanza `docker run --rm` con fronteras **no configurables**: `--network none` (nada que exfiltrar: por el sandbox pasan prompts y documentos potencialmente confidenciales), sin volúmenes del host, `--read-only` con tmpfs efímeros (`/work`, `/tmp`), usuario `nobody` (65534), `--cap-drop ALL`, `no-new-privileges`, y topes de memoria (sin swap extra), CPU y procesos. El código viaja por stdin (sin problemas de quoting en Windows). Timeout en dos capas: `timeout` dentro del contenedor (exit 124 → mensaje claro al modelo) y plazo asyncio externo con margen; si el CLI muere sin limpiar, `docker rm -f` remata por nombre. La skill es doblemente opt-in: no está en las skills por defecto y exige `sandbox.enabled`; sin sandbox, pedirla devuelve `409 SANDBOX_DISABLED`. Docker parado → error de tool legible, la tarea no revienta. Modelo de amenaza honesto: contenedor comparte kernel con la VM de WSL2 — suficiente contra código generado por LLMs y documentos hostiles, no contra 0-days de kernel.
 
-Tercer bloque operativo implementado: runner de produccion, scripts de servicio Windows mediante NSSM, comprobador de readiness y script de firewall LAN privado. Los scripts no se ejecutan automaticamente; quedan preparados para despliegue manual.
+## 5. Cómo elige los modelos
 
-## Funcionalidades
+**Para empezar:** no todos los modelos valen para todo, y algunos fallan más que otros. El broker aprende de la experiencia: recuerda qué modelos responden bien, rápido y barato, y prefiere esos. Y antes de usar un modelo comprueba qué sabe hacer de verdad (¿entiende imágenes? ¿puede usar herramientas?), en lugar de fiarse del nombre.
 
-### 1. Consenso multi-LLM (*mixture of agents*)
+**Las capas de decisión:** primero se filtran los candidatos (proveedores permitidos, política cloud/local, capacidad requerida, ventana de contexto suficiente); después se reordenan por un score multiobjetivo sobre evidencia real — tasa de éxito con suavizado de Laplace, latencia y coste medios normalizados min-max — calculado sobre `model_invocations` en una ventana configurable. Un modelo sin historial puntúa neutro (el arranque en frío no castiga). `target_model`/`preferred_model` mantienen prioridad absoluta.
 
-- **Estrategia `single`**: inferencia con un solo modelo (modo legacy)
-- **Estrategia `mixture_of_agents/fast`**: consenso técnico con múltiples proponentes y un árbitro, ejecutados serialmente
-- **Estrategia `mixture_of_agents/slow`**: proponentes paralelos o por oleadas y árbitro posterior
-- **Presets implementados**: `fast` y base funcional de `slow`; su activación productiva requiere todavía smoke tests con providers reales y telemetría completa de recursos
-- Pipeline implementado: `resource_planning → proposing → synthesizing`
-- **Roles con system prompt real**: cada proponente recibe un system prompt según su rol (`generalist`, `specialist`, `skeptic`, `analyst`, `reviewer`) y el árbitro sintetiza con la petición original y los candidatos delimitados (`<original_request>`, `<candidate_N>`), tratándolos como datos y no como instrucciones. La estrategia `single` sigue siendo transparente, sin system prompt
-- Trazabilidad total: cada invocación individual queda registrada con tokens, coste y latencia
+**Detalle técnico — jerarquía de evidencia sobre capacidades:** sondeo real contra el endpoint (peticiones de 1 token para chat/visión/JSON/tools, persistidas en `features` con timestamp) > capacidades declaradas por el runtime (Ollama `/api/show`) > catálogo externo [models.dev](https://models.dev) (opt-in, descarga diaria cacheada en disco: contexto real, precios por 1M, corte de conocimiento) > heurística por nombre. El catálogo rellena huecos, nunca pisa un dato verificado. La compatibilidad distingue `incompatible` (error de contrato 400/404/422: vetado) de `error` (fallo temporal 5xx/timeout: se reintenta). El preflight de contexto usa una cota superior conservadora de tokens y **nunca** trunca en silencio: si no cabe, recorta `max_output_tokens` o falla con `CONTEXT_LIMIT_EXCEEDED` explicando los números.
 
-### 2. Planificación de recursos
+## 6. Recursos: una GPU, muchos modelos
 
-- **Modo efectivo actual**: `sequential`; `slow` habilitará `parallel`, `waves` o `sequential` según recursos
-- Cálculo preventivo de capacidad según VRAM disponible (`local_vram_budget_gb`)
-- Nunca se activan dos workflows. `single/fast` usan una invocación; `slow` podrá admitir varias invocaciones de proponentes dentro de ese workflow
-- Reserva de VRAM por tarea y modelo
+**Para empezar:** los modelos locales compiten por la memoria de tu tarjeta gráfica. El broker actúa de árbitro: calcula qué cabe, reserva sitio antes de lanzar nada, y si no caben todos a la vez, los ejecuta por tandas.
 
-### 3. Cola durable con event sourcing
+**Detalle técnico:** un solo workflow activo global (`max_active_workflows: 1`, validado en config); dentro de un mixture `slow`, el `ResourceScheduler` decide `parallel`/`waves`/`sequential` según la VRAM reservable (`local_vram_budget_gb` − margen de seguridad), con leases de VRAM por modelo y `max_parallel_invocations` (`auto` = fórmula conservadora compartida entre planificador y semáforo de ejecución del router, para que el plan nunca prometa paralelismo que el router no concede). Los proveedores cloud no consumen VRAM pero sí presupuesto (`max_cost_usd` preventivo y acumulado) y cuotas. `unload_after_task` descarga modelos al terminar.
 
-- Aceptación asíncrona (`202 Accepted`) con persistencia inmediata
-- Cola ordenada por prioridad y posición
-- Reordenación mediante PATCH
-- Cancelación idempotente con flag `cancel_requested`
-- Sistema completo de eventos (`task.created`, `task.status_changed`, `task.cancelled`, `task.recovered`, `queue.reordered`, `model_invocation.completed`, `artifact.created`)
-- Recuperación automática al arranque: tareas en estado activo vuelven a `queued` con incremento de `attempt`
-- Creación idempotente con `idempotency_key` y hash canónico: replay idéntico devuelve `200`; contenido distinto devuelve `409`
-- Dispatcher autónomo de fondo; `/api/v1/dispatcher/tick` queda para diagnóstico y pruebas
-- Reclamación atómica `queued → routing` dentro de `BEGIN IMMEDIATE`; el dispatcher automático y el tick manual no pueden activar dos workflows
+## 7. Compresión de prompts
 
-### 4. Artefactos con integridad criptográfica
+**Para empezar:** buena parte de un mensaje humano son cortesías y relleno que al modelo no le aportan ("hola, por favor, ¿podrías…?"). El broker puede podarlas antes de enviar, ahorrando tokens (= tiempo y dinero) sin tocar lo importante. Tu texto original nunca se pierde: solo viaja recortado.
 
-- Escritura atómica (temp file + `os.replace`)
-- Hash SHA-256 de cada artefacto
-- Almacenamiento por tarea en `state/tasks/{task_id}/`
-- Trazabilidad en BD: cada artefacto vinculado a su invocación y run de consenso
+**Detalle técnico:** servicio determinista por reglas (adaptación a español de caveman/caveman-micro/ponytail) con tres niveles (`light`/`medium`/`aggressive`); código en fences e inline, URLs y correos se preservan byte a byte; los embeddings nunca se comprimen; si quedara menos del 20% del texto, se envía el original. Override por tarea en el contrato (`prompt_compression: off|light|medium|aggressive`), selector en el probador y vista previa fiel. Cada compresión efectiva persiste como evento `prompt.compressed` (exento de la poda de eventos) con el texto que realmente viajó. Especificación: [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md).
 
-### 5. Selección de modelos
+## 8. El panel de control
 
-- **Modos**: `auto`, `manual`, `hybrid`
-- Política de diversidad (`different_families`)
-- Proponentes requeridos y preferidos
-- Árbitro explícito o automático (`strongest_available`)
-- Política de sustitución si un modelo no está disponible
-- Catálogo real de Ollama (`/api/tags` + `/api/show`) sin listas hardcodeadas
-- Hugging Face local opcional con modelos descargados en disco y cargados con `transformers`
-- DeepSeek opcional con credencial en variable de entorno o Windows Credential Manager
-- Analisis de compatibilidad por tandas, sin repetir modelos ya comprobados cuando `probe_skip_checked` esta activo
-- Control preventivo y acumulado de `max_cost_usd`
-- Selección exacta opcional mediante `target_model.provider/deployment/model`
-- Timeout efectivo de tarea con cancelación de las operaciones provider pendientes
-
-### 6. Configuración declarativa
-
-- Archivo YAML (`broker_config.yaml`) con merge profundo sobre defaults
-- Secciones: `server`, `persistence`, `processing`, `prompt_compression`, `resources`, `health`, `logging`, `providers`
-- Validación en arranque via Pydantic
-
-Para modelos locales se usa LM Studio (proveedor `custom` OpenAI-compatible): descarga modelos de Hugging Face en formato GGUF cuantizado y los expone en `http://127.0.0.1:1234/v1`. El antiguo proveedor `huggingface_local` (ejecución in-process con transformers) se retiró en julio 2026 por redundante; está en el historial de git si hiciera falta recuperarlo.
-
-Ejemplo minimo para LM Studio local:
-
-```yaml
-providers:
-  custom:
-    - id: lmstudio
-      enabled: true
-      adapter: openai_compatible
-      display_name: LM Studio
-      base_url: http://127.0.0.1:1234/v1
-      api_key_env: null
-      deployment: local
-      auto_start: true
-      sync_models: true
-      default_context_window: 32768
-      models: []
-```
-
-LM Studio debe tener activo su servidor local OpenAI-compatible. Con `auto_start: true`, el Broker ejecuta `lms server status` al arrancar y, si el servidor no esta corriendo, lanza `lms server start --port <puerto de base_url>`. Con `sync_models: true`, el Broker lee el catalogo desde `/v1/models`; si prefieres fijar ventanas de contexto por modelo, puedes desactivar `sync_models` y declarar `models` manualmente.
-
-### 7. Health checks
-
-- Endpoints: `/health` (detallado), `/health/live` (liveness), `/health/ready` (readiness)
-- Dependencias con estado `healthy` / `degraded` / `unavailable`
-- Latencia medida en ms por dependencia
-- SQLite y proveedores configurados; Ollama caído degrada el servicio sin bloquear la cola
-
-### 8. Inferencia transparente
-
-- `inference_kind`: `chat` por defecto o `embedding` local con estrategia `single`
-- Preflight conservador de contexto; nunca trunca, divide o sintetiza silenciosamente
-- Traducción lossless del prompt/input al proveedor; con `prompt_compression` activo, el prompt de chat se comprime antes del envío (los embeddings nunca se comprimen y el original persiste intacto)
-- JSON y Markdown permanecen opacos para el Broker
-- Resultado con contenido/vector, uso, modelo y fallback
-- Invocación y resultado terminal `single` confirmados en una transacción SQLite
-
-### 9. Probador de Prompts — fase 5.3 base implementada
-
-- Entrada como prompt libre o JSON con validación sintáctica
-- Ejecución contra un modelo exacto o un `mixture_of_agents/fast|slow` determinado manualmente cuando cada preset esté operativo
-- Selección explícita de proponentes, roles y árbitro desde el catálogo real
-- Controles de temperatura, tokens, formato/schema, privacidad, cloud, fallback, timeout y coste
-- Uso obligatorio de la misma API y cola durable; la UI no llama directamente a providers
-- Resultado raw, métricas, modelo efectivo, fallback y metadata de consenso
-- Historial persistente, cancelación y repetición segura; prompts y respuestas siempre escapados
-- Vista comparativa con línea temporal serial para `fast` y carriles concurrentes medidos para `slow`, sin métricas simuladas
-
-Especificaciones: [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md), [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) y [`docs/Mixture_Slow_Concurrency.md`](docs/Mixture_Slow_Concurrency.md).
-
-### 10. Panel operativo — fase 5.2
-
-- Disponible en `GET /dashboard`, sin CDN ni métricas simuladas.
-- Resume cola, tarea activa, latencia, coste real, éxito, salud y VRAM observada.
-- Refresca cada bloque de forma independiente mientras una inferencia está esperando al LLM.
-- Permite subir, bajar y cancelar tareas mediante las mismas operaciones durables del Broker.
-- Las cifras proceden de SQLite, del health check actual o del snapshot de recursos con timestamp.
-- Un fallo del snapshot de Ollama degrada el bloque de recursos a `N/D` sin inutilizar el panel.
-- El historial proactivo de salud y la medición temporal de solapamiento de `slow` siguen pendientes.
-
-### 11. Compresión de prompts
-
-- Servicio determinista por reglas que reduce los tokens del prompt antes de enviarlo a los LLMs, adaptando a español las técnicas de [caveman](https://github.com/JuliusBrussee/caveman), [caveman-micro](https://github.com/kuba-guzik/caveman-micro) y [ponytail](https://github.com/DietrichGebert/ponytail)
-- Tres niveles: `light` (cortesías y aperturas sociales), `medium` (además muletillas, relleno y envoltorios de petición) y `aggressive` (además artículos, estilo caveman)
-- El código (fences e inline), las URLs y los correos se preservan byte a byte; los embeddings nunca se comprimen; si la compresión dejara menos del 20% del texto, se envía el original
-- El prompt original persiste intacto en la base de datos y los artefactos; solo se comprime lo que viaja al proveedor
-- Desactivable desde el panel de configuración del dashboard o desde `broker_config.yaml`; los cambios aplican en caliente
-- Override por tarea: el campo opcional `prompt_compression` del contrato (`off`/`light`/`medium`/`aggressive`) fija la compresión de esa tarea; el probador lo expone como selector
-- Cada compresión efectiva se registra en el log (`prompt.compressed` con caracteres antes/después y ratio) y como evento persistente de la tarea: el detalle muestra el prompt original y el comprimido que viajó
-
-```yaml
-prompt_compression:
-  enabled: true        # false para desactivar el servicio
-  level: medium        # light | medium | aggressive
-  min_chars: 40        # prompts más cortos se envían tal cual
-```
-
-Especificación completa: [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md).
-
-### 12. Enriquecimiento del catálogo (models.dev)
-
-- Con `model_enrichment.enabled: true`, el broker descarga a diario el catálogo gratuito de [models.dev](https://models.dev) (sin clave; caché en disco, sin dependencia de internet para arrancar)
-- Aporta por modelo casado: contexto real, capacidades declaradas (visión/JSON/tools), corte de conocimiento, fecha de publicación y precios de referencia por 1M (solo si el casado es con el proveedor equivalente)
-- Jerarquía de evidencia: sondeo real > declarado por el runtime > catálogo externo > heurística por nombre — el catálogo rellena huecos, nunca pisa un dato verificado
-- En la página Modelos: columna "Precio 1M", contexto enriquecido y capacidades de catálogo en la columna Funciones (marcadas "catálogo:") y en los chips de filtro
-
-```yaml
-model_enrichment:
-  enabled: true        # opt-in; url y refresh_hours configurables
-```
-
-## API
-
-| Endpoint | Método | Descripción |
-|----------|--------|-------------|
-| `/api/v1/tasks` | POST | Crear tarea (`202`) o recuperar la misma operación idempotente (`200`) |
-| `/api/v1/tasks/{id}` | GET | Estado y resultado de tarea |
-| `/api/v1/tasks/{id}` | DELETE | Cancelación idempotente |
-| `/api/v1/queue` | GET | Snapshot de cola (pending / active / terminal) |
-| `/api/v1/queue` | PATCH | Reordenar tareas pendientes |
-| `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico; el dispatcher normal es autónomo |
-| `/api/v1/models` | GET | Modelos disponibles, con compatibilidad y capacidades sondeadas (`features`) |
-| `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo (operativo / no operativo / error temporal / pendiente) |
-| `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo; el sondeo real prevalece sobre la inferencia por nombre |
-| `/api/v1/capabilities` | GET | Versión de contrato (2.2), presets, scheduling, límites y `prompt_compression_override` |
-| `/api/v1/usage` | GET | Uso mensual por proveedor |
-| `/api/v1/dashboard/summary` | GET | Resumen operativo por ventana temporal |
-| `/api/v1/dashboard/tasks` | GET | Tareas paginadas y filtrables |
-| `/api/v1/dashboard/tasks/{id}` | GET | Request, resultado, invocaciones y eventos de una tarea |
-| `/api/v1/dashboard/resources` | GET | Snapshot de VRAM, reservas, leases y modelos cargados |
-| `/dashboard` | GET | Panel operativo local |
-| `/dashboard/prompt-tester` | GET | Probador de Prompts |
-| `/dashboard/comparison` | GET | Comparador de tareas `mixture_of_agents` |
-| `/dashboard/fragments/*` | GET | Fragmentos de resumen, cola, tarea activa, salud y recursos |
-| `/dashboard/actions/prompt-tester` | POST | Validar o encolar una prueba de prompt |
-| `/dashboard/actions/queue/{id}/{direction}` | POST | Subir o bajar una tarea pendiente |
-| `/dashboard/actions/tasks/{id}/cancel` | POST | Solicitar cancelación desde el panel |
-| `/health` | GET | Estado detallado de dependencias |
-| `/health/live` | GET | Liveness del proceso |
-| `/health/ready` | GET | Readiness de SQLite y dispatcher |
-
-## Esquema de petición
-
-```json
-{
-  "idempotency_key": "orchestrator:capture-001:1:single",
-  "request_id": "cli-001",
-  "inference_kind": "chat",
-  "content": {
-    "prompt": "Analiza el impacto...",
-    "attachments": [],
-    "metadata": {}
-  },
-  "output": {
-    "format": "markdown",
-    "language": "es"
-  },
-  "generation": {
-    "temperature": 0.3,
-    "max_output_tokens": 4000
-  },
-  "model_requirements": {
-    "preferred_model": null,
-    "fallback_allowed": true,
-    "cloud_allowed": false,
-    "allowed_providers": ["ollama"],
-    "max_cost_usd": null
-  },
-  "execution": {
-    "strategy": "mixture_of_agents",
-    "preset": "fast",
-    "scheduling": "adaptive",
-    "max_proposers": 3,
-    "max_judges": 1,
-    "max_rounds": 1,
-    "timeout_seconds": 600,
-    "early_stop": true,
-    "selection": {
-      "mode": "auto",
-      "diversity_policy": "different_families",
-      "arbiter_policy": "strongest_available",
-      "proposer_count": 3
-    }
-  },
-  "risk": {
-    "data_classification": "internal",
-    "human_review_required": false
-  },
-  "priority": 100
-}
-```
-
-## Contrato normativo
-
-### Responsabilidad del Broker
-
-El Broker recibe inferencias ya preparadas. Su responsabilidad termina en validar el contrato técnico, encolar, enrutar y devolver la respuesta. Cuando se solicita explícitamente `mixture_of_agents/fast`, aplica un algoritmo técnico versionado de proponentes y árbitro; no crea pasos de negocio, no resuelve placeholders, no divide contenido y no interpreta respuestas.
-
-### API y persistencia
-
-- Validación Pydantic estricta con `extra="forbid"`. Petición inválida → `422 CONTRACT_VALIDATION_FAILED`
-- Persistencia en SQLite WAL (`state/broker.db`)
-- Event sourcing completo: toda mutación registra un evento en la tabla `events`
-- Reordenación validada: requiere la lista completa de IDs pendientes
-
-### Ejecución por consenso
-
-- Un solo workflow activo global (`max_active_workflows: 1`)
-- Un único workflow activo globalmente; `single/fast` ejecutan una llamada cada vez y `slow` permite paralelismo únicamente entre sus proponentes, dentro de límites reservados
-- Cada invocación individual se persiste en `model_invocations`
-- Si no se alcanza quórum mínimo (2 proponentes), la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`
-- Cancelación en cualquier etapa: verifica `cancel_requested` entre invocaciones
-
-### Seguridad (MVP)
-
-- Sin autenticación entre cliente y broker (solo LAN privada, CORS desactivado por defecto)
-- Clasificación de datos: `public`, `internal`, `confidential`, `local_only`
-- Modo `local_only`: conserva solo proveedores locales (`ollama` y `lmstudio`) y deshabilita cloud automáticamente
-
-### Recuperación
-
-- Al arrancar: tareas en estado activo se devuelven a `queued` con `attempt + 1`
-- Límite de reintentos: al superar `processing.max_task_attempts` (3 por defecto), la tarea interrumpida pasa a `failed` con `TASK_RETRY_LIMIT_EXCEEDED` en lugar de re-encolarse indefinidamente
-- Reconciliación de artefactos huérfanos
-- Integridad referencial vía foreign keys con `ON DELETE CASCADE`
-
-## Estados de progreso
-
-### Estrategia `single`
-```
-queued → generating → completed
-```
-
-### Estrategia `mixture_of_agents` / preset `fast`
-```
-queued → resource_planning → proposing → synthesizing → completed
-```
-
-### Estrategia `mixture_of_agents` / preset `slow`
-```
-queued → resource_planning → proposing (parallel/waves/sequential) → synthesizing → completed
-```
-
-### Estados reservados para `standard`, `verified`, `high_stakes` — no implementados
-```
-queued → resource_planning → proposing → evaluating → synthesizing → completed
-```
-
-Cada tarea puede terminal en `completed`, `failed` o `cancelled` desde cualquier estado.
-
-## Inicio rápido
+**Para empezar:** todo lo anterior se maneja desde el navegador en `http://127.0.0.1:8765/dashboard`, sin instalar nada más. Puedes probar prompts, subir ficheros, ver la cola, comparar respuestas de varios modelos y cambiar la configuración — con confirmaciones antes de guardar y sin necesidad de tocar ficheros a mano.
+
+| Página | Qué ofrece |
+|---|---|
+| **Resumen** | Cola, tarea activa, latencias, coste, salud y VRAM en tiempo real |
+| **Tareas** | Cola reordenable, historial, detalle con eventos/invocaciones/prompts |
+| **Probador** | Validar y encolar pruebas de cualquier estrategia con adjuntos y skills |
+| **Comparación** | Carriles temporales medidos de un mixture (sin paralelismo simulado) |
+| **Modelos** | Catálogo con compatibilidad sondeada, capacidades, precios y filtros |
+| **Ficheros** | Subir adjuntos, ver estado de conversión, tokens estimados, Markdown |
+| **Enrutamiento** | Qué ha aprendido el meta-router por tipo de petición |
+| **Configuración** | Límites, compresión, ingesta, sandbox, router y proveedores en caliente |
+
+**Detalle técnico:** Jinja2 + fragmentos hipermedia (HTMX) con recursos 100% locales (sin CDN), auto-refresco por bloque con backoff exponencial, pausa con pestaña oculta y banner de conexión persistente en lugar de tormenta de toasts. Sin métricas simuladas: todo sale de SQLite, del health check o del snapshot de recursos con timestamp. Los cambios de Configuración se escriben al YAML de forma atómica con detección de edición concurrente (huella SHA-256 del fichero en el formulario) y revisión de cambios antes de aplicar; las secciones aplican en caliente (los servicios leen el `BrokerConfig` compartido en vivo).
+
+## 9. Privacidad y seguridad
+
+**Para empezar:** el broker está pensado para que tus datos no salgan de tu ordenador salvo que tú lo permitas expresamente. Puedes marcar una tarea como "solo local" y ningún proveedor de nube la verá jamás. Y todo lo que entra de fuera — documentos, páginas web, respuestas de modelos — se trata como datos, nunca como órdenes.
+
+**Capas de defensa:**
+
+- **Frontera de datos:** `data_classification: local_only` fuerza proveedores locales y desactiva cloud a nivel de contrato (validación, no convención). `cloud_allowed: false` es el default.
+- **Anti-inyección sistemática:** candidatos del consenso, resultados de skills y documentos adjuntos viajan en sandboxes XML con delimitadores neutralizados; los system prompts marcan ese contenido como datos no confiables.
+- **SSRF:** `fetch_url` resuelve DNS y rechaza cualquier host no público (el dashboard del propio broker incluido).
+- **Sandbox:** el código generado por modelos jamás toca el host (sección 4).
+- **Panel:** CSRF de doble envío + validación `Origin`/`Referer`, cabeceras CSP/`X-Frame-Options`/`nosniff`, sesión admin con cookie HttpOnly y caducidad deslizante. Con token admin configurado (env `AI_BROKER_ADMIN_TOKEN` o keyring `ai-broker/dashboard_admin_token`), toda lectura con prompts/resultados exige credencial. Arranque fail-closed: el broker se niega a escuchar fuera de loopback sin token (opt-out explícito `allow_unauthenticated_lan`).
+- **Credenciales:** claves de API en variables de entorno o Windows Credential Manager (keyring), nunca en el YAML.
+- **Logs:** JSON Lines con rotación; el access log no registra cuerpos, prompts ni respuestas.
+
+## 10. Puesta en marcha
+
+**Lo más simple (Windows):** doble clic en `arrancar_ai_broker.bat`, abre `http://127.0.0.1:8765/dashboard`. Para parar, `parar_ai_broker.bat`; para ver el estado, `estado_ai_broker.bat`.
+
+**Instalación desde cero:**
 
 ```bash
 python -m venv .venv
@@ -353,91 +125,129 @@ python -m venv .venv
 .venv\Scripts\python scripts\run_broker.py --config broker_config.yaml
 ```
 
-El entorno es reproducible en cualquier PC: `requirements.lock` congela las
-versiones exactas (directas y transitivas) con las que pasa la suite. El venv
-no se puede copiar entre máquinas (guarda rutas absolutas); recréalo siempre
-con los comandos de arriba. Para actualizar dependencias: `pip install -e
-.[dev]`, pasar los tests y regenerar el lock con
-`pip freeze --exclude-editable > requirements.lock`.
+**Capacidades opcionales y sus requisitos:**
 
-Verificación local:
+| Capacidad | Requisito |
+|---|---|
+| Ingesta de documentos/imágenes/audio | `pip install "ai-broker[ingestion]"` (Docling, MarkItDown, faster-whisper) |
+| Transcripción de vídeo | Además, `ffmpeg` (PATH o `ingestion.transcription.ffmpeg_path`) |
+| Descripción de figuras | Un endpoint OpenAI-compatible con modelo de visión (p. ej. LM Studio) |
+| Sandbox `run_code` | Docker Desktop en marcha + `docker build -t ai-broker-sandbox:latest sandbox/` |
+| DeepSeek / NVIDIA cloud | Clave en keyring: `python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_api_key',getpass.getpass())"` |
 
-```bash
-.venv\Scripts\python -m pytest --cov=app --cov-report=term-missing
-.venv\Scripts\python -m ruff check .
-.venv\Scripts\python -m mypy
+**Detalle técnico:** `requirements.lock` congela versiones directas y transitivas (regenerar con `pip freeze --exclude-editable > requirements.lock` tras pasar la suite). La app se construye con factory (no hay instancia global): desarrollo con `uvicorn app.main:create_app --factory --reload --port 8765`. Verificación local: `pytest --cov=app --cov-report=term-missing` (cobertura mínima 90% en CI, Windows + Ubuntu), `ruff check .`, `mypy`. Servicio Windows vía NSSM (`scripts/install_windows_service.ps1`), readiness con `scripts/check_readiness.py`, firewall LAN con `scripts/configure_firewall_lan.ps1`. Backup/restore atómico con manifest SHA-256: `scripts/backup_state.py backup|verify|restore`. Retenciones configurables en `persistence`: eventos (`events_retention_days`), artefactos (`artifacts_retention_days`) y ficheros ingeridos (`files_retention_days`); `0` = conservar siempre.
+
+## 11. API para desarrolladores
+
+**Para empezar:** cualquier aplicación puede usar el broker con tres llamadas HTTP: crear la tarea, consultar su estado, recoger el resultado. No hace falta SDK.
+
+**El ciclo básico:**
+
+```
+POST /api/v1/tasks  →  202 { task_id, status_url }
+GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 ```
 
-Para desarrollo con autoreload (la app se construye con la factory; no existe
-una instancia global `app.main:app`):
+**Petición mínima y petición completa:**
 
-```bash
-uvicorn app.main:create_app --factory --reload --port 8080
+```json
+{ "idempotency_key": "app:informe-42", "content": { "prompt": "Resume esto" } }
 ```
 
-Abre `http://127.0.0.1:8080/dashboard` para usar el panel operativo. Para una previsualización aislada con SQLite temporal y provider de prueba:
-
-```powershell
-python scripts/preview_dashboard.py --port 8765 --database "$env:TEMP\ai-broker-preview.db"
+```json
+{
+  "idempotency_key": "app:informe-42:consenso",
+  "inference_kind": "chat",
+  "content": {
+    "prompt": "Analiza el informe adjunto y extrae riesgos",
+    "attachments": [
+      { "type": "broker_file", "metadata": { "file_id": "file_abc123" } }
+    ]
+  },
+  "output": { "format": "markdown", "language": "es" },
+  "generation": { "temperature": 0.3, "max_output_tokens": 4000 },
+  "model_requirements": {
+    "cloud_allowed": false,
+    "allowed_providers": ["ollama", "lmstudio"],
+    "max_cost_usd": 0.5
+  },
+  "execution": {
+    "strategy": "auto",
+    "timeout_seconds": 600
+  },
+  "risk": { "data_classification": "local_only" },
+  "prompt_compression": "off",
+  "priority": 100
+}
 ```
 
-Para activar DeepSeek, configura sus precios en `broker_config.yaml`, cambia `providers.deepseek.enabled` a `true` y guarda la clave sin mostrarla en consola:
+**Endpoints:**
 
-```powershell
-python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_api_key',getpass.getpass('DeepSeek API key: '))"
-```
+| Endpoint | Método | Descripción |
+|----------|--------|-------------|
+| `/api/v1/tasks` | POST | Crear tarea (`202`); replay idempotente devuelve `200`; conflicto `409` |
+| `/api/v1/tasks/{id}` | GET | Estado, progreso y resultado |
+| `/api/v1/tasks/{id}` | DELETE | Cancelación idempotente |
+| `/api/v1/tasks/{id}/tool_results` | POST | Resolver tools del cliente y reanudar (`waiting_for_tools`) |
+| `/api/v1/files` | POST | Subir fichero adjunto (multipart, `202`, dedupe SHA-256) |
+| `/api/v1/files/{id}` | GET | Estado de conversión, metadatos, tokens estimados |
+| `/api/v1/files/{id}/markdown` | GET | Markdown resultante (cuando `ready`) |
+| `/api/v1/queue` | GET / PATCH | Snapshot de cola / reordenar pendientes |
+| `/api/v1/models` | GET | Catálogo con compatibilidad y capacidades sondeadas |
+| `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
+| `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo |
+| `/api/v1/capabilities` | GET | Contrato 2.4: estrategias, presets, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `agent_skills`, flags del router |
+| `/api/v1/usage` | GET | Uso mensual por proveedor |
+| `/api/v1/dashboard/*` | GET | Read models: summary, tasks, resources |
+| `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico (el dispatcher es autónomo) |
+| `/health` `/health/live` `/health/ready` | GET | Salud detallada, liveness, readiness |
 
-Backup operativo:
+**Detalle técnico del contrato:** validación Pydantic estricta (`extra="forbid"`; inválido → `422 CONTRACT_VALIDATION_FAILED` con campos). Idempotencia por `idempotency_key` + hash canónico del cuerpo: mismo cuerpo → `200` con la tarea original; cuerpo distinto → `409 IDEMPOTENCY_CONFLICT`. Adjuntos: solo `type: "broker_file"` con `file_id` (por `metadata.file_id` o `uri: broker://files/{id}`); ficheros no listos → `409 ATTACHED_FILE_NOT_READY`. Estados de progreso: `queued → routing/planning/resource_planning → generating|proposing → (evaluating) → synthesizing → completed`, más `waiting_for_tools`, y terminales `completed|failed|cancelled` desde cualquier estado. Recuperación al arranque: tareas activas vuelven a `queued` con `attempt+1` hasta `max_task_attempts` (después `failed` con `TASK_RETRY_LIMIT_EXCEEDED`). Guía de integración completa: [`Agent_AI_Broker.md`](Agent_AI_Broker.md).
 
-```powershell
-python scripts/backup_state.py backup --database state/broker.db --artifacts state/tasks --output backups/ai-broker-state.zip
-python scripts/backup_state.py verify --backup backups/ai-broker-state.zip
-python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --database state/broker.db --artifacts state/tasks --replace
-```
-
-Servicio Windows y readiness:
-
-```powershell
-python scripts/run_broker.py --config broker_config.yaml
-.\scripts\install_windows_service.ps1 -ServiceName "AI-Broker" -ProjectRoot "D:\Desarrollo\Proyectos TFM\AI_Broker"
-Start-Service "AI-Broker"
-python scripts/check_readiness.py --url http://127.0.0.1:8080/health/ready --timeout 60
-.\scripts\configure_firewall_lan.ps1 -Port 8080 -WhatIf
-```
-
-## Estructura del proyecto
+## 12. Estructura del proyecto
 
 ```
 ├── app/
-│   ├── artifacts.py        # Almacén atómico con hash SHA-256
-│   ├── config.py           # Configuración YAML + merge profundo
-│   ├── coordinator.py      # Orquestador de consenso multi-LLM
-│   ├── db.py               # SQLite con WAL, schema y event sourcing
-│   ├── dashboard.py        # Read models paginados y métricas operativas
-│   ├── dashboard_filters.py # Filtros Jinja2 del panel
-│   ├── dashboard_web.py    # Rutas HTML, fragmentos y acciones del panel
-│   ├── main.py             # FastAPI app + endpoints
-│   ├── prompt_compressor.py # Compresión de prompts antes de la inferencia
-│   ├── providers/          # Paquete de proveedores: base, ollama, deepseek,
-│   │                       # openai_compatible, routing, bootstrap
-│   ├── repository.py       # Capa de acceso a datos
-│   ├── resource_scheduler.py  # Planificador adaptativo de recursos
-│   ├── schemas.py          # Modelos Pydantic (contrato completo)
-│   ├── static/             # CSS y runtime hipermedia locales
-│   └── templates/          # Plantillas Jinja2 del panel
-├── scripts/
-│   └── preview_dashboard.py # Servidor de previsualización local
-├── tests/
-│   ├── test_api.py         # Tests de integración de API
-│   ├── test_contract.py    # Tests de validación de contrato
-│   ├── test_prompt_compressor.py # Tests del servicio de compresión de prompts
-│   ├── test_providers.py   # Tests de proveedores, routing, VRAM y presupuesto
-│   └── test_phase_four_inference.py  # Contexto, embeddings y resultados opacos
-├── broker_config.yaml      # Configuración del broker
-├── pyproject.toml          # Proyecto Python + dependencias
-└── state/tasks/            # Artefactos de ejecución (gitignored)
+│   ├── main.py                # FastAPI app (factory) + endpoints API
+│   ├── schemas.py             # Contrato Pydantic completo (v2.4)
+│   ├── coordinator.py         # Orquestación: single, mixture, agent, auto
+│   ├── strategy_router.py     # Meta-router: clasificador + aprendizaje
+│   ├── skills.py              # Skills del agente (web, URL, cálculo, código)
+│   ├── sandbox.py             # Ejecutor Docker aislado (skill run_code)
+│   ├── ingestion/             # Ficheros adjuntos: detección, motores, servicio
+│   ├── providers/             # Ollama, DeepSeek, OpenAI-compatible, routing
+│   ├── resource_scheduler.py  # Planificación de VRAM y oleadas
+│   ├── model_enrichment.py    # Catálogo externo models.dev
+│   ├── prompt_compressor.py   # Compresión de prompts
+│   ├── repository.py          # Acceso a datos (tareas, cola, invocaciones)
+│   ├── db.py                  # SQLite WAL + esquema + event sourcing
+│   ├── dashboard*.py          # Read models, rutas, formularios y filtros del panel
+│   ├── artifacts.py           # Artefactos atómicos con SHA-256
+│   ├── maintenance.py         # Backup/restore y podas de retención
+│   └── templates/ static/     # Panel: Jinja2 + CSS/JS locales
+├── sandbox/Dockerfile         # Imagen del sandbox (pandas, numpy, matplotlib)
+├── scripts/                   # Runner, servicio Windows, backup, readiness
+├── tests/                     # Suite completa + corpus dorado de ingesta
+├── docs/                      # Documentación por fases y especificaciones
+├── broker_config.yaml         # Configuración declarativa (editable en el panel)
+└── state/                     # BD, artefactos y ficheros ingeridos (gitignored)
 ```
 
-## Licencia
+## 13. Documentación
+
+| Documento | Contenido |
+|---|---|
+| [`Agent_AI_Broker.md`](Agent_AI_Broker.md) | Guía de integración para aplicaciones cliente (contrato normativo) |
+| [`Deployment_Guide.md`](Deployment_Guide.md) | Despliegue completo en Windows |
+| [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md) | Ingesta de ficheros adjuntos |
+| [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md) | Sandbox de ejecución de código |
+| [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) | Panel operativo (normativo para las pantallas) |
+| [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md) | Compresión de prompts |
+| [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md) | Probador de prompts |
+| [`docs/Mixture_Slow_Concurrency.md`](docs/Mixture_Slow_Concurrency.md) | Concurrencia del preset slow |
+| [`docs/Phase_6_Operations.md`](docs/Phase_6_Operations.md) | Operación: backup, logging, servicio |
+| [`AI_Broker_consenso_multi_LLM.md`](AI_Broker_consenso_multi_LLM.md) | Diseño original del consenso multi-LLM |
+
+## 14. Licencia
 
 MIT

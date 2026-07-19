@@ -49,6 +49,8 @@ El punto de aplicación es `RoutedModelProvider.user_prompt` (`app/providers/rou
 
 Cada tarea puede fijar su propia compresión con el campo opcional `prompt_compression` del contrato (`POST /api/v1/tasks`): `"off"` envía el prompt tal cual aunque el servicio global esté activo, y `"light"`/`"medium"`/`"aggressive"` sustituyen al nivel global solo para esa tarea. Ausente = configuración global. `min_chars` es siempre el global: el override cambia cuánto se comprime, no la regla de prompts cortos. El probador del dashboard expone esta elección en el selector "Compresión del prompt para esta prueba", y su vista previa replica exactamente lo que hará el router. El flag `prompt_compression_override: true` de `GET /api/v1/capabilities` anuncia el soporte.
 
+**Interacción con ficheros adjuntos (fase 7):** cuando una tarea lleva adjuntos `broker_file`, la expansión del prompt fija la compresión a `off` salvo que la tarea traiga un override explícito. Motivo: el Markdown de un documento contiene tablas, cifras y código que la poda léxica corrompería. El prompt original del cliente se conserva en `request_json` en cualquier caso.
+
 ## Configuración
 
 En `broker_config.yaml`:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -11,9 +12,11 @@ import httpx
 from app.config import OpenAICompatibleProviderConfig
 from app.providers.base import (
     PROBE_HARD_MAX_MODELS,
+    AgentTurn,
     CredentialResolver,
     ModelOutput,
     ProviderError,
+    ToolCall,
     _CatalogCache,
     _estimation_text,
     classify_probe_http_error,
@@ -460,6 +463,69 @@ class OpenAICompatibleProvider:
             cost_usd=cost,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             embedding=tuple(float(value) for value in vector),
+        )
+
+    async def chat_tools(
+        self,
+        request: TaskCreateRequest,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AgentTurn:
+        """Una ronda de /chat/completions con tools. Devuelve la respuesta del
+        modelo (contenido final o tool_calls) sin ejecutar nada: el coordinador
+        ejecuta las skills y decide si continúa el loop."""
+        input_cost, output_cost = self._costs(model)
+        started = datetime.now(timezone.utc)
+        payload_body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": request.generation.temperature,
+            "max_tokens": request.generation.max_output_tokens,
+            "stream": False,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        try:
+            response = await self.client.post("/chat/completions", headers=self._headers(), json=payload_body)
+            response.raise_for_status()
+            payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
+        choices = payload.get("choices") or []
+        message = (choices[0].get("message") if choices else None) or {}
+        tool_calls: list[ToolCall] = []
+        for index, raw in enumerate(message.get("tool_calls") or []):
+            function = raw.get("function") or {}
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            tool_calls.append(ToolCall(
+                id=str(raw.get("id") or f"call_{index}"),
+                name=str(function.get("name") or ""),
+                arguments=arguments if isinstance(arguments, dict) else {},
+            ))
+        usage = payload.get("usage") or {}
+        input_tokens = int(usage.get("prompt_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or 0)
+        content = message.get("content")
+        return AgentTurn(
+            content=content if isinstance(content, str) else None,
+            tool_calls=tuple(tool_calls),
+            tokens_input=input_tokens,
+            tokens_output=output_tokens,
+            cost_usd=(input_tokens * input_cost + output_tokens * output_cost) / 1_000_000,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            raw_assistant_message=message,
         )
 
     async def generate(

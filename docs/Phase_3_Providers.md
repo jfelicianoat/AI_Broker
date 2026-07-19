@@ -4,6 +4,8 @@
 
 Completada el 2026-06-23.
 
+> **Nota histórica (julio 2026):** el proveedor `huggingface_local` mencionado en este documento se retiró por redundante con LM Studio (proveedor `custom` OpenAI-compatible que sirve GGUF locales en `http://127.0.0.1:1234/v1`). Los proveedores vigentes son `ollama`, `deepseek` y los `custom` OpenAI-compatible; `local_only` acepta como locales `ollama` y `lmstudio`. El resto del flujo descrito aquí sigue siendo válido.
+
 ## Flujo operativo
 
 1. El router obtiene el catálogo habilitado de Ollama, Hugging Face local y, opcionalmente, DeepSeek.

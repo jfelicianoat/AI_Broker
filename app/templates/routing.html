@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+
+{% block title %}AI Broker — Enrutamiento{% endblock %}
+
+{% block topbar_state %}
+  <div>
+    <strong>Enrutamiento de estrategia</strong>
+    <small>Qué ha aprendido el meta-router por tipo de petición.</small>
+  </div>
+{% endblock %}
+
+{% block topbar_actions %}
+  <a class="button secondary" href="/dashboard/config">Configurar router</a>
+{% endblock %}
+
+{% block content %}
+  {% if not router.enabled %}
+    <div class="alert warning">
+      <strong>Meta-router desactivado</strong>
+      <p>Las peticiones con <code>strategy: auto</code> se resuelven a modelo único. Actívalo en <a href="/dashboard/config">Configuración</a> para clasificar, escalar y aprender.</p>
+    </div>
+  {% else %}
+    <div class="alert info">
+      <strong>Estado del router</strong>
+      <p>Clasificador heurístico {{ 'activo' if router.heuristic_classifier else 'inactivo' }} · escalado por confianza {{ 'activo' if router.confidence_escalation else 'inactivo' }} · aprendizaje {{ 'activo' if router.adaptive_learning else 'inactivo' }}. Aprende con {{ router.learning_min_cases }} casos por tipo.</p>
+    </div>
+  {% endif %}
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <h2>Aprendizaje por tipo de petición</h2>
+        <p>Cada fila es un grupo de peticiones con las mismas señales. La recomendación es la que el router aplicaría ahora con esta evidencia.</p>
+      </div>
+      <span class="badge badge-neutral">{{ buckets|length }} tipos</span>
+    </div>
+    {% if buckets %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Tipo de petición</th>
+              <th>Casos</th>
+              <th>Estrategias (éxito)</th>
+              <th>Escalado de single</th>
+              <th>Recomendación aprendida</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for bucket in buckets %}
+              <tr>
+                <td><strong>{{ bucket.label }}</strong></td>
+                <td>{{ bucket.total }}</td>
+                <td>
+                  {% for strat in bucket.strategies %}
+                    <div class="routing-strat"><span>{{ strat.name }}</span> <small>{{ strat.total }} · {{ strat.success_rate }}% éxito</small></div>
+                  {% endfor %}
+                </td>
+                <td>
+                  {% if bucket.single_chosen %}
+                    <span class="badge {{ 'badge-failed' if bucket.escalation_rate >= 50 else 'badge-neutral' }}">{{ bucket.escalation_rate }}%</span>
+                    <small>({{ bucket.single_chosen }} intentos)</small>
+                  {% else %}
+                    <small>—</small>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if bucket.recommendation %}
+                    <span class="badge badge-completed">{{ bucket.recommendation.strategy }}</span>
+                    <small class="routing-reason">aprendido; la heurística elegiría <em>{{ bucket.heuristic }}</em>. {{ bucket.recommendation.reason }}</small>
+                  {% else %}
+                    <small>sigue la heurística (<em>{{ bucket.heuristic }}</em>) — sin evidencia suficiente para cambiar</small>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <strong>Aún no hay casos</strong>
+        <p>Envía peticiones con <code>strategy: auto</code> (o desde el probador) para que el router acumule evidencia por tipo de petición.</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

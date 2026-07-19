@@ -440,6 +440,178 @@ class TaskRepository:
             (task_id, event_type, dumps_json(payload), _utc_now_iso()),
         )
 
+    def record_routing_case(
+        self,
+        task_id: str,
+        signal_bucket: str,
+        chosen_strategy: str,
+        final_strategy: str,
+        escalated: bool,
+        status: str,
+        cost_usd: float,
+        latency_ms: float | None,
+    ) -> None:
+        """Persiste un caso de enrutamiento (señales → decisión → resultado) para
+        que el aprendizaje adaptativo (pieza 3) aprenda de la evidencia."""
+        self.db.execute(
+            "INSERT INTO routing_cases (task_id, signal_bucket, chosen_strategy, final_strategy, "
+            "escalated, status, cost_usd, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                task_id, signal_bucket, chosen_strategy, final_strategy,
+                1 if escalated else 0, status, float(cost_usd), latency_ms, _utc_now_iso(),
+            ),
+        )
+
+    def routing_cases_for_bucket(self, signal_bucket: str, limit: int = 500) -> list[dict[str, Any]]:
+        rows = self.db.query_all(
+            "SELECT chosen_strategy, final_strategy, escalated, status, cost_usd, latency_ms "
+            "FROM routing_cases WHERE signal_bucket = ? ORDER BY created_at DESC LIMIT ?",
+            (signal_bucket, limit),
+        )
+        return [
+            {
+                "chosen_strategy": row["chosen_strategy"],
+                "final_strategy": row["final_strategy"],
+                "escalated": bool(row["escalated"]),
+                "status": row["status"],
+                "cost_usd": float(row["cost_usd"] or 0),
+                "latency_ms": row["latency_ms"],
+            }
+            for row in rows
+        ]
+
+    def latest_event_payload(self, task_id: str, event_type: str) -> dict[str, Any] | None:
+        row = self.db.query_one(
+            "SELECT payload_json FROM events WHERE task_id = ? AND event_type = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (task_id, event_type),
+        )
+        if row is None:
+            return None
+        payload = loads_json(row["payload_json"], None)
+        return payload if isinstance(payload, dict) else None
+
+    def has_event(self, task_id: str, event_type: str) -> bool:
+        return self.db.query_one(
+            "SELECT 1 FROM events WHERE task_id = ? AND event_type = ? LIMIT 1",
+            (task_id, event_type),
+        ) is not None
+
+    def routing_case_buckets(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Resumen agregado de casos por tipo de petición (bucket de señales):
+        total, escalados, y desglose por estrategia final con tasa de éxito."""
+        rows = self.db.query_all(
+            "SELECT signal_bucket, final_strategy, chosen_strategy, escalated, status, "
+            "COUNT(*) AS n FROM routing_cases "
+            "GROUP BY signal_bucket, final_strategy, chosen_strategy, escalated, status",
+        )
+        buckets: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            bucket = buckets.setdefault(row["signal_bucket"], {
+                "signal_bucket": row["signal_bucket"], "total": 0, "escalated": 0,
+                "single_chosen": 0, "strategies": {},
+            })
+            n = int(row["n"])
+            bucket["total"] += n
+            if row["escalated"]:
+                bucket["escalated"] += n
+            if row["chosen_strategy"] == "single":
+                bucket["single_chosen"] += n
+            strat = bucket["strategies"].setdefault(
+                row["final_strategy"], {"total": 0, "completed": 0},
+            )
+            strat["total"] += n
+            if row["status"] == "completed":
+                strat["completed"] += n
+        ordered = sorted(buckets.values(), key=lambda b: b["total"], reverse=True)
+        return ordered[:limit]
+
+    def task_cost_and_latency(self, task_id: str) -> tuple[float, float | None]:
+        row = self.db.query_one(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS cost, SUM(latency_ms) AS latency "
+            "FROM model_invocations WHERE task_id = ?",
+            (task_id,),
+        )
+        if row is None:
+            return 0.0, None
+        return float(row["cost"] or 0), (float(row["latency"]) if row["latency"] is not None else None)
+
+    def pause_for_client_tools(
+        self,
+        task_id: str,
+        agent_state: dict[str, Any],
+        pending_tool_calls: list[dict[str, Any]],
+        progress: dict[str, Any],
+    ) -> None:
+        """Congela la conversación del agente y deja la tarea a la espera de que
+        el cliente resuelva las tool_calls pendientes (passthrough)."""
+        now = _utc_now_iso()
+        result = {"pending_tool_calls": pending_tool_calls, "status": "waiting_for_tools"}
+        with self.db.transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET status = ?, agent_state_json = ?, progress_json = ?, "
+                "result_json = ?, queue_position = NULL, updated_at = ? WHERE id = ?",
+                (
+                    TaskStatus.waiting_for_tools.value, dumps_json(agent_state),
+                    dumps_json(progress), dumps_json(result), now, task_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "agent.paused", dumps_json({"pending_tool_calls": pending_tool_calls}), now),
+            )
+
+    def load_agent_state(self, task_id: str) -> dict[str, Any] | None:
+        row = self.db.query_one("SELECT agent_state_json FROM tasks WHERE id = ?", (task_id,))
+        if row is None or row["agent_state_json"] is None:
+            return None
+        state = loads_json(row["agent_state_json"], None)
+        return state if isinstance(state, dict) else None
+
+    def resume_with_tool_results(self, task_id: str, tool_results: list[dict[str, str]]) -> None:
+        """Añade los resultados de las tools del cliente a la conversación y
+        re-encola la tarea para que el dispatcher reanude el bucle del agente."""
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT status, agent_state_json FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] != TaskStatus.waiting_for_tools.value:
+                raise ValueError(f"La tarea no está esperando tools (estado {row['status']})")
+            state = loads_json(row["agent_state_json"], None)
+            if not isinstance(state, dict):
+                raise ValueError("No hay estado de agente que reanudar")
+            pending_ids = {str(item.get("id")) for item in state.get("pending_tool_calls") or []}
+            provided_ids = {str(item.get("tool_call_id")) for item in tool_results}
+            if pending_ids != provided_ids:
+                raise ValueError(
+                    f"Los tool_call_id no coinciden con los pendientes: esperados {sorted(pending_ids)}"
+                )
+            messages = list(state.get("messages") or [])
+            for item in tool_results:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": str(item.get("tool_call_id")),
+                    "content": str(item.get("content") or ""),
+                })
+            state["messages"] = messages
+            state["pending_tool_calls"] = []
+            state["resumed"] = True
+            queue_row = connection.execute(
+                "SELECT COALESCE(MAX(queue_position), -1) + 1 AS pos FROM tasks WHERE status = 'queued'"
+            ).fetchone()
+            connection.execute(
+                "UPDATE tasks SET status = 'queued', agent_state_json = ?, result_json = NULL, "
+                "queue_position = ?, updated_at = ? WHERE id = ?",
+                (dumps_json(state), int(queue_row["pos"]), now, task_id),
+            )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "agent.resumed", dumps_json({"tool_results": len(tool_results)}), now),
+            )
+
     def recover_interrupted_tasks(self, max_attempts: int | None = None) -> int:
         """Re-encola tareas interrumpidas según lo que había en vuelo al morir.
 

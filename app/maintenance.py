@@ -217,6 +217,39 @@ def prune_terminal_task_events(db: Any, *, older_than_days: int) -> int:
     return int(cursor.rowcount or 0)
 
 
+def prune_ingested_files(db: Any, files_root: str | Path, *, older_than_days: int) -> int:
+    """Borra ficheros ingeridos (original + Markdown + fila) en estado terminal.
+
+    Solo ready/failed: una conversión en curso nunca se poda. Una tarea encolada
+    que referencie un fichero podado fallará en el despacho con
+    ATTACHED_FILE_NOT_FOUND — retención corta con colas largas es mala idea.
+    Desactivada por defecto (older_than_days <= 0): borrar documentos del
+    usuario debe ser decisión explícita del operador.
+    """
+    if older_than_days <= 0:
+        return 0
+    import shutil
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    rows = db.query_all(
+        "SELECT id FROM ingested_files WHERE status IN ('ready', 'failed') AND updated_at < ?",
+        (cutoff,),
+    )
+    root = Path(files_root)
+    removed = 0
+    for row in rows:
+        file_dir = root / row["id"]
+        try:
+            if file_dir.exists():
+                shutil.rmtree(file_dir)
+        except OSError:
+            continue
+        db.execute("DELETE FROM ingested_files WHERE id = ?", (row["id"],))
+        removed += 1
+    return removed
+
+
 def prune_terminal_task_artifacts(db: Any, artifacts_root: str | Path, *, older_than_days: int) -> int:
     """Borra artefactos en disco (y sus filas) de tareas terminales antiguas.
 

@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+
+{% block title %}AI Broker — Ficheros{% endblock %}
+
+{% block topbar_state %}
+  <div>
+    <strong>Ficheros adjuntos</strong>
+    <small>Documentos, imágenes, audio y vídeo convertidos a Markdown para las tareas.</small>
+  </div>
+{% endblock %}
+
+{% block topbar_actions %}
+  <a class="button secondary" href="/dashboard/prompt-tester">Probador</a>
+{% endblock %}
+
+{% block content %}
+  {% if not ingestion_enabled %}
+    <div class="alert warning">
+      <strong>Ingesta desactivada</strong>
+      <p>Activa <code>ingestion.enabled</code> en la configuración para subir ficheros.</p>
+    </div>
+  {% else %}
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Subir fichero</h2>
+          <p>Límite {{ ingestion_config.max_file_mb }} MB. Se convierte a Markdown en segundo plano; el estado se actualiza solo.</p>
+        </div>
+      </div>
+      {% if upload_error %}
+        <div class="alert warning">
+          <strong>No se ha subido</strong>
+          <p>{{ upload_error }}</p>
+        </div>
+      {% endif %}
+      <form method="post" action="/dashboard/actions/files/upload" enctype="multipart/form-data" class="upload-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Fichero</span>
+          <input type="file" name="file" required>
+        </label>
+        <button class="button" type="submit">Subir y convertir</button>
+      </form>
+      <details class="formats-details">
+        <summary>Formatos admitidos</summary>
+        <ul class="formats-list">
+          {% for group, extensions in formats.items() %}
+            <li><strong>{{ group }}</strong>: {{ extensions|join(', ') }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+    </section>
+  {% endif %}
+
+  {% include 'fragments/files_table.html' %}
+{% endblock %}

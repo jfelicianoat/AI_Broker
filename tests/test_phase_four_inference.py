@@ -40,7 +40,9 @@ class PhaseFourContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(Exception, "embedding only supports single"):
             embedding_request(execution={"strategy": "mixture_of_agents"})
-        with self.assertRaisesRegex(Exception, "attachments are not supported"):
+        # Solo se admiten adjuntos broker_file (ficheros ya ingeridos); el
+        # resto de tipos sigue vetado hasta tener mapeo sin pérdida.
+        with self.assertRaisesRegex(Exception, "only broker_file attachments"):
             TaskCreateRequest.model_validate({
                 "idempotency_key": "phase4:attachment",
                 "content": {"prompt": "hola", "attachments": [{"type": "text", "content": "dato"}]},

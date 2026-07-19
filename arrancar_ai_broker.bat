@@ -30,15 +30,22 @@ if %ERRORLEVEL% NEQ 0 (
   exit /b 1
 )
 
-echo Comprobando si el puerto 8080 ya esta en uso...
-netstat -ano | findstr ":8080" | findstr "LISTENING" >nul
-if %ERRORLEVEL% EQU 0 (
+echo Comprobando si el puerto 8765 ya esta en uso...
+set "PUERTO_PID="
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":8765 " ^| findstr "LISTENING"') do set "PUERTO_PID=%%P"
+if defined PUERTO_PID (
   echo.
-  echo Parece que ya hay algo escuchando en el puerto 8080.
-  echo Si es AI Broker, abre:
-  echo   http://127.0.0.1:8080/dashboard
+  echo Ya hay algo escuchando en el puerto 8765. Proceso propietario:
   echo.
-  echo Si quieres reiniciarlo, ejecuta primero parar_ai_broker.bat
+  tasklist /fi "PID eq %PUERTO_PID%"
+  echo.
+  echo Si es AI Broker ^(python.exe^), el panel ya esta disponible en:
+  echo   http://127.0.0.1:8765/dashboard
+  echo   Para reiniciarlo, ejecuta primero parar_ai_broker.bat
+  echo.
+  echo Si es OTRO programa, cierralo o cambia server.port en broker_config.yaml
+  echo antes de arrancar: dos servicios en el mismo puerto provocan respuestas
+  echo de un servidor que no es AI Broker.
   echo.
   pause
   exit /b 0
@@ -48,7 +55,7 @@ echo.
 echo Arrancando AI Broker...
 echo.
 echo Panel:
-echo   http://127.0.0.1:8080/dashboard
+echo   http://127.0.0.1:8765/dashboard
 echo.
 echo Para parar el servidor: pulsa Ctrl+C en esta ventana.
 echo.
