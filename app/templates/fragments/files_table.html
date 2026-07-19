@@ -35,7 +35,10 @@
                 <span>{{ file.kind }}</span>
                 <small>{{ file.engine }}{% if file.pages %} · {{ file.pages }} pág.{% endif %}</small>
               </td>
-              <td>{{ file.size_human }}</td>
+              <td>
+                {{ file.size_human }}
+                {% if file.duration_human %}<small>{{ file.duration_human }}</small>{% endif %}
+              </td>
               <td>{% if file.tokens_estimate %}{{ '{:,}'.format(file.tokens_estimate).replace(',', '.') }}{% else %}—{% endif %}</td>
               <td>
                 <span class="badge {{ file.status_class }}">{{ file.status }}</span>

@@ -46,7 +46,7 @@ from app.dashboard_forms import (
     _validation_messages,
 )
 from app.ingestion.detection import ALLOWED_FORMATS
-from app.ingestion.service import AttachmentError
+from app.ingestion.service import AttachmentError, stream_upload_to_temp
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
@@ -286,11 +286,13 @@ def create_dashboard_router(
         views: list[dict[str, Any]] = []
         for record in ingestion.list_files():
             size_mb = record.size_bytes / (1024 * 1024)
+            duration = record.meta.get("duration_seconds")
             views.append({
                 "id": record.id,
                 "filename": record.filename,
                 "kind": record.kind,
                 "engine": record.meta.get("engine", record.engine),
+                "duration_human": _format_duration(duration) if duration else None,
                 "status": record.status,
                 "status_class": {
                     "ready": "badge-completed",
@@ -342,17 +344,10 @@ def create_dashboard_router(
                 request, "files.html", _files_page_context(upload_error="Selecciona un fichero."),
             )
         max_bytes = config.ingestion.max_file_mb * 1024 * 1024
-        data = await upload.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            return _template_response(
-                request, "files.html",
-                _files_page_context(
-                    upload_error=f"El fichero supera el límite de {config.ingestion.max_file_mb} MB.",
-                ),
-            )
         try:
+            temp_path = await stream_upload_to_temp(upload, max_bytes, ingestion.incoming_dir)
             record, created = await run_in_threadpool(
-                ingestion.store_upload, upload.filename or "fichero", data,
+                ingestion.store_upload_from_file, upload.filename or "fichero", temp_path,
             )
         except ValueError as error:  # IngestionError / UnsupportedFormat
             return _template_response(
@@ -852,6 +847,17 @@ def create_dashboard_router(
     router.include_router(public)
     router.include_router(protected)
     return router
+
+
+def _format_duration(seconds: float) -> str:
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours} h {minutes:02d} min"
+    if minutes:
+        return f"{minutes} min {secs:02d} s"
+    return f"{secs} s"
 
 
 def _template_response(request: Request, name: str, context: dict[str, Any]):

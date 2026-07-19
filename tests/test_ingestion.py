@@ -143,8 +143,9 @@ def test_missing_engine_marks_file_failed(tmp_path, monkeypatch):
 def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
     calls: dict[str, object] = {}
 
-    def fake_extract(video_path, output_wav, *, ffmpeg_path):
+    def fake_extract(video_path, output_wav, *, ffmpeg_path, timeout_seconds):
         calls["ffmpeg"] = str(video_path)
+        calls["ffmpeg_timeout"] = timeout_seconds
         Path(output_wav).write_bytes(b"RIFFfakeWAVE")
 
     def fake_transcribe(path, *, model_size, device, language):
@@ -153,6 +154,7 @@ def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engines, "extract_audio_ffmpeg", fake_extract)
     monkeypatch.setattr(engines, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(engines, "probe_media_duration", lambda path, *, ffmpeg_path: 245.7)
     with make_client(tmp_path) as client:
         body = client.post(
             "/api/v1/files",
@@ -161,6 +163,10 @@ def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
         state = wait_for_file(client, body["file_id"])
         assert state["status"] == "ready"
         assert state["meta"]["engine"] == "ffmpeg+whisper"
+        # La duración de ffprobe (contenedor completo) prevalece sobre la de whisper.
+        assert state["meta"]["duration_seconds"] == 245.7
+        # El timeout de ffmpeg sigue al de conversión, no a un valor fijo.
+        assert calls["ffmpeg_timeout"] == client.app.state.config.ingestion.conversion_timeout_seconds
         assert "ffmpeg" in calls and "whisper" in calls
         markdown = client.get(state["markdown_url"]).text
         assert "hola desde el video" in markdown
@@ -330,6 +336,60 @@ def test_attachment_file_id_sources():
     by_uri = ContentAttachment(type="broker_file", uri="broker://files/file_xyz")
     assert attachment_file_id(by_meta) == "file_abc"
     assert attachment_file_id(by_uri) == "file_xyz"
+
+
+def test_ffprobe_path_derived_from_ffmpeg():
+    from app.ingestion.engines import _ffprobe_path
+
+    assert _ffprobe_path("ffmpeg") == "ffprobe"
+    assert _ffprobe_path(r"C:\herramientas\bin\ffmpeg.exe").endswith("ffprobe.exe")
+    assert "ffprobe" in _ffprobe_path("/usr/bin/ffmpeg")
+    # Un binario con nombre no estándar no se adivina: se confía en el PATH.
+    assert _ffprobe_path(r"C:\raro\convertidor.exe") == "ffprobe"
+
+
+def test_probe_media_duration_fails_soft(tmp_path):
+    from app.ingestion.engines import probe_media_duration
+
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    assert probe_media_duration(media, ffmpeg_path="binario-inexistente-xyz") is None
+
+
+def test_stream_upload_cuts_early_and_cleans_temp(tmp_path):
+    import asyncio
+
+    from app.ingestion.service import IngestionError as StreamError
+    from app.ingestion.service import stream_upload_to_temp
+
+    class FakeUpload:
+        """Simula un stream de 10 MB; el corte debe llegar antes de agotarlo."""
+
+        def __init__(self) -> None:
+            self.served = 0
+
+        async def read(self, size: int) -> bytes:
+            if self.served >= 10 * 1024 * 1024:
+                return b""
+            self.served += size
+            return b"x" * size
+
+    upload = FakeUpload()
+    with pytest.raises(StreamError):
+        asyncio.run(stream_upload_to_temp(upload, max_bytes=2 * 1024 * 1024, directory=tmp_path))
+    # Cortó en cuanto superó el límite, sin drenar los 10 MB.
+    assert upload.served <= 3 * 1024 * 1024
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_cleanup_incoming_removes_leftovers(tmp_path):
+    with make_client(tmp_path) as client:
+        ingestion = client.app.state.ingestion
+        ingestion.incoming_dir.mkdir(parents=True, exist_ok=True)
+        leftover = ingestion.incoming_dir / ".upload-crash.tmp"
+        leftover.write_bytes(b"a medias")
+        ingestion.cleanup_incoming()
+        assert not leftover.exists()
 
 
 # ------------------------------------------------------ dashboard y retención

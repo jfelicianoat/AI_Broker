@@ -160,7 +160,13 @@ def transcribe_audio(
     return "\n\n".join(lines), meta
 
 
-def extract_audio_ffmpeg(video_path: Path, output_wav: Path, *, ffmpeg_path: str) -> None:
+def extract_audio_ffmpeg(
+    video_path: Path,
+    output_wav: Path,
+    *,
+    ffmpeg_path: str,
+    timeout_seconds: float = 1800.0,
+) -> None:
     """Extrae la pista de audio de un vídeo a WAV mono 16 kHz (óptimo para Whisper)."""
     command = [
         ffmpeg_path, "-y", "-i", str(video_path),
@@ -168,7 +174,7 @@ def extract_audio_ffmpeg(video_path: Path, output_wav: Path, *, ffmpeg_path: str
     ]
     try:
         completed = subprocess.run(
-            command, capture_output=True, timeout=1800, check=False,
+            command, capture_output=True, timeout=timeout_seconds, check=False,
         )
     except FileNotFoundError as error:
         raise EngineMissing(
@@ -178,6 +184,37 @@ def extract_audio_ffmpeg(video_path: Path, output_wav: Path, *, ffmpeg_path: str
     if completed.returncode != 0:
         stderr = (completed.stderr or b"").decode("utf-8", errors="replace")[-800:]
         raise RuntimeError(f"ffmpeg fallo (exit {completed.returncode}): {stderr}")
+
+
+def _ffprobe_path(ffmpeg_path: str) -> str:
+    """Deriva la ruta de ffprobe de la de ffmpeg (vienen en el mismo paquete)."""
+    path = Path(ffmpeg_path)
+    if "ffmpeg" in path.name.lower():
+        probe_name = path.name.lower().replace("ffmpeg", "ffprobe")
+        if str(path.parent) not in ("", "."):
+            return str(path.with_name(probe_name))
+        return probe_name
+    return "ffprobe"
+
+
+def probe_media_duration(path: Path, *, ffmpeg_path: str) -> float | None:
+    """Duración en segundos de un audio/vídeo vía ffprobe; None si no se puede
+    medir (sin ffprobe, contenedor corrupto...). Solo informativo: la
+    transcripción no depende de este dato."""
+    command = [
+        _ffprobe_path(ffmpeg_path), "-v", "error",
+        "-show_entries", "format=duration", "-of", "csv=p=0", str(path),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return float((completed.stdout or b"").decode("ascii", errors="replace").strip())
+    except ValueError:
+        return None
 
 
 _DESCRIBE_PROMPT = (

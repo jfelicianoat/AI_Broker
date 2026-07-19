@@ -379,7 +379,7 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.4"
+    assert body["contract_version"] == "2.5"
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
     assert body["presets"]["agent"] == ["fast"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]

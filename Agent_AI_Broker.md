@@ -563,9 +563,32 @@ La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de
 
 En `single`, el progreso se limita a `queued`, `routing`, `generating` y un estado terminal. En `mixture_of_agents/fast|slow` también existen `resource_planning`, `proposing` y `synthesizing` como etapas técnicas internas. `slow` persiste plan, wave y concurrencia observada. Extracción, chunking y workflows de conocimiento pertenecen al Orchestrator.
 
+### Novedades del contrato 2.5 (julio 2026)
+
+`GET /api/v1/capabilities` devuelve `contract_version: "2.5"`. Cambio aditivo único sobre 2.4:
+
+**Map-reduce de contexto largo (`execution.long_context`).** Cuando los documentos adjuntos de una tarea no caben en el contexto de ningún modelo elegible, el comportamiento por defecto sigue siendo fallar explícito con `CONTEXT_LIMIT_EXCEEDED` (el broker jamás divide ni trunca en silencio). La tarea puede **autorizar** el troceo con `execution.long_context: "map_reduce"` (default `"fail"`; solo estrategia `single`/`auto`, inference `chat`, sin salida JSON):
+
+1. La sección de documentos del prompt expandido se divide en fragmentos que caben en la ventana del modelo seleccionado (corte por párrafos, máximo 64 fragmentos); la instrucción del usuario viaja íntegra con cada fragmento.
+2. Fase map: una invocación por fragmento (rol `chunk_map`, estado `chunking`, progreso por fragmento); los fragmentos son datos delimitados, nunca instrucciones.
+3. Fase reduce: síntesis de las respuestas parciales (rol `chunk_reduce`, estado `synthesizing`); si las parciales no caben juntas, se reduce por tandas jerárquicas (máximo 4 rondas).
+
+El presupuesto `max_cost_usd` se verifica entre invocaciones (corta con `BUDGET_EXCEEDED` sin ejecutar los fragmentos restantes) y la cancelación se atiende entre fragmentos. Eventos `chunking.planned` y `chunking.completed`; el resultado incluye `result.long_context = {mode, chunks, reduce_rounds, total_invocations, total_cost_usd}`. Si el prompt completo sí cabe en algún modelo, la ruta single normal se usa aunque `map_reduce` esté autorizado. Flag `long_context_map_reduce: true` en `capabilities`. En el probador es la casilla "Trocear si los adjuntos no caben (map-reduce)".
+
+```json
+{
+  "idempotency_key": "mi-app:reunion-3h",
+  "content": {
+    "prompt": "Extrae las decisiones y acciones acordadas",
+    "attachments": [{"type": "broker_file", "metadata": {"file_id": "file_abc"}}]
+  },
+  "execution": {"strategy": "single", "long_context": "map_reduce"}
+}
+```
+
 ### Novedades del contrato 2.4 (julio 2026)
 
-`GET /api/v1/capabilities` devuelve `contract_version: "2.4"`. Todos los cambios son aditivos: un cliente de contratos anteriores sigue funcionando sin tocar nada.
+Todos los cambios son aditivos: un cliente de contratos anteriores sigue funcionando sin tocar nada.
 
 **Ingesta de ficheros adjuntos (julio 2026).** Flujo en tres pasos para que una tarea trabaje sobre documentos, imágenes, audio o vídeo:
 

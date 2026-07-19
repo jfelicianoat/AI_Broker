@@ -39,6 +39,7 @@ from app.ingestion import (
     IngestionService,
     UnsupportedFormat,
 )
+from app.ingestion.service import stream_upload_to_temp
 from app.logging_config import configure_logging
 from app.maintenance import (
     prune_ingested_files,
@@ -166,6 +167,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         await auto_start_local_provider_servers(broker_config, logger)
         db.init_schema()
         repository.recover_interrupted_tasks(max_attempts=broker_config.processing.max_task_attempts)
+        ingestion.cleanup_incoming()
         if broker_config.ingestion.enabled:
             # Conversiones interrumpidas por un reinicio: se relanzan (idempotentes).
             for pending_file_id in ingestion.recover_pending():
@@ -421,14 +423,15 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         if not broker_config.ingestion.enabled:
             raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
         max_bytes = broker_config.ingestion.max_file_mb * 1024 * 1024
-        # Se lee un byte de más para distinguir "exactamente en el límite" de
-        # "lo supera" sin cargar el resto del stream.
-        data = await file.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise HTTPException(status_code=413, detail="INGEST_TOO_LARGE")
+        try:
+            # Streaming a disco por chunks: un vídeo de gigabytes no pasa por RAM
+            # y el límite corta la subida en cuanto se supera.
+            temp_path = await stream_upload_to_temp(file, max_bytes, ingestion.incoming_dir)
+        except IngestionError as exc:
+            raise HTTPException(status_code=413, detail="INGEST_TOO_LARGE") from exc
         try:
             record, created = await asyncio.to_thread(
-                ingestion.store_upload, file.filename or "fichero", data,
+                ingestion.store_upload_from_file, file.filename or "fichero", temp_path,
             )
         except (IngestionError, UnsupportedFormat) as exc:
             status = 415 if exc.code in {"INGEST_UNSUPPORTED_FORMAT", "INGEST_CONTENT_MISMATCH"} else 422
@@ -557,7 +560,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.4",
+            contract_version="2.5",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -597,6 +600,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             ),
             file_ingestion=broker_config.ingestion.enabled,
             ingestion_formats=ALLOWED_FORMATS if broker_config.ingestion.enabled else {},
+            long_context_map_reduce=True,
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
