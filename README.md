@@ -12,7 +12,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Un nivel más abajo:** es un servicio que corre en tu propio ordenador (no depende de ninguna nube para funcionar), expone una API y un panel web local, y gestiona una cola de tareas de inferencia. Cada tarea declara qué necesita (privacidad, coste máximo, formato de salida) y el broker decide qué modelo o modelos la ejecutan, entre los que tengas en Ollama, LM Studio o proveedores de API como DeepSeek o NVIDIA.
 
-**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.4) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
+**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.5) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
 
 ## 2. Qué sabe hacer
 
@@ -196,7 +196,7 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 | `/api/v1/models` | GET | Catálogo con compatibilidad y capacidades sondeadas |
 | `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
 | `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo |
-| `/api/v1/capabilities` | GET | Contrato 2.4: estrategias, presets, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `agent_skills`, flags del router |
+| `/api/v1/capabilities` | GET | Contrato 2.5: estrategias, presets, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, flags del router |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/api/v1/dashboard/*` | GET | Read models: summary, tasks, resources |
 | `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico (el dispatcher es autónomo) |
@@ -209,7 +209,7 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 ```
 ├── app/
 │   ├── main.py                # FastAPI app (factory) + endpoints API
-│   ├── schemas.py             # Contrato Pydantic completo (v2.4)
+│   ├── schemas.py             # Contrato Pydantic completo (v2.5)
 │   ├── coordinator.py         # Orquestación: single, mixture, agent, auto
 │   ├── strategy_router.py     # Meta-router: clasificador + aprendizaje
 │   ├── skills.py              # Skills del agente (web, URL, cálculo, código)

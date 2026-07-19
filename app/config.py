@@ -113,13 +113,15 @@ class IngestionConfig(BaseModel):
     """
     enabled: bool = True
     storage_dir: str = "state/files"
-    max_file_mb: int = Field(default=100, ge=1, le=4096)
+    # La subida es en streaming a disco (nunca se carga el fichero entero en
+    # RAM), así que el tope real es espacio en disco, no memoria.
+    max_file_mb: int = Field(default=100, ge=1, le=32768)
     max_pdf_pages: int = Field(default=500, ge=1, le=10000)
     ocr_enabled: bool = True
     ocr_languages: list[str] = Field(default_factory=lambda: ["es", "en"])
     # La conversión corre en un hilo; al agotarse el plazo la tarea de ingesta
     # se marca failed aunque el hilo siga drenando en segundo plano.
-    conversion_timeout_seconds: int = Field(default=900, ge=10, le=7200)
+    conversion_timeout_seconds: int = Field(default=900, ge=10, le=43200)
     images: IngestionImagesConfig = Field(default_factory=IngestionImagesConfig)
     transcription: IngestionTranscriptionConfig = Field(default_factory=IngestionTranscriptionConfig)
 

@@ -44,6 +44,7 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "max_cost_usd": "",
         "priority": "100",
         "single_model": "",
+        "long_context_map_reduce": "",
         "agent_model": "",
         "agent_max_iterations": "6",
         "agent_skill_web_search": "on",
@@ -267,10 +268,10 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         images = dict(ingestion["images"])
         transcription = dict(ingestion["transcription"])
         ingestion["enabled"] = _checked(form, "ingestion_enabled")
-        ingestion["max_file_mb"] = _int_range_field(form, "ingestion_max_file_mb", minimum=1, maximum=4096)
+        ingestion["max_file_mb"] = _int_range_field(form, "ingestion_max_file_mb", minimum=1, maximum=32768)
         ingestion["ocr_enabled"] = _checked(form, "ingestion_ocr_enabled")
         ingestion["conversion_timeout_seconds"] = _int_range_field(
-            form, "ingestion_conversion_timeout_seconds", minimum=10, maximum=7200,
+            form, "ingestion_conversion_timeout_seconds", minimum=10, maximum=43200,
         )
         images["enabled"] = _checked(form, "ingestion_images_enabled")
         images["base_url"] = form.get("ingestion_images_base_url", "").strip().rstrip("/") or images["base_url"]
@@ -569,6 +570,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "preset": "fast",
             "scheduling": "sequential",
             "timeout_seconds": _int_field(form, "timeout_seconds", 600),
+            "long_context": "map_reduce" if _checked(form, "long_context_map_reduce") else "fail",
         }
         model_requirements = {
             "preferred_model": target.model,
