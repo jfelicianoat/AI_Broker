@@ -122,6 +122,26 @@
                 </select>
               </label>
 
+              <div class="field">
+                <span>Ficheros adjuntos (convertidos a Markdown)</span>
+                {% if ready_files %}
+                  <div class="attach-list">
+                    {% for file in ready_files %}
+                      <label class="check-row">
+                        <input type="checkbox" name="attach_file_{{ file.id }}"
+                               {% if form.get('attach_file_' ~ file.id) %}checked{% endif %}>
+                        <span>{{ file.filename }}
+                          <small>{{ file.kind }}{% if file.tokens_estimate %} · ~{{ file.tokens_estimate }} tokens{% endif %}</small>
+                        </span>
+                      </label>
+                    {% endfor %}
+                  </div>
+                  <small class="form-hint">El contenido se inyecta en el prompt al despachar; con adjuntos la compresión pasa a "off" salvo que elijas un nivel explícito.</small>
+                {% else %}
+                  <small class="form-hint">No hay ficheros listos. Súbelos en <a href="/dashboard/files">Ficheros</a>.</small>
+                {% endif %}
+              </div>
+
               {% if compression_preview %}
                 <div class="compression-preview {% if compression_preview.applied %}applied{% endif %}">
                   <div class="compression-preview-head">
@@ -193,6 +213,9 @@
                   <label><input type="checkbox" name="agent_skill_fetch_url" {% if form.agent_skill_fetch_url %}checked{% endif %}> Leer URL</label>
                   <label><input type="checkbox" name="agent_skill_calculator" {% if form.agent_skill_calculator %}checked{% endif %}> Calculadora</label>
                   <label><input type="checkbox" name="agent_skill_current_datetime" {% if form.agent_skill_current_datetime %}checked{% endif %}> Fecha/hora</label>
+                  {% if sandbox_enabled %}
+                    <label><input type="checkbox" name="agent_skill_run_code" {% if form.agent_skill_run_code %}checked{% endif %}> Ejecutar código (sandbox)</label>
+                  {% endif %}
                 </div>
               </div>
               <div class="mixture-fields" data-show-strategy="mixture_of_agents">
@@ -239,6 +262,9 @@
                     <label><input type="checkbox" name="proposer_skill_fetch_url" {% if form.proposer_skill_fetch_url %}checked{% endif %}> Leer URL</label>
                     <label><input type="checkbox" name="proposer_skill_calculator" {% if form.proposer_skill_calculator %}checked{% endif %}> Calculadora</label>
                     <label><input type="checkbox" name="proposer_skill_current_datetime" {% if form.proposer_skill_current_datetime %}checked{% endif %}> Fecha/hora</label>
+                    {% if sandbox_enabled %}
+                      <label><input type="checkbox" name="proposer_skill_run_code" {% if form.proposer_skill_run_code %}checked{% endif %}> Ejecutar código (sandbox)</label>
+                    {% endif %}
                   </div>
                 </div>
               </div>

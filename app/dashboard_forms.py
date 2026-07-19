@@ -50,6 +50,8 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "agent_skill_fetch_url": "on",
         "agent_skill_calculator": "on",
         "agent_skill_current_datetime": "on",
+        # Opt-in: requiere sandbox.enabled y Docker en marcha.
+        "agent_skill_run_code": "",
         "arbiter_model": "",
         "proposer_model_1": "",
         "proposer_role_1": "generalist",
@@ -66,6 +68,7 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "proposer_skill_fetch_url": "on",
         "proposer_skill_calculator": "on",
         "proposer_skill_current_datetime": "on",
+        "proposer_skill_run_code": "",
     }
 
 
@@ -83,6 +86,21 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("prompt_compression.enabled", "Compresión de prompts activa"),
         ("prompt_compression.level", "Nivel de compresión de prompts"),
         ("prompt_compression.min_chars", "Mínimo de caracteres para comprimir"),
+        ("sandbox.enabled", "Sandbox de código activo"),
+        ("sandbox.image", "Imagen del sandbox"),
+        ("sandbox.timeout_seconds", "Timeout del sandbox"),
+        ("sandbox.memory_mb", "Memoria del sandbox"),
+        ("sandbox.cpus", "CPUs del sandbox"),
+        ("ingestion.enabled", "Ingesta de ficheros activa"),
+        ("ingestion.max_file_mb", "Tamaño máximo de fichero"),
+        ("ingestion.ocr_enabled", "OCR de escaneos activo"),
+        ("ingestion.conversion_timeout_seconds", "Timeout de conversión"),
+        ("ingestion.images.enabled", "Descripción de figuras activa"),
+        ("ingestion.images.base_url", "Endpoint de visión"),
+        ("ingestion.images.model", "Modelo de visión"),
+        ("ingestion.transcription.enabled", "Transcripción de audio activa"),
+        ("ingestion.transcription.model_size", "Modelo Whisper"),
+        ("ingestion.transcription.ffmpeg_path", "Ruta de ffmpeg"),
         ("providers.ollama.enabled", "Ollama activo"),
         ("providers.ollama.base_url", "Ollama base URL"),
         ("providers.ollama.timeout_seconds", "Ollama timeout"),
@@ -231,6 +249,38 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
                 form, "strategy_router_learning_min_cases", minimum=1, maximum=10000,
             ),
         }
+    # Guard de presencia (como los proveedores): un formulario sin la sección
+    # no toca esa parte de la config.
+    if form.get("sandbox_image") is not None:
+        sandbox = dict(payload["sandbox"])
+        sandbox["enabled"] = _checked(form, "sandbox_enabled")
+        sandbox["image"] = form.get("sandbox_image", "").strip() or sandbox["image"]
+        sandbox["docker_path"] = form.get("sandbox_docker_path", "").strip() or sandbox["docker_path"]
+        sandbox["timeout_seconds"] = _float_range_field(
+            form, "sandbox_timeout_seconds", minimum=5.0, maximum=600.0,
+        )
+        sandbox["memory_mb"] = _int_range_field(form, "sandbox_memory_mb", minimum=64, maximum=16384)
+        sandbox["cpus"] = _float_range_field(form, "sandbox_cpus", minimum=0.1, maximum=32.0)
+        payload["sandbox"] = sandbox
+    if form.get("ingestion_max_file_mb") is not None:
+        ingestion = dict(payload["ingestion"])
+        images = dict(ingestion["images"])
+        transcription = dict(ingestion["transcription"])
+        ingestion["enabled"] = _checked(form, "ingestion_enabled")
+        ingestion["max_file_mb"] = _int_range_field(form, "ingestion_max_file_mb", minimum=1, maximum=4096)
+        ingestion["ocr_enabled"] = _checked(form, "ingestion_ocr_enabled")
+        ingestion["conversion_timeout_seconds"] = _int_range_field(
+            form, "ingestion_conversion_timeout_seconds", minimum=10, maximum=7200,
+        )
+        images["enabled"] = _checked(form, "ingestion_images_enabled")
+        images["base_url"] = form.get("ingestion_images_base_url", "").strip().rstrip("/") or images["base_url"]
+        images["model"] = form.get("ingestion_images_model", "").strip()
+        transcription["enabled"] = _checked(form, "ingestion_transcription_enabled")
+        transcription["model_size"] = form.get("ingestion_whisper_model", "").strip() or transcription["model_size"]
+        transcription["ffmpeg_path"] = form.get("ingestion_ffmpeg_path", "").strip() or transcription["ffmpeg_path"]
+        ingestion["images"] = images
+        ingestion["transcription"] = transcription
+        payload["ingestion"] = ingestion
     payload["providers"]["ollama"] = _parse_ollama_provider(current, form)
     payload["providers"]["deepseek"] = _parse_deepseek_provider(current, form)
     payload["providers"]["custom"] = _parse_custom_providers(current, form)
@@ -276,6 +326,10 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     target.resources = updated.resources
     target.strategy_router = updated.strategy_router
     target.providers = updated.providers
+    # SandboxExecutor e IngestionService leen estas secciones en vivo desde el
+    # BrokerConfig compartido: reemplazar el atributo basta, sin reiniciar.
+    target.sandbox = updated.sandbox
+    target.ingestion = updated.ingestion
 
 
 
@@ -540,6 +594,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
                     ("fetch_url", "proposer_skill_fetch_url"),
                     ("calculator", "proposer_skill_calculator"),
                     ("current_datetime", "proposer_skill_current_datetime"),
+                    ("run_code", "proposer_skill_run_code"),
                 )
                 if _checked(form, field)
             ]
@@ -577,6 +632,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
                 ("fetch_url", "agent_skill_fetch_url"),
                 ("calculator", "agent_skill_calculator"),
                 ("current_datetime", "agent_skill_current_datetime"),
+                ("run_code", "agent_skill_run_code"),
             )
             if _checked(form, field)
         ]
@@ -603,12 +659,21 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
     else:
         raise PromptTesterError("Estrategia no soportada.")
 
+    # Adjuntos: casillas attach_file_<file_id> con los ficheros ya ingeridos
+    # (el patrón indexado sobrevive al aplanado del formulario urlencoded).
+    attachments = [
+        {"type": "broker_file", "metadata": {"file_id": key[len("attach_file_"):]}}
+        for key in sorted(form)
+        if key.startswith("attach_file_") and form.get(key)
+    ]
+
     return TaskCreateRequest.model_validate({
         "idempotency_key": f"prompt-tester:{uuid4().hex}",
         "request_id": f"prompt-tester-{uuid4().hex[:12]}",
         "prompt_compression": prompt_compression or None,
         "content": {
             "prompt": prompt,
+            "attachments": attachments,
             "metadata": {
                 "origin": "prompt_tester",
                 "input_mode": input_mode,

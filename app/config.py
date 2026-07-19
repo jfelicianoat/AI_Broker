@@ -40,6 +40,9 @@ class PersistenceConfig(BaseModel):
     events_retention_days: int = Field(default=30, ge=0)
     # Días que se conservan los artefactos de tareas terminales (0 = nunca borrar).
     artifacts_retention_days: int = Field(default=0, ge=0)
+    # Días que se conservan los ficheros ingeridos ya convertidos o fallidos
+    # (0 = nunca borrar). Las conversiones en curso no se podan jamás.
+    files_retention_days: int = Field(default=0, ge=0)
 
 
 class ProcessingConfig(BaseModel):
@@ -71,6 +74,72 @@ class PromptCompressionConfig(BaseModel):
     level: Literal["light", "medium", "aggressive"] = "medium"
     # Prompts más cortos que esto se envían tal cual: cada palabra cuenta.
     min_chars: int = Field(default=40, ge=0)
+
+
+class IngestionImagesConfig(BaseModel):
+    # Descripción de figuras/imágenes embebidas con un LLM de visión vía un
+    # endpoint OpenAI-compatible (LM Studio, Ollama /v1...). La descripción se
+    # inserta en el Markdown en la posición de la figura; los modelos solo-texto
+    # reciben así el contenido visual del documento.
+    enabled: bool = False
+    base_url: str = Field(default="http://127.0.0.1:11434/v1", min_length=1, max_length=512)
+    model: str = Field(default="", max_length=128)
+    api_key_env: str | None = Field(default=None, max_length=120)
+    timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    # Tope de figuras descritas por documento; el resto se marca como omitida.
+    max_images: int = Field(default=20, ge=0, le=200)
+
+
+class IngestionTranscriptionConfig(BaseModel):
+    # Transcripción local de audio (y del audio extraído de vídeo) con
+    # faster-whisper. El modelo se descarga y cachea en el primer uso.
+    enabled: bool = True
+    model_size: str = Field(default="small", min_length=1, max_length=64)
+    device: Literal["auto", "cpu", "cuda"] = "auto"
+    # None = autodetección de idioma por Whisper.
+    language: str | None = Field(default=None, max_length=8)
+    # Ruta del binario ffmpeg para extraer el audio de los vídeos.
+    ffmpeg_path: str = Field(default="ffmpeg", min_length=1, max_length=512)
+
+
+class IngestionConfig(BaseModel):
+    """Ingesta de ficheros adjuntos: conversión a Markdown antes de inferencia.
+
+    PDF (y escaneos, con OCR por página) via Docling; Office/EPUB/HTML via
+    MarkItDown; texto/código passthrough; imágenes por OCR + descripción de
+    visión; audio/vídeo por transcripción Whisper. Los motores se importan en
+    perezoso: si falta el paquete, el fichero falla con ENGINE_MISSING sin
+    afectar al arranque del broker.
+    """
+    enabled: bool = True
+    storage_dir: str = "state/files"
+    max_file_mb: int = Field(default=100, ge=1, le=4096)
+    max_pdf_pages: int = Field(default=500, ge=1, le=10000)
+    ocr_enabled: bool = True
+    ocr_languages: list[str] = Field(default_factory=lambda: ["es", "en"])
+    # La conversión corre en un hilo; al agotarse el plazo la tarea de ingesta
+    # se marca failed aunque el hilo siga drenando en segundo plano.
+    conversion_timeout_seconds: int = Field(default=900, ge=10, le=7200)
+    images: IngestionImagesConfig = Field(default_factory=IngestionImagesConfig)
+    transcription: IngestionTranscriptionConfig = Field(default_factory=IngestionTranscriptionConfig)
+
+
+class SandboxConfig(BaseModel):
+    """Sandbox de ejecución de código (skill run_code de la estrategia agent).
+
+    Contenedores Docker efímeros SIEMPRE sin red, sin volúmenes del host y sin
+    privilegios: esas fronteras no son configurables a propósito. Requiere
+    Docker Desktop en marcha; si no responde, la skill devuelve un error claro
+    al modelo sin afectar al resto del broker.
+    """
+    enabled: bool = False
+    docker_path: str = Field(default="docker", min_length=1, max_length=512)
+    image: str = Field(default="python:3.12-slim", min_length=1, max_length=256)
+    timeout_seconds: float = Field(default=60.0, ge=5, le=600)
+    memory_mb: int = Field(default=1024, ge=64, le=16384)
+    cpus: float = Field(default=2.0, gt=0, le=32)
+    pids_limit: int = Field(default=256, ge=16, le=4096)
+    max_output_chars: int = Field(default=8000, ge=500, le=100_000)
 
 
 class ResourceConfig(BaseModel):
@@ -273,6 +342,8 @@ class BrokerConfig(BaseModel):
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     prompt_compression: PromptCompressionConfig = Field(default_factory=PromptCompressionConfig)
+    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     strategy_router: StrategyRouterConfig = Field(default_factory=StrategyRouterConfig)

@@ -97,6 +97,27 @@ SKILL_DEFINITIONS: dict[str, dict[str, Any]] = {
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    "run_code": {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": (
+                "Ejecuta código Python en un sandbox aislado y devuelve su salida. "
+                "El entorno es efímero y sin estado: cada llamada empieza de cero, "
+                "SIN acceso a red ni a ficheros del host, y con límite de tiempo y "
+                "memoria. Imprime con print() todo lo que quieras recuperar. Útil "
+                "para cálculos complejos, procesar texto/datos del prompt y "
+                "verificar código antes de entregarlo."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Código Python completo a ejecutar"},
+                },
+                "required": ["code"],
+            },
+        },
+    },
 }
 
 # Operadores permitidos en la calculadora: aritmética pura, sin nombres ni llamadas.
@@ -251,11 +272,29 @@ def _run_current_datetime() -> str:
     }, ensure_ascii=False)
 
 
+async def _run_code(arguments: dict[str, Any], sandbox: Any) -> str:
+    if sandbox is None:
+        raise SkillError(
+            "el sandbox de código no está habilitado en este broker "
+            "(sandbox.enabled en la configuración)"
+        )
+    code = str(arguments.get("code") or "")
+    if not code.strip():
+        raise SkillError("run_code requiere el argumento code")
+    from app.sandbox import SandboxError
+
+    try:
+        return await sandbox.run_python(code)
+    except SandboxError as error:
+        raise SkillError(str(error)) from error
+
+
 async def run_skill(
     name: str,
     arguments: dict[str, Any],
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    sandbox: Any | None = None,
 ) -> str:
     """Ejecuta una skill y devuelve texto para el modelo. Los fallos se
     devuelven como texto de error (el agente puede reaccionar), nunca como
@@ -269,6 +308,8 @@ async def run_skill(
             return await _run_fetch_url(arguments, transport)
         if name == "calculator":
             return _run_calculator(arguments)
+        if name == "run_code":
+            return await _run_code(arguments, sandbox)
         return _run_current_datetime()
     except SkillError as error:
         return f"ERROR de {name}: {error}"

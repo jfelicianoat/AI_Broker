@@ -1,0 +1,66 @@
+<div id="files-panel"
+     class="panel"
+     hx-get="/dashboard/fragments/files"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     data-refresh-pauseable>
+  <div class="panel-heading">
+    <div>
+      <h2>Ficheros ingeridos</h2>
+      <p>Los ficheros <em>ready</em> se adjuntan a tareas con <code>type: broker_file</code> y su <code>file_id</code>.</p>
+    </div>
+    <button class="button secondary compact" type="button" data-refresh-target="#files-panel">Actualizar</button>
+  </div>
+  {% if files %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Fichero</th>
+            <th>Tipo</th>
+            <th>Tamaño</th>
+            <th>Tokens (est.)</th>
+            <th>Estado</th>
+            <th class="align-right">Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for file in files %}
+            <tr>
+              <td>
+                <strong>{{ file.filename }}</strong>
+                <small>{{ file.id }}</small>
+              </td>
+              <td>
+                <span>{{ file.kind }}</span>
+                <small>{{ file.engine }}{% if file.pages %} · {{ file.pages }} pág.{% endif %}</small>
+              </td>
+              <td>{{ file.size_human }}</td>
+              <td>{% if file.tokens_estimate %}{{ '{:,}'.format(file.tokens_estimate).replace(',', '.') }}{% else %}—{% endif %}</td>
+              <td>
+                <span class="badge {{ file.status_class }}">{{ file.status }}</span>
+                {% if file.error %}
+                  <small class="file-error" title="{{ file.error }}">{{ file.error_code }}: {{ file.error[:120] }}</small>
+                {% endif %}
+              </td>
+              <td class="align-right actions">
+                {% if file.markdown_url %}
+                  <a class="link-button" href="{{ file.markdown_url }}" target="_blank" rel="noopener">Ver Markdown</a>
+                {% endif %}
+                <button class="link-button danger" type="button"
+                        hx-post="/dashboard/actions/files/{{ file.id }}/delete"
+                        hx-confirm="¿Borrar {{ file.filename }}? Las tareas encoladas que lo referencien fallarán."
+                        aria-label="Borrar fichero {{ file.filename }}">Borrar</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <strong>Aún no hay ficheros</strong>
+      <p>Sube un documento, imagen, audio o vídeo y quedará convertido a Markdown listo para adjuntar a tareas.</p>
+    </div>
+  {% endif %}
+</div>
