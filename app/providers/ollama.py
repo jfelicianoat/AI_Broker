@@ -10,8 +10,10 @@ import httpx
 
 from app.config import BrokerConfig
 from app.providers.base import (
+    AgentTurn,
     ModelOutput,
     ProviderError,
+    ToolCall,
     _CatalogCache,
     _estimation_text,
     enforce_context_limit,
@@ -260,6 +262,81 @@ class OllamaProvider:
             tokens_output=int(payload.get("eval_count") or 0), cost_usd=0.0,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
         )
+
+    async def chat_tools(
+        self,
+        request: TaskCreateRequest,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AgentTurn:
+        """Una ronda de /api/chat con tools (soporte nativo de Ollama). A
+        diferencia de OpenAI, Ollama devuelve message.tool_calls con arguments
+        ya como objeto y mantiene el modelo cargado (lease de VRAM)."""
+        catalog = await self.models()
+        entry = next((item for item in catalog if item["name"] == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model}")
+        started = datetime.now(timezone.utc)
+        try:
+            async with self.lifecycle.lease(model, int(entry.get("size_bytes") or 0)):
+                response = await self.client.post("/api/chat", json={
+                    "model": model,
+                    "messages": self._to_ollama_messages(messages),
+                    "tools": tools,
+                    "stream": False,
+                    "keep_alive": -1,
+                    "options": {
+                        "temperature": request.generation.temperature,
+                        "num_predict": request.generation.max_output_tokens,
+                    },
+                })
+                response.raise_for_status()
+                payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise ProviderError(
+                "MODEL_ERROR",
+                provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
+        message = payload.get("message") or {}
+        tool_calls: list[ToolCall] = []
+        for index, raw in enumerate(message.get("tool_calls") or []):
+            function = raw.get("function") or {}
+            arguments = function.get("arguments")
+            tool_calls.append(ToolCall(
+                id=str(raw.get("id") or f"call_{index}"),
+                name=str(function.get("name") or ""),
+                arguments=arguments if isinstance(arguments, dict) else {},
+            ))
+        content = message.get("content")
+        # Ollama devuelve el mensaje del asistente en su propio formato; se
+        # reenvía tal cual porque _to_ollama_messages ya normaliza en la vuelta.
+        return AgentTurn(
+            content=content if isinstance(content, str) and content.strip() else None,
+            tool_calls=tuple(tool_calls),
+            tokens_input=int(payload.get("prompt_eval_count") or 0),
+            tokens_output=int(payload.get("eval_count") or 0),
+            cost_usd=0.0,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            raw_assistant_message={"role": "assistant", **message},
+        )
+
+    @staticmethod
+    def _to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """El historial se guarda en formato OpenAI; Ollama usa role=tool con
+        el contenido directo (sin tool_call_id) y el asistente con tool_calls."""
+        converted: list[dict[str, Any]] = []
+        for item in messages:
+            if item.get("role") == "tool":
+                converted.append({"role": "tool", "content": item.get("content") or ""})
+            else:
+                converted.append(item)
+        return converted
 
     async def embed(self, request: TaskCreateRequest, model: str, input_text: str) -> ModelOutput:
         catalog = await self.models()

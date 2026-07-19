@@ -7,10 +7,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.admin_auth import (
@@ -32,14 +32,28 @@ from app.dashboard_web import (
 from app.db import Database
 from app.dispatcher import dispatcher_loop
 from app.health import HealthCache, health_response
+from app.ingestion import (
+    ALLOWED_FORMATS,
+    AttachmentError,
+    IngestionError,
+    IngestionService,
+    UnsupportedFormat,
+)
 from app.logging_config import configure_logging
-from app.maintenance import prune_terminal_task_artifacts, prune_terminal_task_events
+from app.maintenance import (
+    prune_ingested_files,
+    prune_terminal_task_artifacts,
+    prune_terminal_task_events,
+)
 from app.model_catalog import model_availability_item, model_feature_profile
 from app.model_stats import load_model_stats
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
+from app.sandbox import SandboxExecutor
 from app.schemas import (
+    AGENT_SKILLS,
+    DEFAULT_AGENT_SKILLS,
     BrokerCapabilitiesResponse,
     DashboardResourcesResponse,
     DashboardSummaryResponse,
@@ -47,6 +61,9 @@ from app.schemas import (
     DashboardTaskPage,
     ExecutionPreset,
     ExecutionStrategy,
+    FileAcceptedResponse,
+    FileStateResponse,
+    FileStatus,
     HealthResponse,
     ModelAvailabilityResponse,
     ModelContextResponse,
@@ -57,6 +74,7 @@ from app.schemas import (
     TaskCreateRequest,
     TaskStateResponse,
     TaskStatus,
+    ToolResultsRequest,
     UsageResponse,
 )
 from app.startup import (
@@ -91,7 +109,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         broker_config,
         stats_loader=lambda: load_model_stats(db, window_days=broker_config.routing.stats_window_days),
     )
-    coordinator = ConsensusCoordinator(db, scheduler, provider=provider)
+    ingestion = IngestionService(db, broker_config)
+    # Siempre construido: lee sandbox.* en vivo, así que activarlo/desactivarlo
+    # desde el panel de Configuración aplica sin reiniciar el broker.
+    sandbox = SandboxExecutor(broker_config)
+    coordinator = ConsensusCoordinator(
+        db, scheduler, provider=provider, ingestion=ingestion, sandbox=sandbox,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -142,6 +166,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         await auto_start_local_provider_servers(broker_config, logger)
         db.init_schema()
         repository.recover_interrupted_tasks(max_attempts=broker_config.processing.max_task_attempts)
+        if broker_config.ingestion.enabled:
+            # Conversiones interrumpidas por un reinicio: se relanzan (idempotentes).
+            for pending_file_id in ingestion.recover_pending():
+                ingestion.launch(pending_file_id)
         pruned_events = prune_terminal_task_events(
             db, older_than_days=broker_config.persistence.events_retention_days
         )
@@ -159,6 +187,16 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             logger.info(
                 "maintenance.artifacts_pruned",
                 extra={"event": "maintenance.artifacts_pruned", "removed": pruned_artifacts},
+            )
+        pruned_files = prune_ingested_files(
+            db,
+            broker_config.ingestion.storage_dir,
+            older_than_days=broker_config.persistence.files_retention_days,
+        )
+        if pruned_files:
+            logger.info(
+                "maintenance.files_pruned",
+                extra={"event": "maintenance.files_pruned", "removed": pruned_files},
             )
         stop_dispatcher = asyncio.Event()
         dispatcher_task = None
@@ -178,6 +216,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             stop_dispatcher.set()
             if dispatcher_task is not None:
                 await asyncio.gather(dispatcher_task, return_exceptions=True)
+            await ingestion.shutdown()
             await provider.close()
             db.close()
 
@@ -189,6 +228,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     app.state.scheduler = scheduler
     app.state.coordinator = coordinator
     app.state.provider = provider
+    app.state.ingestion = ingestion
 
     def _dispatcher_state() -> str | None:
         if not broker_config.processing.auto_dispatch:
@@ -265,6 +305,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             config=broker_config,
             config_path=Path(config_path),
             health_loader=_health_snapshot,
+            ingestion=ingestion,
         )
     )
 
@@ -282,6 +323,25 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
     def create_task(payload: TaskCreateRequest, response: Response, request: Request) -> TaskAcceptedResponse:
         verify_admin_access(request, broker_config)
+        if not broker_config.sandbox.enabled and (
+            "run_code" in payload.execution.agent.skills
+            or "run_code" in payload.execution.proposer_skills
+        ):
+            # Fail-fast: sin sandbox la skill solo produciría errores de tool
+            # en cada iteración del agente, gastando presupuesto.
+            raise HTTPException(status_code=409, detail="SANDBOX_DISABLED")
+        if payload.content.attachments:
+            if not broker_config.ingestion.enabled:
+                raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+            try:
+                # Fail-fast: no se encola una tarea cuyos adjuntos no están 'ready';
+                # el cliente sondea GET /api/v1/files/{id} hasta entonces.
+                ingestion.check_attachments(payload)
+            except AttachmentError as exc:
+                status = 404 if exc.code == "ATTACHED_FILE_NOT_FOUND" else 409
+                raise HTTPException(
+                    status_code=status, detail={"code": exc.code, "message": str(exc)},
+                ) from exc
         try:
             task, created = repository.create_task(
                 payload, queue_max_size=broker_config.processing.queue_max_size
@@ -321,6 +381,92 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             return repository.request_cancel(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+
+    @app.post("/api/v1/tasks/{task_id}/tool_results", response_model=TaskStateResponse)
+    def submit_tool_results(task_id: str, payload: ToolResultsRequest, request: Request) -> TaskStateResponse:
+        """Passthrough: el cliente entrega los resultados de sus tools de dominio
+        y el broker reanuda el bucle del agente re-encolando la tarea."""
+        verify_admin_access(request, broker_config)
+        try:
+            repository.resume_with_tool_results(
+                task_id, [item.model_dump() for item in payload.tool_results],
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return repository.get_task(task_id)
+
+    def _file_state_response(record) -> FileStateResponse:
+        return FileStateResponse(
+            file_id=record.id,
+            status=FileStatus(record.status),
+            filename=record.filename,
+            kind=record.kind,
+            engine=record.engine,
+            size_bytes=record.size_bytes,
+            sha256=record.sha256,
+            meta=record.meta,
+            error=record.error,
+            created_at=datetime.fromisoformat(record.created_at),
+            updated_at=datetime.fromisoformat(record.updated_at),
+            markdown_url=(
+                f"/api/v1/files/{record.id}/markdown" if record.status == "ready" else None
+            ),
+        )
+
+    @app.post("/api/v1/files", response_model=FileAcceptedResponse, status_code=202)
+    async def upload_file(request: Request, file: UploadFile) -> FileAcceptedResponse:
+        verify_admin_access(request, broker_config)
+        if not broker_config.ingestion.enabled:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        max_bytes = broker_config.ingestion.max_file_mb * 1024 * 1024
+        # Se lee un byte de más para distinguir "exactamente en el límite" de
+        # "lo supera" sin cargar el resto del stream.
+        data = await file.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise HTTPException(status_code=413, detail="INGEST_TOO_LARGE")
+        try:
+            record, created = await asyncio.to_thread(
+                ingestion.store_upload, file.filename or "fichero", data,
+            )
+        except (IngestionError, UnsupportedFormat) as exc:
+            status = 415 if exc.code in {"INGEST_UNSUPPORTED_FORMAT", "INGEST_CONTENT_MISMATCH"} else 422
+            raise HTTPException(
+                status_code=status, detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        if created:
+            ingestion.launch(record.id)
+        return FileAcceptedResponse(
+            file_id=record.id,
+            status=FileStatus(record.status),
+            filename=record.filename,
+            size_bytes=record.size_bytes,
+            sha256=record.sha256,
+            created=created,
+            status_url=f"/api/v1/files/{record.id}",
+        )
+
+    @app.get("/api/v1/files/{file_id}", response_model=FileStateResponse)
+    def get_file(file_id: str, request: Request) -> FileStateResponse:
+        verify_admin_access(request, broker_config)
+        record = ingestion.get(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
+        return _file_state_response(record)
+
+    @app.get("/api/v1/files/{file_id}/markdown")
+    def get_file_markdown(file_id: str, request: Request) -> PlainTextResponse:
+        # Devuelve el documento convertido íntegro: lectura protegida, como
+        # los resultados de tareas.
+        verify_admin_access(request, broker_config)
+        record = ingestion.get(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
+        if record.status != "ready" or not record.markdown_path:
+            raise HTTPException(status_code=409, detail="FILE_NOT_READY")
+        content = Path(record.markdown_path).read_text(encoding="utf-8")
+        return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
 
     @app.get("/api/v1/queue", response_model=QueueResponse)
     def get_queue() -> QueueResponse:
@@ -411,11 +557,16 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.2",
-            strategies=[ExecutionStrategy.single, ExecutionStrategy.mixture_of_agents],
+            contract_version="2.4",
+            strategies=[
+                ExecutionStrategy.single,
+                ExecutionStrategy.mixture_of_agents,
+                ExecutionStrategy.agent,
+            ] + ([ExecutionStrategy.auto] if broker_config.strategy_router.enabled else []),
             presets={
                 "single": [ExecutionPreset.fast],
                 "mixture_of_agents": [ExecutionPreset.fast, ExecutionPreset.slow],
+                "agent": [ExecutionPreset.fast],
             },
             scheduling_by_preset={
                 "fast": [SchedulingPolicy.sequential],
@@ -431,6 +582,21 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             exact_target_model=True,
             task_timeout=True,
             prompt_compression_override=True,
+            agent_skills=list(AGENT_SKILLS if broker_config.sandbox.enabled else DEFAULT_AGENT_SKILLS),
+            sandbox_run_code=broker_config.sandbox.enabled,
+            proposer_skills=True,
+            client_tool_passthrough=True,
+            auto_strategy=broker_config.strategy_router.enabled,
+            confidence_escalation=(
+                broker_config.strategy_router.enabled
+                and broker_config.strategy_router.confidence_escalation
+            ),
+            adaptive_strategy_learning=(
+                broker_config.strategy_router.enabled
+                and broker_config.strategy_router.adaptive_learning
+            ),
+            file_ingestion=broker_config.ingestion.enabled,
+            ingestion_formats=ALLOWED_FORMATS if broker_config.ingestion.enabled else {},
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)

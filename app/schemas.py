@@ -23,6 +23,7 @@ class TaskStatus(str, Enum):
     debating = "debating"
     synthesizing = "synthesizing"
     verifying = "verifying"
+    waiting_for_tools = "waiting_for_tools"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -44,6 +45,19 @@ def is_local_deployment(deployment: str | None) -> bool:
 class ExecutionStrategy(str, Enum):
     single = "single"
     mixture_of_agents = "mixture_of_agents"
+    agent = "agent"
+    # El broker elige la estrategia concreta (meta-router); requiere
+    # strategy_router.enabled en la configuración.
+    auto = "auto"
+
+
+# Skills técnicas genéricas ejecutables por el broker en la estrategia agent.
+# Son deliberadamente neutrales al dominio: la orquestación de negocio sigue
+# perteneciendo a las apps cliente.
+AGENT_SKILLS = ("web_search", "fetch_url", "calculator", "current_datetime", "run_code")
+# run_code queda fuera del default: requiere sandbox.enabled y Docker en
+# marcha, así que solo participa cuando la tarea lo pide explícitamente.
+DEFAULT_AGENT_SKILLS = ("web_search", "fetch_url", "calculator", "current_datetime")
 
 
 class ExecutionPreset(str, Enum):
@@ -85,6 +99,19 @@ class DataClassification(str, Enum):
     local_only = "local_only"
 
 
+# Adjuntos de fichero ingeridos por el broker (POST /api/v1/files). El único
+# tipo soportado: referencia por file_id a un fichero ya convertido a Markdown.
+BROKER_FILE_ATTACHMENT_TYPE = "broker_file"
+BROKER_FILE_URI_PREFIX = "broker://files/"
+
+
+class FileStatus(str, Enum):
+    received = "received"
+    converting = "converting"
+    ready = "ready"
+    failed = "failed"
+
+
 class ContentAttachment(StrictBaseModel):
     type: str = Field(min_length=1, max_length=64)
     name: str | None = Field(default=None, max_length=255)
@@ -94,9 +121,19 @@ class ContentAttachment(StrictBaseModel):
 
     @model_validator(mode="after")
     def require_content_or_uri(self) -> ContentAttachment:
-        if not self.content and not self.uri:
-            raise ValueError("attachment requires content or uri")
+        if not self.content and not self.uri and not self.metadata.get("file_id"):
+            raise ValueError("attachment requires content, uri or metadata.file_id")
         return self
+
+
+def attachment_file_id(attachment: ContentAttachment) -> str | None:
+    """file_id de un adjunto broker_file (metadata.file_id o uri broker://files/...)."""
+    candidate = attachment.metadata.get("file_id")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    if attachment.uri and attachment.uri.startswith(BROKER_FILE_URI_PREFIX):
+        return attachment.uri[len(BROKER_FILE_URI_PREFIX):] or None
+    return None
 
 
 class TaskContent(StrictBaseModel):
@@ -190,6 +227,40 @@ class SelectionPolicy(StrictBaseModel):
         return self
 
 
+class ClientToolDefinition(StrictBaseModel):
+    """Herramienta de dominio que aporta el cliente: el broker la ofrece al
+    modelo pero NO la ejecuta — pausa la tarea y devuelve la llamada para que
+    el cliente la resuelva (passthrough)."""
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    description: str = Field(min_length=1, max_length=1024)
+    parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+
+
+class AgentExecutionConfig(StrictBaseModel):
+    # Guardarraíles del loop agéntico: sin tope de iteraciones un modelo que
+    # nunca concluye consumiría presupuesto y tiempo indefinidamente.
+    skills: list[Literal["web_search", "fetch_url", "calculator", "current_datetime", "run_code"]] = Field(
+        default_factory=lambda: list(DEFAULT_AGENT_SKILLS), max_length=8,  # type: ignore[arg-type]
+    )
+    max_iterations: int = Field(default=6, ge=1, le=20)
+    # Tools del cliente (passthrough): al llamarlas, la tarea pasa a
+    # waiting_for_tools y el cliente las resuelve vía POST /tasks/{id}/tool_results.
+    client_tools: list[ClientToolDefinition] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_skills(self) -> AgentExecutionConfig:
+        if not self.skills and not self.client_tools:
+            raise ValueError("agent strategy requires at least one skill or client tool")
+        self.skills = list(dict.fromkeys(self.skills))
+        names = [tool.name for tool in self.client_tools]
+        if len(names) != len(set(names)):
+            raise ValueError("client_tools names must be unique")
+        reserved = set(AGENT_SKILLS)
+        if reserved.intersection(names):
+            raise ValueError("client_tools cannot reuse built-in skill names")
+        return self
+
+
 class ExecutionConfig(StrictBaseModel):
     strategy: ExecutionStrategy = ExecutionStrategy.single
     preset: ExecutionPreset = ExecutionPreset.fast
@@ -200,6 +271,13 @@ class ExecutionConfig(StrictBaseModel):
     timeout_seconds: int = Field(default=600, ge=1)
     early_stop: bool = True
     selection: SelectionPolicy = Field(default_factory=SelectionPolicy)
+    agent: AgentExecutionConfig = Field(default_factory=AgentExecutionConfig)
+    # Skills que cada proponente del mixture puede usar antes de proponer
+    # (verifica datos, calcula, consulta fecha). Vacío = comportamiento clásico:
+    # una sola generación por proponente, sin tools. No afecta al árbitro.
+    proposer_skills: list[Literal["web_search", "fetch_url", "calculator", "current_datetime", "run_code"]] = Field(
+        default_factory=list, max_length=8,
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -213,8 +291,13 @@ class ExecutionConfig(StrictBaseModel):
     def validate_strategy(self) -> ExecutionConfig:
         if self.strategy == ExecutionStrategy.single and self.preset != ExecutionPreset.fast:
             raise ValueError("single strategy only supports preset fast")
+        if self.strategy == ExecutionStrategy.agent and self.preset != ExecutionPreset.fast:
+            raise ValueError("agent strategy only supports preset fast")
         if self.strategy == ExecutionStrategy.mixture_of_agents:
             self.max_proposers = min(self.max_proposers, self.selection.proposer_count)
+            self.proposer_skills = list(dict.fromkeys(self.proposer_skills))
+        elif self.proposer_skills:
+            raise ValueError("proposer_skills solo aplica a la estrategia mixture_of_agents")
         return self
 
 
@@ -239,6 +322,15 @@ class TaskCreateRequest(StrictBaseModel):
     prompt_compression: Literal["off", "light", "medium", "aggressive"] | None = None
 
     @model_validator(mode="after")
+    def validate_agent_constraints(self) -> TaskCreateRequest:
+        if self.execution.strategy == ExecutionStrategy.agent:
+            if self.inference_kind != InferenceKind.chat:
+                raise ValueError("agent strategy only supports chat inference")
+            if self.output.format == OutputFormat.json:
+                raise ValueError("agent strategy does not support json output format yet")
+        return self
+
+    @model_validator(mode="after")
     def enforce_data_boundary(self) -> TaskCreateRequest:
         if self.risk.data_classification == DataClassification.local_only:
             local_provider_names = {"ollama", "lmstudio"}
@@ -254,8 +346,14 @@ class TaskCreateRequest(StrictBaseModel):
                 for provider in self.model_requirements.allowed_providers
                 if provider.lower() in local_provider_names
             ] or ["ollama"]
-        if self.content.attachments:
-            raise ValueError("attachments are not supported until a lossless provider mapping exists")
+        for attachment in self.content.attachments:
+            # Solo adjuntos ya ingeridos por el broker: el mapeo es sin pérdida
+            # porque el fichero llega al modelo como Markdown dentro del prompt.
+            if attachment.type != BROKER_FILE_ATTACHMENT_TYPE or attachment_file_id(attachment) is None:
+                raise ValueError(
+                    "only broker_file attachments referencing an ingested file_id are supported "
+                    "(upload via POST /api/v1/files first)"
+                )
         if self.inference_kind == InferenceKind.embedding:
             if self.execution.strategy != ExecutionStrategy.single:
                 raise ValueError("embedding only supports single strategy")
@@ -306,6 +404,15 @@ class QueueResponse(StrictBaseModel):
 
 class QueueReorderRequest(StrictBaseModel):
     task_ids: list[str] = Field(min_length=1)
+
+
+class ToolResultItem(StrictBaseModel):
+    tool_call_id: str = Field(min_length=1, max_length=128)
+    content: str = Field(max_length=200_000)
+
+
+class ToolResultsRequest(StrictBaseModel):
+    tool_results: list[ToolResultItem] = Field(min_length=1, max_length=16)
 
 
 class UsageResponse(StrictBaseModel):
@@ -360,6 +467,53 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # La tarea puede fijar su propia compresión de prompt (campo opcional
     # prompt_compression: off/light/medium/aggressive; ausente = config global).
     prompt_compression_override: bool
+    # Estrategia agent con skills técnicas ejecutadas por el broker.
+    agent_skills: list[str]
+    # Los proponentes de un mixture pueden usar esas mismas skills antes de proponer.
+    proposer_skills: bool
+    # Passthrough: la estrategia agent acepta tools del cliente y pausa la tarea
+    # (waiting_for_tools) hasta que el cliente las resuelve vía tool_results.
+    client_tool_passthrough: bool
+    # El broker elige la estrategia si se pide strategy: auto (meta-router).
+    auto_strategy: bool
+    # Pieza 2: single puede escalar a mixture si sale de baja confianza.
+    confidence_escalation: bool
+    # Pieza 3: el router aprende de casos previos para afinar la estrategia.
+    adaptive_strategy_learning: bool
+    # Ingesta de ficheros: POST /api/v1/files convierte a Markdown y las tareas
+    # adjuntan por file_id (attachments type=broker_file).
+    file_ingestion: bool = False
+    # Skill run_code disponible (sandbox Docker habilitado en la configuración).
+    sandbox_run_code: bool = False
+    # Extensiones admitidas por la ingesta, agrupadas por tipo.
+    ingestion_formats: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class FileAcceptedResponse(StrictBaseModel):
+    file_id: str
+    status: FileStatus
+    filename: str
+    size_bytes: int
+    sha256: str
+    # False cuando la subida dedujo a un fichero ya ingerido (mismo SHA-256).
+    created: bool
+    status_url: str
+
+
+class FileStateResponse(StrictBaseModel):
+    file_id: str
+    status: FileStatus
+    filename: str
+    kind: str
+    engine: str
+    size_bytes: int
+    sha256: str
+    meta: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+    # Solo presente cuando status=ready.
+    markdown_url: str | None = None
 
 
 class DashboardSummaryResponse(StrictBaseModel):

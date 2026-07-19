@@ -4,6 +4,8 @@
 
 Contrato lógico y estado de implementación del dashboard. La pantalla de Operación está implementada en la fase 5.2; el Probador tiene base funcional en la fase 5.3; Comparación permanece planificada para la fase 5.4.
 
+Pantallas añadidas después de esta fase (documentadas en sus propios contratos, mismas reglas de frontera y de no simulación): **Modelos** (catálogo, compatibilidad sondeada y filtros), **Enrutamiento** (evidencia del meta-router por tipo de petición), **Ficheros** (ingesta de adjuntos, fase 7 — [`Phase_7_File_Ingestion.md`](Phase_7_File_Ingestion.md)) y **Configuración** (edición del YAML con revisión de cambios, incluidas las secciones de ingesta y sandbox — [`Phase_8_Sandbox.md`](Phase_8_Sandbox.md)). El Probador incorpora además adjuntos `broker_file`, skills de agente y la casilla de sandbox.
+
 ## Frontera de responsabilidad
 
 El dashboard es un cliente del AI Broker. Puede consultar estado, encolar una inferencia ya preparada, reordenar tareas pendientes y solicitar cancelación. No llama directamente a Ollama o DeepSeek, no crea workflows de conocimiento y no modifica información de Obsidian.

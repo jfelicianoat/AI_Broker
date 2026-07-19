@@ -21,6 +21,8 @@
         <a class="nav-item{% if nav == 'probador' %} active{% endif %}" href="/dashboard/prompt-tester">Probador</a>
         <a class="nav-item{% if nav == 'comparacion' %} active{% endif %}" href="/dashboard/comparison">Comparación</a>
         <a class="nav-item{% if nav == 'modelos' %} active{% endif %}" href="/dashboard/models">Modelos</a>
+        <a class="nav-item{% if nav == 'ficheros' %} active{% endif %}" href="/dashboard/files">Ficheros</a>
+        <a class="nav-item{% if nav == 'enrutamiento' %} active{% endif %}" href="/dashboard/routing">Enrutamiento</a>
         <a class="nav-item{% if nav == 'configuracion' %} active{% endif %}" href="/dashboard/config">Configuración</a>
       </nav>
     </aside>
@@ -41,5 +43,13 @@
     </div>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="conn-banner" class="conn-banner" role="alert" hidden></div>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-message">
+    <p id="confirm-dialog-message" data-confirm-message></p>
+    <div class="confirm-actions">
+      <button type="button" class="button secondary" data-confirm-cancel>Cancelar</button>
+      <button type="button" class="button danger" data-confirm-accept>Confirmar</button>
+    </div>
+  </dialog>
 </body>
 </html>

@@ -44,6 +44,14 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "max_cost_usd": "",
         "priority": "100",
         "single_model": "",
+        "agent_model": "",
+        "agent_max_iterations": "6",
+        "agent_skill_web_search": "on",
+        "agent_skill_fetch_url": "on",
+        "agent_skill_calculator": "on",
+        "agent_skill_current_datetime": "on",
+        # Opt-in: requiere sandbox.enabled y Docker en marcha.
+        "agent_skill_run_code": "",
         "arbiter_model": "",
         "proposer_model_1": "",
         "proposer_role_1": "generalist",
@@ -55,6 +63,12 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "proposer_role_4": "analyst",
         "proposer_model_5": "",
         "proposer_role_5": "reviewer",
+        "proposer_skills_enabled": "",
+        "proposer_skill_web_search": "on",
+        "proposer_skill_fetch_url": "on",
+        "proposer_skill_calculator": "on",
+        "proposer_skill_current_datetime": "on",
+        "proposer_skill_run_code": "",
     }
 
 
@@ -72,6 +86,21 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("prompt_compression.enabled", "Compresión de prompts activa"),
         ("prompt_compression.level", "Nivel de compresión de prompts"),
         ("prompt_compression.min_chars", "Mínimo de caracteres para comprimir"),
+        ("sandbox.enabled", "Sandbox de código activo"),
+        ("sandbox.image", "Imagen del sandbox"),
+        ("sandbox.timeout_seconds", "Timeout del sandbox"),
+        ("sandbox.memory_mb", "Memoria del sandbox"),
+        ("sandbox.cpus", "CPUs del sandbox"),
+        ("ingestion.enabled", "Ingesta de ficheros activa"),
+        ("ingestion.max_file_mb", "Tamaño máximo de fichero"),
+        ("ingestion.ocr_enabled", "OCR de escaneos activo"),
+        ("ingestion.conversion_timeout_seconds", "Timeout de conversión"),
+        ("ingestion.images.enabled", "Descripción de figuras activa"),
+        ("ingestion.images.base_url", "Endpoint de visión"),
+        ("ingestion.images.model", "Modelo de visión"),
+        ("ingestion.transcription.enabled", "Transcripción de audio activa"),
+        ("ingestion.transcription.model_size", "Modelo Whisper"),
+        ("ingestion.transcription.ffmpeg_path", "Ruta de ffmpeg"),
         ("providers.ollama.enabled", "Ollama activo"),
         ("providers.ollama.base_url", "Ollama base URL"),
         ("providers.ollama.timeout_seconds", "Ollama timeout"),
@@ -200,6 +229,58 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
     }
     payload["processing"] = processing
     payload["resources"] = resources
+    if form.get("strategy_router_mixture_min_prompt_chars") is not None:
+        payload["strategy_router"] = {
+            "enabled": _checked(form, "strategy_router_enabled"),
+            "heuristic_classifier": _checked(form, "strategy_router_heuristic"),
+            "confidence_escalation": _checked(form, "strategy_router_confidence"),
+            "adaptive_learning": _checked(form, "strategy_router_learning"),
+            "record_cases": _checked(form, "strategy_router_record_cases"),
+            "mixture_min_prompt_chars": _int_range_field(
+                form, "strategy_router_mixture_min_prompt_chars", minimum=0, maximum=100000,
+            ),
+            "mixture_min_budget_usd": _float_range_field(
+                form, "strategy_router_mixture_min_budget_usd", minimum=0.0, maximum=1000.0,
+            ),
+            "escalation_min_confidence": _float_range_field(
+                form, "strategy_router_escalation_min_confidence", minimum=0.0, maximum=1.0,
+            ),
+            "learning_min_cases": _int_range_field(
+                form, "strategy_router_learning_min_cases", minimum=1, maximum=10000,
+            ),
+        }
+    # Guard de presencia (como los proveedores): un formulario sin la sección
+    # no toca esa parte de la config.
+    if form.get("sandbox_image") is not None:
+        sandbox = dict(payload["sandbox"])
+        sandbox["enabled"] = _checked(form, "sandbox_enabled")
+        sandbox["image"] = form.get("sandbox_image", "").strip() or sandbox["image"]
+        sandbox["docker_path"] = form.get("sandbox_docker_path", "").strip() or sandbox["docker_path"]
+        sandbox["timeout_seconds"] = _float_range_field(
+            form, "sandbox_timeout_seconds", minimum=5.0, maximum=600.0,
+        )
+        sandbox["memory_mb"] = _int_range_field(form, "sandbox_memory_mb", minimum=64, maximum=16384)
+        sandbox["cpus"] = _float_range_field(form, "sandbox_cpus", minimum=0.1, maximum=32.0)
+        payload["sandbox"] = sandbox
+    if form.get("ingestion_max_file_mb") is not None:
+        ingestion = dict(payload["ingestion"])
+        images = dict(ingestion["images"])
+        transcription = dict(ingestion["transcription"])
+        ingestion["enabled"] = _checked(form, "ingestion_enabled")
+        ingestion["max_file_mb"] = _int_range_field(form, "ingestion_max_file_mb", minimum=1, maximum=4096)
+        ingestion["ocr_enabled"] = _checked(form, "ingestion_ocr_enabled")
+        ingestion["conversion_timeout_seconds"] = _int_range_field(
+            form, "ingestion_conversion_timeout_seconds", minimum=10, maximum=7200,
+        )
+        images["enabled"] = _checked(form, "ingestion_images_enabled")
+        images["base_url"] = form.get("ingestion_images_base_url", "").strip().rstrip("/") or images["base_url"]
+        images["model"] = form.get("ingestion_images_model", "").strip()
+        transcription["enabled"] = _checked(form, "ingestion_transcription_enabled")
+        transcription["model_size"] = form.get("ingestion_whisper_model", "").strip() or transcription["model_size"]
+        transcription["ffmpeg_path"] = form.get("ingestion_ffmpeg_path", "").strip() or transcription["ffmpeg_path"]
+        ingestion["images"] = images
+        ingestion["transcription"] = transcription
+        payload["ingestion"] = ingestion
     payload["providers"]["ollama"] = _parse_ollama_provider(current, form)
     payload["providers"]["deepseek"] = _parse_deepseek_provider(current, form)
     payload["providers"]["custom"] = _parse_custom_providers(current, form)
@@ -243,7 +324,12 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     target.processing = updated.processing
     target.prompt_compression = updated.prompt_compression
     target.resources = updated.resources
+    target.strategy_router = updated.strategy_router
     target.providers = updated.providers
+    # SandboxExecutor e IngestionService leen estas secciones en vivo desde el
+    # BrokerConfig compartido: reemplazar el atributo basta, sin reiniciar.
+    target.sandbox = updated.sandbox
+    target.ingestion = updated.ingestion
 
 
 
@@ -500,6 +586,20 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
         arbiter = _parse_model_reference(form.get("arbiter_model", ""))
         selected_models = proposers + [arbiter]
         _ensure_cloud_allowed(selected_models, cloud_allowed)
+        proposer_skills: list[str] = []
+        if _checked(form, "proposer_skills_enabled"):
+            proposer_skills = [
+                name for name, field in (
+                    ("web_search", "proposer_skill_web_search"),
+                    ("fetch_url", "proposer_skill_fetch_url"),
+                    ("calculator", "proposer_skill_calculator"),
+                    ("current_datetime", "proposer_skill_current_datetime"),
+                    ("run_code", "proposer_skill_run_code"),
+                )
+                if _checked(form, field)
+            ]
+            if not proposer_skills:
+                raise PromptTesterError("Activa al menos una skill para los proponentes, o desmarca la opción.")
         execution = {
             "strategy": "mixture_of_agents",
             "preset": preset,
@@ -508,6 +608,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "max_judges": 1,
             "max_rounds": 1,
             "timeout_seconds": _int_field(form, "timeout_seconds", 600),
+            "proposer_skills": proposer_skills,
             "selection": {
                 "mode": "manual",
                 "allow_substitution": False,
@@ -522,8 +623,49 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "allowed_providers": sorted({item.provider for item in selected_models}),
             "max_cost_usd": _optional_float(form, "max_cost_usd"),
         }
+    elif strategy == "agent":
+        target = _parse_model_reference(form.get("agent_model", ""))
+        _ensure_cloud_allowed([target], cloud_allowed)
+        skills = [
+            name for name, field in (
+                ("web_search", "agent_skill_web_search"),
+                ("fetch_url", "agent_skill_fetch_url"),
+                ("calculator", "agent_skill_calculator"),
+                ("current_datetime", "agent_skill_current_datetime"),
+                ("run_code", "agent_skill_run_code"),
+            )
+            if _checked(form, field)
+        ]
+        if not skills:
+            raise PromptTesterError("El agente necesita al menos una skill activa.")
+        execution = {
+            "strategy": "agent",
+            "preset": "fast",
+            "scheduling": "sequential",
+            "timeout_seconds": _int_field(form, "timeout_seconds", 600),
+            "agent": {
+                "skills": skills,
+                "max_iterations": _int_range_field(form, "agent_max_iterations", minimum=1, maximum=20),
+            },
+        }
+        model_requirements = {
+            "preferred_model": target.model,
+            "target_model": target.model_dump(mode="json"),
+            "fallback_allowed": fallback_allowed,
+            "cloud_allowed": cloud_allowed,
+            "allowed_providers": [target.provider],
+            "max_cost_usd": _optional_float(form, "max_cost_usd"),
+        }
     else:
         raise PromptTesterError("Estrategia no soportada.")
+
+    # Adjuntos: casillas attach_file_<file_id> con los ficheros ya ingeridos
+    # (el patrón indexado sobrevive al aplanado del formulario urlencoded).
+    attachments = [
+        {"type": "broker_file", "metadata": {"file_id": key[len("attach_file_"):]}}
+        for key in sorted(form)
+        if key.startswith("attach_file_") and form.get(key)
+    ]
 
     return TaskCreateRequest.model_validate({
         "idempotency_key": f"prompt-tester:{uuid4().hex}",
@@ -531,6 +673,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
         "prompt_compression": prompt_compression or None,
         "content": {
             "prompt": prompt,
+            "attachments": attachments,
             "metadata": {
                 "origin": "prompt_tester",
                 "input_mode": input_mode,
@@ -563,6 +706,10 @@ def _prompt_tester_impact(payload: TaskCreateRequest) -> dict[str, Any]:
         proposers = selection.get("proposers") if isinstance(selection.get("proposers"), list) else []
         expected_invocations = len(proposers) + int(execution.get("max_judges") or 1)
         selected_models = proposers + ([selection.get("arbiter")] if selection.get("arbiter") else [])
+    elif strategy == "agent":
+        agent = execution.get("agent") if isinstance(execution.get("agent"), dict) else {}
+        expected_invocations = int(agent.get("max_iterations") or 1)
+        selected_models = [model_requirements.get("target_model")]
     else:
         expected_invocations = 1
         selected_models = [model_requirements.get("target_model")]
@@ -596,6 +743,48 @@ def _prompt_tester_selected_models(payload: TaskCreateRequest) -> list[dict[str,
         model_requirements = data.get("model_requirements") or {}
         selected = [model_requirements.get("target_model")]
     return [item for item in selected if isinstance(item, dict)]
+
+
+def _model_tools_unsupported(reference: ModelReference, catalog: list[dict[str, Any]]) -> bool:
+    """True solo si el sondeo/runtime/catálogo verificó que NO soporta tools.
+    'Sin verificar' devuelve False: no hay evidencia de fallo, se deja intentar."""
+    entry = next(
+        (
+            item for item in catalog
+            if str(item.get("name")) == reference.model
+            and str(item.get("provider") or "").lower() == reference.provider.lower()
+        ),
+        None,
+    )
+    if entry is None:
+        return False
+    features = entry.get("features") or {}
+    catalog_info = entry.get("catalog") or {}
+    tools_support = features.get("tools")
+    if tools_support is None and isinstance(catalog_info.get("tools"), bool):
+        tools_support = catalog_info.get("tools")
+    return tools_support is False
+
+
+def _prompt_tester_agent_precheck(payload: TaskCreateRequest, catalog: list[dict[str, Any]]) -> None:
+    """Rechaza antes de encolar tareas cuyo modelo con tools requeridas no las
+    soporte (estrategia agent, o proponentes de mixture con skills)."""
+    strategy = payload.execution.strategy.value
+    if strategy == "agent":
+        target = payload.model_requirements.target_model
+        if target is not None and _model_tools_unsupported(target, catalog):
+            raise PromptTesterError(
+                f"El modelo {target.provider}/{target.model} no soporta tools (function calling); "
+                "elige otro modelo con tools o usa la estrategia Modelo único."
+            )
+    elif strategy == "mixture_of_agents" and payload.execution.proposer_skills:
+        selection = payload.execution.selection
+        for proposer in selection.proposers:
+            if _model_tools_unsupported(proposer, catalog):
+                raise PromptTesterError(
+                    f"El proponente {proposer.provider}/{proposer.model} no soporta tools; "
+                    "elige proponentes con tools o desactiva las herramientas de los proponentes."
+                )
 
 
 def _prompt_tester_feature_warnings(

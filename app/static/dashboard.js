@@ -26,6 +26,59 @@
     return meta ? meta.getAttribute("content") : "";
   }
 
+  // Banner persistente para fallos del autorrefresco: a diferencia del toast
+  // (2,6s y se pisa entre errores), permanece visible mientras el broker no
+  // responda y desaparece con la primera respuesta correcta.
+  function setConnBanner(message) {
+    const node = document.querySelector("#conn-banner");
+    if (!node) return;
+    if (message) {
+      node.textContent = message;
+      node.hidden = false;
+    } else if (!node.hidden) {
+      node.hidden = true;
+      node.textContent = "";
+    }
+  }
+
+  // Confirmación con <dialog> propio en lugar de window.confirm: el modal
+  // nativo bloquea la cola de eventos del navegador y rompe cualquier
+  // automatización o test headless del panel.
+  function confirmDialog(message) {
+    const dialog = document.querySelector("#confirm-dialog");
+    if (!dialog || typeof dialog.showModal !== "function") {
+      return Promise.resolve(window.confirm(message));
+    }
+    const text = dialog.querySelector("[data-confirm-message]");
+    if (text) text.textContent = message;
+    return new Promise((resolve) => {
+      const accept = dialog.querySelector("[data-confirm-accept]");
+      const cancel = dialog.querySelector("[data-confirm-cancel]");
+      const onAccept = () => dialog.close("accept");
+      const onCancel = () => dialog.close("cancel");
+      const onClose = () => {
+        if (accept) accept.removeEventListener("click", onAccept);
+        if (cancel) cancel.removeEventListener("click", onCancel);
+        dialog.removeEventListener("close", onClose);
+        resolve(dialog.returnValue === "accept");
+      };
+      if (accept) accept.addEventListener("click", onAccept);
+      if (cancel) cancel.addEventListener("click", onCancel);
+      dialog.addEventListener("close", onClose);
+      dialog.returnValue = "cancel";
+      dialog.showModal();
+      if (cancel) cancel.focus();
+    });
+  }
+
+  function connBannerMessage(error) {
+    const message = error && error.message ? error.message : "";
+    // Errores HTTP propios (403 de sesión, "Error NNN") ya vienen redactados;
+    // cualquier otra cosa es un fallo de red del fetch.
+    if (/^(Error \d|Sesión)/.test(message)) return message;
+    return "Sin conexión con el broker: se reintenta automáticamente.";
+  }
+
   function httpErrorMessage(status) {
     // El 403 del panel es casi siempre una sesión/cookie CSRF caducada en una
     // pestaña vieja: recargar la página emite credenciales frescas.
@@ -201,9 +254,10 @@
     }
   }
 
-  async function requestAndSwap(element, method, url) {
+  async function requestAndSwap(element, method, url, options) {
+    const silent = Boolean(options && options.silent);
     const confirmMessage = element.getAttribute("hx-confirm");
-    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    if (confirmMessage && !(await confirmDialog(confirmMessage))) return true;
     element.setAttribute("aria-busy", "true");
     try {
       const response = await fetch(url, {
@@ -228,8 +282,14 @@
         await refreshDashboard();
         toast("Panel actualizado");
       }
+      setConnBanner(null);
+      return true;
     } catch (error) {
-      toast(error.message || "No se pudo actualizar el panel");
+      // El autorrefresco falla en silencio hacia el banner persistente; solo
+      // las acciones iniciadas por el usuario producen toast.
+      if (silent) setConnBanner(connBannerMessage(error));
+      else toast(error.message || "No se pudo actualizar el panel");
+      return false;
     } finally {
       element.removeAttribute("aria-busy");
     }
@@ -303,12 +363,21 @@
     return match ? Number(match[1]) * 1000 : null;
   }
 
+  function selectionInside(panel) {
+    // Una selección de texto viva dentro del panel (p. ej. copiando un
+    // task-id) también pausa el refresco: el swap con outerHTML la destruiría.
+    const selection = window.getSelection ? window.getSelection() : null;
+    if (!selection || selection.isCollapsed || !selection.anchorNode) return false;
+    const node = selection.anchorNode;
+    return panel.contains(node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode);
+  }
+
   function refreshPaused(element) {
     const panel = element.closest("[data-refresh-pauseable]") || element;
     const active = document.activeElement;
     return Boolean(
       panel.matches("[data-refresh-pauseable]") &&
-      (panel.matches(":hover") || (active && panel.contains(active)))
+      (panel.matches(":hover") || (active && panel.contains(active)) || selectionInside(panel))
     );
   }
 
@@ -332,15 +401,21 @@
       const trigger = element.getAttribute("hx-trigger") || "click";
       const interval = intervalFrom(trigger);
       if (interval) {
+        // Backoff exponencial tras fallos consecutivos (cap: 60s) para no
+        // martillear un broker caído; un swap correcto reemplaza el nodo y
+        // el fragmento nuevo arranca con su intervalo base.
+        let failures = 0;
+        const delay = () => Math.max(interval, Math.min(interval * (2 ** failures), 60000));
         const schedule = () => window.setTimeout(async () => {
           if (!document.contains(element)) return;
-          if (refreshPaused(element)) {
+          if (document.hidden || refreshPaused(element)) {
             schedule();
             return;
           }
-          await requestAndSwap(element, method, url);
+          const ok = await requestAndSwap(element, method, url, {silent: true});
+          failures = ok ? 0 : failures + 1;
           schedule();
-        }, interval);
+        }, delay());
         schedule();
       }
       if (!interval || trigger.includes("click")) {
@@ -410,7 +485,7 @@
         event.preventDefault();
         const deleteTarget = event.submitter ? event.submitter.getAttribute("data-provider-delete") : null;
         if (deleteTarget !== null) {
-          const confirmed = window.confirm(
+          const confirmed = await confirmDialog(
             `¿Eliminar el proveedor ${deleteTarget}? Se borrará su configuración y su lista de modelos al guardar.`
           );
           if (!confirmed) return;
@@ -446,7 +521,7 @@
 
   function testerModelFieldNames() {
     return [
-      "single_model",
+      "single_model", "agent_model",
       "proposer_model_1", "proposer_model_2", "proposer_model_3", "proposer_model_4", "proposer_model_5",
       "arbiter_model"
     ];
@@ -469,13 +544,15 @@
     form.querySelectorAll(".model-combo").forEach((combo) => {
       const input = combo.querySelector("[data-model-combo]");
       const hidden = combo.querySelector("[data-model-combo-value]");
+      const hint = combo.querySelector("[data-model-combo-hint]");
       if (!input || !hidden || processed.has(input)) return;
       processed.add(input);
       const sync = () => {
         const entry = catalog.byLabel.get(input.value.trim());
         hidden.value = entry ? entry.value : "";
-        // Texto sin correspondencia con el catálogo: aviso visual sutil.
-        input.classList.toggle("model-combo-invalid", input.value.trim() !== "" && !entry);
+        const invalid = input.value.trim() !== "" && !entry;
+        input.classList.toggle("model-combo-invalid", invalid);
+        if (hint) hint.hidden = !invalid;
         updateTesterFeatureWarnings(form);
       };
       input.addEventListener("input", sync);

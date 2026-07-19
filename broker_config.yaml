@@ -1,6 +1,6 @@
 server:
   host: 127.0.0.1
-  port: 8080
+  port: 8765
   workers: 1
   cors_enabled: false
   admin_token_env: AI_BROKER_ADMIN_TOKEN
@@ -26,6 +26,38 @@ prompt_compression:
   enabled: true
   level: aggressive
   min_chars: 40
+ingestion:
+  enabled: true
+  storage_dir: state/files
+  max_file_mb: 200
+  max_pdf_pages: 500
+  ocr_enabled: true
+  ocr_languages:
+  - es
+  - en
+  conversion_timeout_seconds: 1800
+  images:
+    enabled: true
+    base_url: http://127.0.0.1:1234/v1
+    model: google/gemma-4-31b-qat
+    api_key_env: null
+    timeout_seconds: 180.0
+    max_images: 20
+  transcription:
+    enabled: true
+    model_size: small
+    device: auto
+    language: null
+    ffmpeg_path: C:\Users\pcesp\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe
+sandbox:
+  enabled: true
+  docker_path: docker
+  image: ai-broker-sandbox:latest
+  timeout_seconds: 60.0
+  memory_mb: 1024
+  cpus: 2.0
+  pids_limit: 256
+  max_output_chars: 8000
 resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0

@@ -13,7 +13,9 @@ La base de la fase 5.3 ya esta implementada en:
 
 La ruta construye un `TaskCreateRequest` normal y usa la cola durable del Broker. No llama directamente a Ollama, DeepSeek ni a ningun provider. La base implementada cubre entrada `Prompt`/`JSON`, modelo `single` exacto, `mixture_of_agents/fast|slow` manual, roles de proponentes, arbitro exacto, limites de generacion, privacidad, cloud, fallback, timeout, coste, prioridad y preview del request validado.
 
-Quedan pendientes para completar la pantalla: historial HTML filtrado por `origin = prompt_tester`, cancelacion y repeticion desde la propia pantalla, visualizacion de resultado raw/uso/fallback/metadata de consenso, filtros avanzados del catalogo, CSRF/Origin y CSP estricta.
+Añadido despues de la base (julio 2026): estrategia `agent` con casillas de skills (incluida "Ejecutar código (sandbox)" cuando `sandbox.enabled`), proponentes del mixture con skills, selector de compresion de prompt por prueba con vista previa fiel, combos de modelo filtrables que excluyen modelos no operativos, avisos por capacidades sondeadas (JSON mode/tools), precheck de tools antes de encolar, seguimiento del estado de la tarea encolada por fragmento, y casillas de **ficheros adjuntos** (`broker_file` con tokens estimados; adjuntos no `ready` se rechazan sin encolar). CSRF/Origin y sesion admin quedaron cubiertos por la fase 5.5.
+
+Quedan pendientes: historial HTML filtrado por `origin = prompt_tester`, cancelacion y repeticion desde la propia pantalla, y visualizacion completa de resultado raw/uso/fallback/metadata de consenso (parcialmente cubierta por el detalle de tarea y la pantalla Comparacion).
 
 ## Objetivo
 
