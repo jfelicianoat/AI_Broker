@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import secrets
 
 import uvicorn
 
@@ -22,13 +24,39 @@ def main() -> int:
     # app recargaba la config por defecto e ignoraba --config para todo lo que
     # no fuera host/puerto.
     config = load_config(args.config)
+    host = args.host or config.server.host
+    port = args.port or config.server.port
+    # Token admin efímero: se genera uno nuevo en cada arranque y se publica en
+    # la variable de entorno que resolve_admin_token consulta con máxima
+    # prioridad (por encima del keyring). Si la variable ya viene definida
+    # desde fuera se respeta ese valor: es la vía para fijar un token estable.
+    env_name = config.server.admin_token_env
+    if env_name:
+        token = os.environ.get(env_name)
+        origen = "definido externamente via %s" % env_name
+        if not token:
+            token = secrets.token_urlsafe(24)
+            os.environ[env_name] = token
+            origen = "generado para esta sesion"
+        print("=" * 58)
+        print("  Panel:")
+        print()
+        print("    http://%s:%s/dashboard" % (host, port))
+        print()
+        print("  Token de administracion (%s):" % origen)
+        print()
+        print("    %s" % token)
+        print()
+        print("  Usalo en el login del panel o en la cabecera")
+        print("  X-Admin-Token de la API. Cambia en cada arranque.")
+        print("=" * 58, flush=True)
     app = create_app(config, config_path=args.config)
     # Al pasar la instancia (no un import string) Uvicorn corre en un único
     # proceso; el broker asume un solo worker por su estado en SQLite.
     uvicorn.run(
         app,
-        host=args.host or config.server.host,
-        port=args.port or config.server.port,
+        host=host,
+        port=port,
         log_level=args.log_level,
     )
     return 0
