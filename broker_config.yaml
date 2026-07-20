@@ -1,5 +1,5 @@
 server:
-  host: 127.0.0.1
+  host: 192.168.1.52
   port: 8765
   workers: 1
   cors_enabled: false
@@ -12,6 +12,7 @@ persistence:
   journal_mode: WAL
   events_retention_days: 30
   artifacts_retention_days: 0
+  files_retention_days: 0
 processing:
   max_active_workflows: 1
   max_parallel_invocations: auto
@@ -29,15 +30,12 @@ prompt_compression:
 ingestion:
   enabled: true
   storage_dir: state/files
-  # 8 GB: cubre vídeos de reuniones de varias horas. La subida es en streaming
-  # a disco, así que el tope no compromete la RAM.
   max_file_mb: 8192
   max_pdf_pages: 2000
   ocr_enabled: true
   ocr_languages:
   - es
   - en
-  # 2 h de plazo: audio de varias horas transcrito con whisper small en CPU.
   conversion_timeout_seconds: 7200
   images:
     enabled: true
@@ -74,6 +72,18 @@ routing:
   success_weight: 0.5
   latency_weight: 0.3
   cost_weight: 0.2
+strategy_router:
+  enabled: false
+  heuristic_classifier: true
+  confidence_escalation: false
+  adaptive_learning: false
+  record_cases: true
+  mixture_min_prompt_chars: 600
+  mixture_min_budget_usd: 0.0
+  escalation_min_confidence: 0.6
+  learning_min_cases: 5
+  learning_escalation_threshold: 0.5
+  learning_failure_threshold: 0.4
 model_enrichment:
   enabled: true
   url: https://models.dev/api.json
@@ -1061,7 +1071,7 @@ providers:
       capabilities:
       - completion
       compatibility: error
-      compatibility_checked_at: '2026-06-28T16:52:27.059309+00:00'
+      compatibility_checked_at: '2026-07-20T20:13:47.441855+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
         Server Error","status":500,"detail":"Internal error while making inference
