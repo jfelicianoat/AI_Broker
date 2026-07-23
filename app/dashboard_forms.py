@@ -18,6 +18,7 @@ from app.config import (
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
 )
+from app.providers.base import infer_openai_compatible_capabilities
 from app.schemas import ModelReference, OutputFormat, TaskCreateRequest, is_local_deployment
 
 
@@ -250,6 +251,16 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
                 form, "strategy_router_learning_min_cases", minimum=1, maximum=10000,
             ),
         }
+    if form.get("routing_min_invocations") is not None:
+        payload["routing"] = {
+            "adaptive_selection": _checked(form, "routing_adaptive_selection"),
+            "stats_window_days": _int_range_field(form, "routing_stats_window_days", minimum=1, maximum=365),
+            "min_invocations": _int_range_field(form, "routing_min_invocations", minimum=1, maximum=1000),
+            "success_weight": _float_range_field(form, "routing_success_weight", minimum=0.0, maximum=10.0),
+            "latency_weight": _float_range_field(form, "routing_latency_weight", minimum=0.0, maximum=10.0),
+            "cost_weight": _float_range_field(form, "routing_cost_weight", minimum=0.0, maximum=10.0),
+            "exploration_rate": _float_range_field(form, "routing_exploration_rate", minimum=0.0, maximum=1.0),
+        }
     # Guard de presencia (como los proveedores): un formulario sin la sección
     # no toca esa parte de la config.
     if form.get("sandbox_image") is not None:
@@ -326,6 +337,11 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     target.prompt_compression = updated.prompt_compression
     target.resources = updated.resources
     target.strategy_router = updated.strategy_router
+    # RoutedModelProvider guarda una referencia al BrokerConfig compartido y
+    # lee self.config.routing en vivo en cada selección: sin esto, guardar
+    # desde el panel persistía el YAML pero exploration_rate/pesos/etc.
+    # seguían con el valor antiguo hasta reiniciar el proceso.
+    target.routing = updated.routing
     target.providers = updated.providers
     # SandboxExecutor e IngestionService leen estas secciones en vivo desde el
     # BrokerConfig compartido: reemplazar el atributo basta, sin reiniciar.
@@ -422,11 +438,19 @@ def _parse_custom_provider_models(
         parts = [part.strip() for part in line.split("|")]
         try:
             previous = previous_models.get(parts[0])
+            # Modelo ya conocido: se conserva su capability verificada en vez de
+            # reinferirla, para no pisar un ajuste manual previo.
+            capabilities = (
+                list(previous.capabilities)
+                if previous is not None
+                else infer_openai_compatible_capabilities(parts[0])
+            )
             models.append(OpenAICompatibleModelConfig(
                 name=parts[0],
                 context_window=int(parts[1]) if len(parts) > 1 and parts[1] else 128000,
                 input_cost_per_million=float(parts[2]) if len(parts) > 2 and parts[2] else 0.0,
                 output_cost_per_million=float(parts[3]) if len(parts) > 3 and parts[3] else 0.0,
+                capabilities=capabilities,
                 compatibility=previous.compatibility if previous is not None else "unknown",
                 compatibility_checked_at=previous.compatibility_checked_at if previous is not None else None,
                 compatibility_error=previous.compatibility_error if previous is not None else None,

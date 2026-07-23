@@ -129,10 +129,15 @@ class IngestionConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """Sandbox de ejecución de código (skill run_code de la estrategia agent).
 
-    Contenedores Docker efímeros SIEMPRE sin red, sin volúmenes del host y sin
-    privilegios: esas fronteras no son configurables a propósito. Requiere
-    Docker Desktop en marcha; si no responde, la skill devuelve un error claro
-    al modelo sin afectar al resto del broker.
+    Contenedores Docker efímeros SIEMPRE sin red y sin privilegios: esas
+    fronteras no son configurables a propósito. Nunca se monta un directorio
+    del host (ningún bind mount): cuando la tarea tiene adjuntos tabulares
+    autorizados, se usa un volumen de Docker efímero respaldado por tmpfs
+    (nunca por disco) para poder copiarlos con `docker cp` antes de ejecutar
+    el código — `docker cp` no funciona contra un tmpfs montado directamente
+    en un contenedor `--read-only` (verificado empíricamente), de ahí el
+    volumen intermedio. Requiere Docker Desktop en marcha; si no responde, la
+    skill devuelve un error claro al modelo sin afectar al resto del broker.
     """
     enabled: bool = False
     docker_path: str = Field(default="docker", min_length=1, max_length=512)
@@ -142,6 +147,17 @@ class SandboxConfig(BaseModel):
     cpus: float = Field(default=2.0, gt=0, le=32)
     pids_limit: int = Field(default=256, ge=16, le=4096)
     max_output_chars: int = Field(default=8000, ge=500, le=100_000)
+    # Tamaño del volumen tmpfs /work usado solo cuando run_code recibe
+    # adjuntos a stagear (ver app.sandbox.SandboxExecutor). El tmpfs cuenta
+    # contra memory_mb, así que debe quedar cómodamente por debajo: escribir
+    # el adjunto ya podría agotar memoria antes de ejecutar una línea de código.
+    work_volume_mb: int = Field(default=256, ge=32, le=4096)
+
+    @model_validator(mode="after")
+    def validate_work_volume_fits_memory(self) -> SandboxConfig:
+        if self.work_volume_mb >= self.memory_mb:
+            raise ValueError("sandbox.work_volume_mb debe ser menor que sandbox.memory_mb")
+        return self
 
 
 class ResourceConfig(BaseModel):
@@ -213,6 +229,13 @@ class RoutingConfig(BaseModel):
     success_weight: float = Field(default=0.5, ge=0)
     latency_weight: float = Field(default=0.3, ge=0)
     cost_weight: float = Field(default=0.2, ge=0)
+    # Probabilidad de ignorar el score y ascender un candidato aleatorio a la
+    # primera posición. Sin esto, un modelo que gana la comparación en cuanto
+    # supera min_invocations se autorrefuerza indefinidamente: solo él sigue
+    # acumulando invocaciones, así que ningún otro candidato alcanza nunca
+    # evidencia suficiente para competir. 0 = desactivado (comportamiento
+    # clásico, determinista).
+    exploration_rate: float = Field(default=0.0, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RoutingConfig:

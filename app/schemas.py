@@ -308,6 +308,25 @@ class ExecutionConfig(StrictBaseModel):
         return self
 
 
+def run_code_available(execution: ExecutionConfig) -> bool:
+    """True si esta ejecución podría llegar a invocar la skill run_code.
+
+    single no tiene mecanismo de tool-calling en absoluto: nunca es True.
+    auto se resuelve más tarde (ver strategy_router); antes de resolverse no
+    se puede saber con certeza, así que se trata como True (no bloquear
+    prematuramente una tarea que auto podría resolver a agent/mixture con
+    run_code) — el bloqueo real para auto ocurre después de resolver, en
+    ConsensusCoordinator._process_task_request.
+    """
+    if execution.strategy == ExecutionStrategy.agent:
+        return "run_code" in execution.agent.skills
+    if execution.strategy == ExecutionStrategy.mixture_of_agents:
+        return "run_code" in execution.proposer_skills
+    if execution.strategy == ExecutionStrategy.auto:
+        return True
+    return False
+
+
 class RiskConfig(StrictBaseModel):
     data_classification: DataClassification = DataClassification.internal
     human_review_required: bool = False

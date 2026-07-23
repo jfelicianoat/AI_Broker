@@ -72,6 +72,7 @@ routing:
   success_weight: 0.5
   latency_weight: 0.3
   cost_weight: 0.2
+  exploration_rate: 0.15
 strategy_router:
   enabled: false
   heuristic_classifier: true
@@ -186,9 +187,9 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: compatible
-      compatibility_checked_at: '2026-06-29T21:16:06.909813+00:00'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
       compatibility_error: null
       features: {}
       features_checked_at: null
@@ -421,9 +422,9 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: compatible
-      compatibility_checked_at: '2026-06-28T11:40:13.903224+00:00'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
       compatibility_error: null
       features: {}
       features_checked_at: null
@@ -1096,11 +1097,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T16:52:36.108293+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/gliner-pii
@@ -1224,11 +1224,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T16:58:34.279003+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/llama-3.2-nv-embedqa-1b-v1
@@ -1236,11 +1235,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T16:58:36.357836+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/llama-3.3-nemotron-super-49b-v1
@@ -1270,11 +1268,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T16:58:43.090350+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/llama-nemotron-embed-vl-1b-v2
@@ -1282,11 +1279,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T16:58:45.171217+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/llama3-chatqa-1.5-70b
@@ -1497,11 +1493,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-15T16:31:23.375160+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/nv-embedcode-7b-v1
@@ -1509,11 +1504,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-15T16:31:25.529576+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/nv-embedqa-e5-v5
@@ -1521,11 +1515,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-15T16:31:27.073481+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/nv-embedqa-mistral-7b-v2
@@ -1533,11 +1526,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-15T16:31:28.461804+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/nvclip
@@ -1545,11 +1537,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-06T12:11:00.813903+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: nvidia/nvidia-nemotron-nano-9b-v2
@@ -1671,11 +1662,10 @@ providers:
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0
       capabilities:
-      - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-07-15T16:31:49.799289+00:00'
-      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
-        404 page not found'
+      - embedding
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: stepfun-ai/step-3.5-flash

@@ -84,4 +84,59 @@
       </div>
     {% endif %}
   </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <h2>Selección adaptativa de modelo</h2>
+        <p>Score por (modelo, tipo de tarea) sobre los últimos {{ model_routing.stats_window_days }} días. Un modelo necesita al menos {{ model_routing.min_invocations }} invocaciones <em>en ese tipo</em> para dejar de puntuar neutro (arranque en frío) — el historial de código no se mezcla con el de prosa ni contexto largo.</p>
+      </div>
+      <span class="badge {{ 'badge-completed' if model_routing.adaptive_selection else 'badge-neutral' }}">
+        {{ 'activa' if model_routing.adaptive_selection else 'desactivada' }}
+        {% if model_routing.exploration_rate > 0 %} · exploración {{ (model_routing.exploration_rate * 100)|round|int }}%{% endif %}
+      </span>
+    </div>
+    {% if model_routing.groups %}
+      {% for group in model_routing.groups %}
+        <h3 class="routing-subheading">{{ group.label }}</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Modelo</th>
+                <th>Invocaciones</th>
+                <th>Éxito</th>
+                <th>Latencia media</th>
+                <th>Coste medio</th>
+                <th>Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in group.rows %}
+                <tr>
+                  <td><strong>{{ row.provider }}/{{ row.model }}</strong> <small>({{ row.deployment }})</small></td>
+                  <td>{{ row.attempts }}</td>
+                  <td>{{ row.success_rate }}%</td>
+                  <td>{{ (row.avg_latency_ms ~ ' ms') if row.avg_latency_ms is not none else '—' }}</td>
+                  <td>{{ '$%.4f'|format(row.avg_cost_usd) if row.avg_cost_usd is not none else '—' }}</td>
+                  <td>
+                    {% if row.usable %}
+                      <span class="badge badge-completed">puntúa</span>
+                    {% else %}
+                      <span class="badge badge-neutral">arranque en frío</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state">
+        <strong>Aún no hay invocaciones clasificadas</strong>
+        <p>Las invocaciones registradas antes de esta versión no tienen tipo de tarea asignado y no participan aquí. En cuanto se completen tareas nuevas, esta tabla se irá llenando por tipo.</p>
+      </div>
+    {% endif %}
+  </section>
 {% endblock %}

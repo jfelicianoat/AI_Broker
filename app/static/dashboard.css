@@ -196,6 +196,7 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .routing-strat { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
 .routing-strat small { color: var(--muted); }
 .routing-reason { display: block; margin-top: 4px; color: var(--muted); line-height: 1.4; }
+.routing-subheading { margin: 16px 16px 0; font-size: 13px; font-weight: 680; }
 
 .upload-form { display: flex; gap: 14px; align-items: end; padding: 4px 16px 16px; flex-wrap: wrap; }
 .upload-form .field { min-width: 320px; }

@@ -107,7 +107,11 @@ SKILL_DEFINITIONS: dict[str, dict[str, Any]] = {
                 "SIN acceso a red ni a ficheros del host, y con límite de tiempo y "
                 "memoria. Imprime con print() todo lo que quieras recuperar. Útil "
                 "para cálculos complejos, procesar texto/datos del prompt y "
-                "verificar código antes de entregarlo."
+                "verificar código antes de entregarlo. Si la tarea tiene adjuntos "
+                "tabulares grandes (CSV/TSV/XLSX), estarán disponibles en el sandbox "
+                "bajo /work/attachments/<nombre> — la ruta exacta de cada uno "
+                "viene en el manifiesto del prompt; ábrelos ahí en vez de pedir "
+                "su contenido."
             ),
             "parameters": {
                 "type": "object",
@@ -272,7 +276,9 @@ def _run_current_datetime() -> str:
     }, ensure_ascii=False)
 
 
-async def _run_code(arguments: dict[str, Any], sandbox: Any) -> str:
+async def _run_code(
+    arguments: dict[str, Any], sandbox: Any, sandbox_files: dict[str, Any] | None,
+) -> str:
     if sandbox is None:
         raise SkillError(
             "el sandbox de código no está habilitado en este broker "
@@ -284,7 +290,7 @@ async def _run_code(arguments: dict[str, Any], sandbox: Any) -> str:
     from app.sandbox import SandboxError
 
     try:
-        return await sandbox.run_python(code)
+        return await sandbox.run_python(code, files=sandbox_files)
     except SandboxError as error:
         raise SkillError(str(error)) from error
 
@@ -295,10 +301,16 @@ async def run_skill(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     sandbox: Any | None = None,
+    sandbox_files: dict[str, Any] | None = None,
 ) -> str:
     """Ejecuta una skill y devuelve texto para el modelo. Los fallos se
     devuelven como texto de error (el agente puede reaccionar), nunca como
-    excepción hacia el coordinador — salvo skill desconocida, que es un bug."""
+    excepción hacia el coordinador — salvo skill desconocida, que es un bug.
+
+    sandbox_files (solo run_code): nombre-en-sandbox -> Path local de los
+    adjuntos tabulares autorizados de la tarea (ver
+    app.ingestion.service.staged_attachment_name); el coordinador los calcula
+    una vez por tarea, nunca desde el catálogo completo de ingesta."""
     if name not in SKILL_DEFINITIONS:
         raise SkillError(f"Skill no soportada: {name}")
     try:
@@ -309,7 +321,7 @@ async def run_skill(
         if name == "calculator":
             return _run_calculator(arguments)
         if name == "run_code":
-            return await _run_code(arguments, sandbox)
+            return await _run_code(arguments, sandbox, sandbox_files)
         return _run_current_datetime()
     except SkillError as error:
         return f"ERROR de {name}: {error}"

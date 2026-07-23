@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ from app.schemas import (
     SelectionMode,
     TaskCreateRequest,
     TaskStatus,
+    run_code_available,
 )
 from app.skills import run_skill, skill_definitions
 from app.strategy_router import (
@@ -37,6 +39,7 @@ from app.strategy_router import (
     recommend_from_cases,
     signal_bucket,
 )
+from app.task_classifier import classify_task_type
 
 logger = logging.getLogger("ai_broker.coordinator")
 
@@ -255,6 +258,31 @@ class ConsensusCoordinator:
         escalate = False
         if request.execution.strategy == ExecutionStrategy.auto:
             request, escalate = self._resolve_auto_strategy(repository, task_id, request)
+        # A esta altura la estrategia ya está resuelta (nunca "auto"): un
+        # adjunto tabular sin la skill run_code disponible nunca podría
+        # procesarse, y sin este chequeo la tarea llegaría a expand_request/
+        # routing y fallaría más tarde con CONTEXT_LIMIT_EXCEEDED, un error
+        # que no explica la causa real (ver app.ingestion.detection.TABULAR_EXTENSIONS).
+        if self.ingestion is not None and self.ingestion.has_tabular_attachments(request) \
+                and not run_code_available(request.execution):
+            repository.update_task(
+                task_id,
+                TaskStatus.failed,
+                progress={"phase": TaskStatus.failed.value},
+                error={
+                    "code": "TABULAR_ATTACHMENT_REQUIRES_SANDBOX",
+                    "message": (
+                        "Esta tarea tiene un adjunto tabular (CSV/TSV/XLSX): su contenido no "
+                        "se inyecta en el prompt, así que necesita la skill run_code "
+                        "(estrategia agent con run_code en execution.agent.skills, o "
+                        "mixture_of_agents con run_code en execution.proposer_skills) "
+                        "para poder procesarlo."
+                    ),
+                    "retryable": False,
+                },
+                clear_queue_position=True,
+            )
+            return
         self._record_compressed_prompt(repository, task_id, request)
         if escalate and request.execution.strategy == ExecutionStrategy.single:
             await self._process_single_with_escalation(repository, task_id, request)
@@ -408,7 +436,7 @@ class ConsensusCoordinator:
             # Checkpoint pre-vuelo: cada intento tiene su propia fila de
             # invocación; si el proceso muere con la llamada en el aire, la
             # recuperación la encontrará en 'started' y la tratará como ambigua.
-            invocation_id = repository.start_invocation(task_id, None, role, model)
+            invocation_id = repository.start_invocation(task_id, None, role, model, classify_task_type(request))
             try:
                 output = await self._run_cancellable(
                     repository,
@@ -662,7 +690,7 @@ class ConsensusCoordinator:
             "prompt_compression": "off",
             "execution": request.execution.model_copy(update={"long_context": "fail"}),
         })
-        invocation_id = repository.start_invocation(task_id, None, role, model)
+        invocation_id = repository.start_invocation(task_id, None, role, model, classify_task_type(request))
         try:
             output = await self._run_cancellable(
                 repository, task_id, self.provider.propose(sub_request, model, ordinal),
@@ -846,7 +874,9 @@ class ConsensusCoordinator:
             model = (await self.provider.select(judge_request, 1, ["arbiter"]))[0]
         except ProviderError:
             return 1.0, None
-        invocation_id = repository.start_invocation(task_id, None, "confidence_judge", model)
+        invocation_id = repository.start_invocation(
+            task_id, None, "confidence_judge", model, classify_task_type(request),
+        )
         try:
             output = await self._run_cancellable(
                 repository, task_id, self.provider.propose(judge_request, model, 1),
@@ -931,13 +961,18 @@ class ConsensusCoordinator:
         allow_parallel: bool = False,
         on_iteration: Any | None = None,
         iteration_offset: int = 0,
+        sandbox_files: dict[str, Path] | None = None,
     ) -> AgentLoopResult:
         """Bucle de tool-calling reutilizable (estrategia agent y proponentes
         de mixture con skills). Persiste una invocación por ronda y un evento
         agent.tool_call por skill; devuelve la respuesta final sin escribir el
         resultado terminal de la tarea (eso lo decide el llamante). Si el modelo
         llama a una tool del cliente (client_tool_names), el bucle para con
-        stop_reason=waiting_for_tools para que el cliente la resuelva."""
+        stop_reason=waiting_for_tools para que el cliente la resuelva.
+
+        sandbox_files (solo importa si "run_code" está en skills): adjuntos
+        tabulares autorizados de la tarea a stagear en el sandbox (ver
+        IngestionService.tabular_sandbox_files)."""
         skill_tools = tools if tools is not None else skill_definitions(list(skills))
         client_names = client_tool_names or set()
         outputs: list[ModelOutput] = []
@@ -949,7 +984,7 @@ class ConsensusCoordinator:
             iteration = iteration_offset + step
             if repository.is_cancel_requested(task_id):
                 return AgentLoopResult(None, outputs, "cancelled", tool_calls, last_invocation_id)
-            invocation_id = repository.start_invocation(task_id, run_id, role, model)
+            invocation_id = repository.start_invocation(task_id, run_id, role, model, classify_task_type(request))
             last_invocation_id = invocation_id
             try:
                 turn = await self._run_cancellable_turn(
@@ -978,7 +1013,10 @@ class ConsensusCoordinator:
                 if call.name not in skills:
                     tool_result = f"ERROR: la herramienta '{call.name}' no está habilitada para esta tarea."
                 else:
-                    tool_result = await run_skill(call.name, call.arguments, sandbox=self.sandbox)
+                    tool_result = await run_skill(
+                        call.name, call.arguments, sandbox=self.sandbox,
+                        sandbox_files=sandbox_files if call.name == "run_code" else None,
+                    )
                 tool_calls += 1
                 repository.add_event(task_id, "agent.tool_call", {
                     "iteration": iteration,
@@ -1035,6 +1073,11 @@ class ConsensusCoordinator:
         client_tool_names = {tool.name for tool in request.execution.agent.client_tools}
         tools = skill_definitions(skills) + self._client_tool_defs(request)
         budget = request.model_requirements.max_cost_usd
+        sandbox_files = (
+            self.ingestion.tabular_sandbox_files(request)
+            if self.ingestion is not None and "run_code" in skills
+            else {}
+        )
 
         # Reanudación tras resolver tools del cliente: se restaura la conversación
         # congelada y la contabilidad acumulada de tramos anteriores.
@@ -1083,6 +1126,7 @@ class ConsensusCoordinator:
             repository, task_id, request, model, run_id=None, messages=messages,
             skills=skills, max_iterations=max_iterations, role="agent", tools=tools,
             client_tool_names=client_tool_names, on_iteration=on_iteration, iteration_offset=iteration_offset,
+            sandbox_files=sandbox_files,
         )
         if loop.stop_reason == "cancelled" or repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
@@ -1309,7 +1353,9 @@ class ConsensusCoordinator:
             },
         )
         synthesis_request = self._with_remaining_budget(request, [output for _, output in proposals])
-        synthesis_invocation_id = repository.start_invocation(task_id, run_id, "arbiter", arbiter)
+        synthesis_invocation_id = repository.start_invocation(
+            task_id, run_id, "arbiter", arbiter, classify_task_type(request),
+        )
         try:
             synthesis = await self._run_cancellable(
                 repository,
@@ -1400,6 +1446,11 @@ class ConsensusCoordinator:
         invocation_request = self._with_wave_budget(request, completed_outputs, len(active_models))
         proposer_skills = list(request.execution.proposer_skills)
         allow_parallel = request.execution.preset == ExecutionPreset.slow and len(active_models) > 1
+        sandbox_files = (
+            self.ingestion.tabular_sandbox_files(request)
+            if self.ingestion is not None and "run_code" in proposer_skills
+            else {}
+        )
 
         async def invoke_agent(ordinal: int, model: ModelReference):
             role = model.role or "proposer"
@@ -1412,7 +1463,7 @@ class ConsensusCoordinator:
                 loop = await self._run_agent_loop(
                     repository, task_id, invocation_request, model, run_id=run_id, messages=messages,
                     skills=proposer_skills, max_iterations=request.execution.agent.max_iterations,
-                    role=role, allow_parallel=allow_parallel,
+                    role=role, allow_parallel=allow_parallel, sandbox_files=sandbox_files,
                 )
             except ProviderError as error:
                 return model, None, None, error
@@ -1430,7 +1481,7 @@ class ConsensusCoordinator:
             # Checkpoint pre-vuelo (véase start_invocation): la respuesta se
             # persiste aquí mismo al llegar, no al final de la ola, para que
             # un crash a mitad de ola no pierda las propuestas ya cobradas.
-            invocation_id = repository.start_invocation(task_id, run_id, role, model)
+            invocation_id = repository.start_invocation(task_id, run_id, role, model, classify_task_type(request))
             try:
                 output = await self._run_cancellable(
                     repository,

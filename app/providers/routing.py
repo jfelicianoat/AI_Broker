@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from app.schemas import (
     TaskCreateRequest,
     is_local_deployment,
 )
+from app.task_classifier import classify_task_type
 
 logger = logging.getLogger("ai_broker.routing")
 
@@ -241,7 +243,9 @@ class RoutedModelProvider:
                 "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
             }
 
-    def _rank_candidates(self, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _rank_candidates(
+        self, catalog: list[dict[str, Any]], request: TaskCreateRequest,
+    ) -> list[dict[str, Any]]:
         """Ordena los candidatos por score multiobjetivo (config.routing).
 
         Componentes en [0, 1]: fiabilidad (tasa de éxito con suavizado de
@@ -250,6 +254,14 @@ class RoutedModelProvider:
         puntúa neutro (0.5) en todo: el arranque en frío no castiga. El orden
         es estable: a igualdad de score se conserva el orden del catálogo, así
         que sin historial el comportamiento es idéntico al reparto clásico.
+        Si routing.exploration_rate > 0, además se aplica epsilon-greedy
+        (ver _apply_exploration) para evitar que el ganador quede fijado
+        indefinidamente.
+
+        Las métricas se filtran por el tipo de tarea de `request`
+        (app.task_classifier): un modelo bueno en prosa no hereda ese
+        historial al puntuar una tarea de código, ni viceversa. Cada
+        (modelo, tipo de tarea) acumula evidencia de forma independiente.
         """
         routing = self.config.routing
         if not routing.adaptive_selection or self._stats_loader is None or len(catalog) < 2:
@@ -263,11 +275,14 @@ class RoutedModelProvider:
         if not stats:
             return catalog
 
+        task_type = classify_task_type(request)
+
         def entry_key(entry: dict[str, Any]) -> ModelKey:
             return (
                 str(entry.get("provider") or "").lower(),
                 str(entry.get("deployment") or "").lower(),
                 str(entry.get("name") or "").lower(),
+                task_type,
             )
 
         def usable(entry: dict[str, Any]) -> ModelStats | None:
@@ -312,7 +327,32 @@ class RoutedModelProvider:
                     "ranking": [f"{e['provider']}/{e['name']}:{score(e):.3f}" for e in ranked[:5]],
                 },
             )
-        return ranked
+        return self._apply_exploration(ranked, routing)
+
+    def _apply_exploration(
+        self, ranked: list[dict[str, Any]], routing: Any,
+    ) -> list[dict[str, Any]]:
+        """Epsilon-greedy: con probabilidad exploration_rate, asciende un
+        candidato aleatorio distinto del actual primero. Sin esto, en cuanto
+        un modelo gana la comparación de score queda fijado para siempre: solo
+        él sigue recibiendo invocaciones, así que ningún otro candidato
+        acumula evidencia para disputarle el puesto (rich-get-richer)."""
+        if routing.exploration_rate <= 0 or len(ranked) < 2:
+            return ranked
+        if random.random() >= routing.exploration_rate:
+            return ranked
+        index = random.randrange(1, len(ranked))
+        explored = list(ranked)
+        explored[0], explored[index] = explored[index], explored[0]
+        logger.info(
+            "routing.exploration",
+            extra={
+                "event": "routing.exploration",
+                "explored": f"{explored[0]['provider']}/{explored[0]['name']}",
+                "displaced": f"{ranked[0]['provider']}/{ranked[0]['name']}",
+            },
+        )
+        return explored
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         allowed = {item.lower() for item in request.model_requirements.allowed_providers}
@@ -335,7 +375,7 @@ class RoutedModelProvider:
         # Selección adaptativa: reordena por evidencia operativa a los
         # candidatos ya elegibles. target_model y preferred_model (más abajo)
         # siguen teniendo prioridad absoluta sobre el score.
-        context_catalog = self._rank_candidates(context_catalog)
+        context_catalog = self._rank_candidates(context_catalog, request)
         target = request.model_requirements.target_model
         if target is not None:
             def matches_target(item: dict[str, Any]) -> bool:

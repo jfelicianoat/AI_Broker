@@ -47,6 +47,7 @@ from app.dashboard_forms import (
 )
 from app.ingestion.detection import ALLOWED_FORMATS
 from app.ingestion.service import AttachmentError, stream_upload_to_temp
+from app.model_stats import load_model_stats
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
@@ -276,6 +277,7 @@ def create_dashboard_router(
             {
                 "router": config.strategy_router,
                 "buckets": _routing_insights(repository, config),
+                "model_routing": _model_routing_insights(repository, config),
                 "nav_active": "enrutamiento",
             },
         )
@@ -1007,6 +1009,49 @@ def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[
             "recommendation": recommendation,
         })
     return insights
+
+
+_TASK_TYPE_LABELS = {"code": "Código", "long_context": "Contexto largo", "prose": "Prosa"}
+
+
+def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) -> dict[str, Any]:
+    """Quién lidera la selección adaptativa por tipo de tarea (app.task_classifier)
+    y cuánta evidencia (invocaciones) respalda esa posición: el historial de un
+    modelo en código no se mezcla con el de prosa ni contexto largo (ver
+    app.model_stats.ModelKey)."""
+    routing = config.routing
+    stats = load_model_stats(repository.db, window_days=routing.stats_window_days)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for (provider, deployment, model, task_type), stat in stats.items():
+        groups.setdefault(task_type, []).append({
+            "provider": provider,
+            "deployment": deployment,
+            "model": model,
+            "attempts": stat.attempts,
+            "success_rate": round(stat.success_rate * 100),
+            "avg_latency_ms": round(stat.avg_latency_ms) if stat.avg_latency_ms is not None else None,
+            "avg_cost_usd": stat.avg_cost_usd,
+            "usable": stat.attempts >= routing.min_invocations,
+        })
+    task_groups = []
+    for task_type in sorted(groups, key=lambda t: _TASK_TYPE_LABELS.get(t, t)):
+        rows = sorted(
+            groups[task_type],
+            key=lambda r: (r["usable"], r["success_rate"], r["attempts"]),
+            reverse=True,
+        )
+        task_groups.append({
+            "task_type": task_type,
+            "label": _TASK_TYPE_LABELS.get(task_type, task_type),
+            "rows": rows,
+        })
+    return {
+        "adaptive_selection": routing.adaptive_selection,
+        "exploration_rate": routing.exploration_rate,
+        "min_invocations": routing.min_invocations,
+        "stats_window_days": routing.stats_window_days,
+        "groups": task_groups,
+    }
 
 
 def _model_dashboard_stats(
