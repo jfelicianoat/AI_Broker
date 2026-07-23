@@ -21,7 +21,7 @@ from uuid import uuid4
 from app.config import BrokerConfig
 from app.db import Database, dumps_json, loads_json
 from app.ingestion import engines
-from app.ingestion.detection import CODE_TEXT_EXTENSIONS, detect, safe_filename
+from app.ingestion.detection import CODE_TEXT_EXTENSIONS, TABULAR_EXTENSIONS, detect, safe_filename
 from app.providers.base import estimate_tokens_upper_bound
 from app.schemas import TaskCreateRequest, attachment_file_id
 
@@ -90,6 +90,18 @@ class FileRecord:
     meta: dict[str, Any]
     created_at: str
     updated_at: str
+
+
+def staged_attachment_name(record: FileRecord) -> str:
+    """Nombre del fichero dentro de /work/attachments en el sandbox.
+
+    Prefijado con el file_id (único) para que dos adjuntos con el mismo
+    nombre de fichero nunca choquen. expand_request() (el manifiesto que ve
+    el modelo) y ConsensusCoordinator (lo que de verdad se copia al sandbox
+    con `docker cp`) DEBEN usar esta misma función: si divergieran, el
+    manifiesto apuntaría a una ruta que el sandbox nunca stageó.
+    """
+    return f"{record.id}_{safe_filename(record.filename)}"
 
 
 def _utc_now_iso() -> str:
@@ -529,6 +541,36 @@ class IngestionService:
                     f"El fichero {file_id} sigue en '{record.status}'; espera a que esté 'ready'",
                 )
 
+    def has_tabular_attachments(self, request: TaskCreateRequest) -> bool:
+        """True si algún adjunto AUTORIZADO de la tarea (solo
+        request.content.attachments, nunca el catálogo completo de ingesta)
+        es tabular (CSV/TSV/XLSX). Se resuelve por record.extension (detectado en
+        la subida), no por el nombre que mande el cliente — attachment.name
+        es opcional y no confiable."""
+        for attachment in request.content.attachments:
+            file_id = attachment_file_id(attachment)
+            if file_id is None:
+                continue
+            record = self.get(file_id)
+            if record is not None and record.extension in TABULAR_EXTENSIONS:
+                return True
+        return False
+
+    def tabular_sandbox_files(self, request: TaskCreateRequest) -> dict[str, Path]:
+        """Adjuntos tabulares AUTORIZADOS de la tarea, listos para stagear en
+        el sandbox: nombre-en-/work/attachments (staged_attachment_name) ->
+        ruta local del original. Nunca incluye ficheros fuera de
+        request.content.attachments."""
+        files: dict[str, Path] = {}
+        for attachment in request.content.attachments:
+            file_id = attachment_file_id(attachment)
+            if file_id is None:
+                continue
+            record = self.get(file_id)
+            if record is not None and record.extension in TABULAR_EXTENSIONS:
+                files[staged_attachment_name(record)] = Path(record.original_path)
+        return files
+
     def expand_request(self, request: TaskCreateRequest) -> TaskCreateRequest:
         """Inyecta el Markdown de los adjuntos en el prompt, delimitado como datos.
 
@@ -543,10 +585,33 @@ class IngestionService:
             file_id = attachment_file_id(attachment)
             if file_id is None:
                 continue
-            markdown = self.markdown(file_id)  # lanza AttachmentError/KeyError si no está ready
             record = self.get(file_id)
-            assert record is not None
+            if record is None:
+                raise KeyError(file_id)
             name = neutralize_document_delimiters(record.filename).replace('"', "'")
+            if record.extension in TABULAR_EXTENSIONS:
+                if record.status != READY:
+                    raise AttachmentError(
+                        "ATTACHED_FILE_NOT_READY",
+                        f"El fichero {file_id} está en estado '{record.status}'",
+                    )
+                # No se inyecta el contenido: un CSV/XLSX de varios MB reventaría
+                # el contexto del modelo (ver app.ingestion.detection.TABULAR_EXTENSIONS).
+                # Solo un manifiesto; run_code lo abre desde el sandbox.
+                staged_name = staged_attachment_name(record)
+                blocks.append(
+                    f'<attached_document id="{record.id}" name="{name}">\n'
+                    f"(tipo: tabular | tamaño: {record.size_bytes} bytes | "
+                    f"ruta_sandbox: /work/attachments/{staged_name})\n\n"
+                    "Este es un fichero tabular grande: su contenido NO se ha "
+                    "insertado en este prompt. Usa la skill run_code y abre el "
+                    f"fichero desde /work/attachments/{staged_name} para "
+                    "procesarlo (el fichero completo está disponible ahí, sin "
+                    "necesidad de red).\n"
+                    "</attached_document>"
+                )
+                continue
+            markdown = self.markdown(file_id)  # lanza AttachmentError/KeyError si no está ready
             header = (
                 f"tipo: {record.kind} | motor: {record.meta.get('engine', record.engine)}"
             )
@@ -609,5 +674,6 @@ __all__ = [
     "IngestionService",
     "neutralize_document_delimiters",
     "split_expanded_prompt",
+    "staged_attachment_name",
     "stream_upload_to_temp",
 ]

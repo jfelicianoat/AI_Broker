@@ -562,6 +562,51 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     assert saved.resources.allow_execution_waves is True
 
 
+def test_dashboard_configuration_updates_routing_live(tmp_path: Path) -> None:
+    """El router (RoutedModelProvider) guarda una referencia al BrokerConfig
+    compartido y lee config.routing en vivo: guardar desde el panel debe
+    reemplazar ese atributo en memoria, no solo el YAML en disco."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-routing.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard/config")
+        assert "routing_exploration_rate" in page.text
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+                "routing_adaptive_selection": "on",
+                "routing_stats_window_days": "10",
+                "routing_min_invocations": "5",
+                "routing_success_weight": "0.6",
+                "routing_latency_weight": "0.2",
+                "routing_cost_weight": "0.2",
+                "routing_exploration_rate": "0.2",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert response.status_code == 200
+    assert "Configuración guardada" in response.text
+    # En memoria (lo que de verdad usa RoutedModelProvider en la próxima selección):
+    assert config.routing.min_invocations == 5
+    assert config.routing.exploration_rate == 0.2
+    # Y persistido en disco, para que sobreviva a un reinicio:
+    assert saved.routing.min_invocations == 5
+    assert saved.routing.exploration_rate == 0.2
+
+
 def test_dashboard_configuration_rejects_concurrent_edit(tmp_path: Path) -> None:
     import re
 
@@ -2285,10 +2330,10 @@ def test_recovery_distinguishes_local_and_remote_in_flight_calls(tmp_path: Path)
         db.execute("UPDATE tasks SET status = 'generating' WHERE id = ?", (local_id,))
         db.execute("UPDATE tasks SET status = 'proposing' WHERE id = ?", (remote_id,))
         local_inv = repository.start_invocation(
-            local_id, None, "single", ModelReference(provider="ollama", deployment="local", model="llama3")
+            local_id, None, "single", ModelReference(provider="ollama", deployment="local", model="llama3"), "prose",
         )
         remote_inv = repository.start_invocation(
-            remote_id, None, "proposer", ModelReference(provider="nvidia", deployment="api", model="yi-large")
+            remote_id, None, "proposer", ModelReference(provider="nvidia", deployment="api", model="yi-large"), "prose",
         )
 
         recovered = repository.recover_interrupted_tasks(max_attempts=3)

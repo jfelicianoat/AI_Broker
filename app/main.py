@@ -77,6 +77,7 @@ from app.schemas import (
     TaskStatus,
     ToolResultsRequest,
     UsageResponse,
+    run_code_available,
 )
 from app.startup import (
     auto_start_local_provider_servers,
@@ -344,6 +345,24 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 raise HTTPException(
                     status_code=status, detail={"code": exc.code, "message": str(exc)},
                 ) from exc
+            # Fail-fast (caso estático, resoluble sin esperar a "auto"): un CSV/TSV/XLSX
+            # no se inyecta en el prompt (ver app.ingestion.detection.TABULAR_EXTENSIONS),
+            # así que sin run_code disponible la tarea nunca podría procesarlo. Con
+            # strategy=auto no se puede saber aún (se resuelve en el coordinador tras
+            # clasificar) — run_code_available trata auto como disponible a propósito.
+            if not run_code_available(payload.execution) and ingestion.has_tabular_attachments(payload):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "TABULAR_ATTACHMENT_REQUIRES_SANDBOX",
+                        "message": (
+                            "Esta tarea tiene un adjunto tabular (CSV/TSV/XLSX): necesita la "
+                            "skill run_code (estrategia agent con run_code en "
+                            "execution.agent.skills, o mixture_of_agents con run_code en "
+                            "execution.proposer_skills) para poder procesarlo."
+                        ),
+                    },
+                )
         try:
             task, created = repository.create_task(
                 payload, queue_max_size=broker_config.processing.queue_max_size

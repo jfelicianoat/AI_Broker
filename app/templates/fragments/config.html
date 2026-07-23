@@ -124,6 +124,48 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
+        <h3>Selección adaptativa de modelo</h3>
+        <p>Ordena los modelos candidatos por evidencia operativa (éxito, latencia, coste), segmentada por tipo de tarea — código, contexto largo, prosa — en vez de un único score agregado para todo. Detalle por modelo en <a href="/dashboard/routing">Enrutamiento</a>.</p>
+      </div>
+      <span class="badge badge-neutral">routing</span>
+    </div>
+    <div class="form-body config-grid">
+      {% set routing = config.routing %}
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="routing_adaptive_selection" {% if routing.adaptive_selection %}checked{% endif %}>
+          Activar selección adaptativa (si no, se respeta el orden del catálogo)
+        </label>
+      </div>
+      <label class="field">
+        <span>Ventana de histórico (días)</span>
+        <input name="routing_stats_window_days" value="{{ routing.stats_window_days }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Mín. invocaciones para puntuar (arranque en frío)</span>
+        <input name="routing_min_invocations" value="{{ routing.min_invocations }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Peso — fiabilidad</span>
+        <input name="routing_success_weight" value="{{ routing.success_weight }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Peso — latencia</span>
+        <input name="routing_latency_weight" value="{{ routing.latency_weight }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Peso — coste</span>
+        <input name="routing_cost_weight" value="{{ routing.cost_weight }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Tasa de exploración (0-1)</span>
+        <input name="routing_exploration_rate" value="{{ routing.exploration_rate }}" inputmode="decimal">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
         <h3>Compresión de prompts</h3>
         <p>Reduce tokens del prompt (cortesías, muletillas, relleno) antes de enviarlo a los LLMs. El código y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
       </div>
