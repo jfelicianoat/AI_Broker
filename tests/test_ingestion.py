@@ -1,3 +1,4 @@
+import importlib.util
 import time
 from pathlib import Path
 
@@ -10,6 +11,15 @@ from app.ingestion.detection import UnsupportedFormat, detect
 from app.ingestion.service import neutralize_document_delimiters
 from app.main import create_app
 from app.schemas import ContentAttachment, TaskCreateRequest, attachment_file_id
+
+
+def engine_available(module: str) -> bool:
+    """Los motores de conversión son extras opcionales (`pip install -e
+    .[ingestion]`). Un caso que dependa de uno debe saltarse si falta, no
+    fallar: sin el paquete, el fichero queda en `failed` con ENGINE_MISSING y
+    la tarea que lo adjunta se rechaza con 409, que es el contrato correcto en
+    producción y no una regresión del código bajo prueba."""
+    return importlib.util.find_spec(module) is not None
 
 
 def make_client(tmp_path: Path, **ingestion_overrides) -> TestClient:
@@ -361,6 +371,7 @@ def test_task_with_tabular_attachment_and_run_code_is_accepted(tmp_path):
         assert response.status_code == 202
 
 
+@pytest.mark.skipif(not engine_available("markitdown"), reason="markitdown no instalado")
 def test_expand_request_uses_manifest_for_xlsx_too(tmp_path):
     """XLSX pasa por MarkItDown (kind=office), no por passthrough como el
     CSV, pero el bug es el mismo: un libro grande convertido a tablas

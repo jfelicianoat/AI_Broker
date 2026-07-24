@@ -229,18 +229,95 @@ class RoutingConfig(BaseModel):
     success_weight: float = Field(default=0.5, ge=0)
     latency_weight: float = Field(default=0.3, ge=0)
     cost_weight: float = Field(default=0.2, ge=0)
-    # Probabilidad de ignorar el score y ascender un candidato aleatorio a la
-    # primera posición. Sin esto, un modelo que gana la comparación en cuanto
-    # supera min_invocations se autorrefuerza indefinidamente: solo él sigue
+    # Probabilidad de ignorar el score y ascender otro candidato a la primera
+    # posición. Sin esto, un modelo que gana la comparación en cuanto supera
+    # min_invocations se autorrefuerza indefinidamente: solo él sigue
     # acumulando invocaciones, así que ningún otro candidato alcanza nunca
-    # evidencia suficiente para competir. 0 = desactivado (comportamiento
-    # clásico, determinista).
+    # evidencia suficiente para competir. La exploración prioriza a los
+    # candidatos que aún no llegan a min_invocations en ese tipo de tarea
+    # (ver RoutedModelProvider._apply_exploration). 0 = desactivado
+    # (comportamiento clásico, determinista).
     exploration_rate: float = Field(default=0.0, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RoutingConfig:
         if self.success_weight + self.latency_weight + self.cost_weight <= 0:
             raise ValueError("routing: al menos un peso debe ser mayor que cero")
+        return self
+
+
+# Tipos de tarea admitidos en task_affinity. Duplica a propósito
+# app.task_classifier.TASK_TYPES (importarlo aquí crearía un ciclo
+# config -> task_classifier -> providers.base -> config); un test de
+# contrato verifica que ambas listas no diverjan.
+TASK_AFFINITY_TYPES = ("code", "long_context", "prose")
+
+# Modelos especializados en código. Anclados a separador para no atrapar
+# "encoder"/"decoder", que son otra cosa.
+_CODE_SPECIALIST_PATTERNS = (
+    "*-coder*",
+    "*_coder*",
+    "*starcoder*",
+    "*codestral*",
+    "*codegemma*",
+    "*codellama*",
+    "*-code-*",
+    "*-code",
+    "*-code:*",
+)
+
+
+class TaskAffinityConfig(BaseModel):
+    """Qué modelos son *idóneos* para cada tipo de tarea.
+
+    Los filtros de `select()` (proveedor, cloud, capacidad, contexto) solo
+    responden a "¿puede este modelo atender la petición?", nunca a "¿debería?".
+    Sin esta capa, un modelo de código es candidato de pleno derecho para
+    redactar prosa y gana en cuanto encabeza el catálogo o sale sorteado en la
+    exploración.
+
+    Los patrones son estilo fnmatch, insensibles a mayúsculas, y se comparan
+    contra el nombre del modelo y contra su `catalog_id` de models.dev. El
+    filtro es best-effort: si dejara la selección sin candidatos, se ignora
+    (nunca se rechaza una tarea por una preferencia).
+    """
+
+    enabled: bool = True
+    # Modelos de propósito único (guardarraíles, OCR, traducción, detectores):
+    # no son modelos de chat y no deben entrar en ninguna rotación general.
+    # Los patrones van anclados a separadores a propósito: un "*ocr*" suelto
+    # casaría con "mediocre", y una exclusión de más es tan dañina como una
+    # de menos.
+    exclude_always: list[str] = Field(
+        default_factory=lambda: [
+            "*guard*",
+            "*safety*",
+            "*topic-control*",
+            "*-pii*",
+            "*-ocr*",
+            "ocr-*",
+            "*translate*",
+            "*detector*",
+            "*calibration*",
+        ]
+    )
+    # Exclusiones por tipo de tarea (app.task_classifier.classify_task_type).
+    exclude_by_task_type: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "prose": list(_CODE_SPECIALIST_PATTERNS),
+            "long_context": list(_CODE_SPECIALIST_PATTERNS),
+            "code": [],
+        }
+    )
+
+    @model_validator(mode="after")
+    def validate_task_types(self) -> TaskAffinityConfig:
+        unknown = sorted(set(self.exclude_by_task_type) - set(TASK_AFFINITY_TYPES))
+        if unknown:
+            raise ValueError(
+                "task_affinity.exclude_by_task_type: tipos desconocidos "
+                f"{unknown} (admitidos: {list(TASK_AFFINITY_TYPES)})"
+            )
         return self
 
 
@@ -371,6 +448,7 @@ class BrokerConfig(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    task_affinity: TaskAffinityConfig = Field(default_factory=TaskAffinityConfig)
     strategy_router: StrategyRouterConfig = Field(default_factory=StrategyRouterConfig)
     model_enrichment: ModelEnrichmentConfig = Field(default_factory=ModelEnrichmentConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)

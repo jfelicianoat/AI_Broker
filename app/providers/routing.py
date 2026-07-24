@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 from collections.abc import Callable
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,32 @@ from app.schemas import (
 from app.task_classifier import classify_task_type
 
 logger = logging.getLogger("ai_broker.routing")
+
+
+def _entry_key(entry: dict[str, Any], task_type: str) -> ModelKey:
+    """Identidad del candidato en la tabla de métricas (app.model_stats)."""
+    return (
+        str(entry.get("provider") or "").lower(),
+        str(entry.get("deployment") or "").lower(),
+        str(entry.get("name") or "").lower(),
+        task_type,
+    )
+
+
+def _matches_any(entry: dict[str, Any], patterns: list[str]) -> bool:
+    """Patrones fnmatch contra el nombre del modelo y su catalog_id de
+    models.dev: el mismo modelo se llama distinto según el proveedor
+    (`qwen3-coder:30b` en Ollama, `qwen/qwen3-coder-30b` en el catálogo)."""
+    catalog = entry.get("catalog") or {}
+    identities = [
+        str(entry.get("name") or "").lower(),
+        str(catalog.get("catalog_id") or "").lower(),
+    ]
+    return any(
+        fnmatch(identity, pattern.lower())
+        for identity in identities if identity
+        for pattern in patterns
+    )
 
 
 class RoutedModelProvider:
@@ -243,6 +270,27 @@ class RoutedModelProvider:
                 "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
             }
 
+    def _load_stats(self) -> dict[ModelKey, ModelStats]:
+        """Evidencia operativa, o vacío si no hay loader o falla la lectura.
+        La selección nunca debe caerse por un problema leyendo métricas."""
+        if self._stats_loader is None:
+            return {}
+        try:
+            return self._stats_loader() or {}
+        except Exception:
+            logger.warning("routing.stats_unavailable", exc_info=True)
+            return {}
+
+    @staticmethod
+    def _attempts(
+        stats: dict[ModelKey, ModelStats], entry: dict[str, Any], task_type: str,
+    ) -> int:
+        """Invocaciones registradas del modelo EN ESE tipo de tarea, incluidas
+        las que aún no llegan a min_invocations: son las que dicen cuánta
+        evidencia falta por reunir."""
+        stat = stats.get(_entry_key(entry, task_type))
+        return stat.attempts if stat is not None else 0
+
     def _rank_candidates(
         self, catalog: list[dict[str, Any]], request: TaskCreateRequest,
     ) -> list[dict[str, Any]]:
@@ -251,12 +299,15 @@ class RoutedModelProvider:
         Componentes en [0, 1]: fiabilidad (tasa de éxito con suavizado de
         Laplace), latencia y coste (normalizados min-max entre los candidatos
         de esta selección; menor es mejor). Un modelo sin historial suficiente
-        puntúa neutro (0.5) en todo: el arranque en frío no castiga. El orden
-        es estable: a igualdad de score se conserva el orden del catálogo, así
-        que sin historial el comportamiento es idéntico al reparto clásico.
-        Si routing.exploration_rate > 0, además se aplica epsilon-greedy
-        (ver _apply_exploration) para evitar que el ganador quede fijado
-        indefinidamente.
+        puntúa neutro (0.5) en todo: el arranque en frío no castiga.
+
+        A igualdad de score NO se conserva el orden del catálogo: eso ataba la
+        elección al primer modelo que devolviera el proveedor (en Ollama, el
+        último que se descargó) y, como con todo neutro empatan todos, ese
+        modelo se llevaba cada petición para siempre. El desempate lo decide
+        _evidence_rank: primero se termina de puntuar al que ya está a medias,
+        luego los no probados, y por último los que ya tienen evidencia
+        (el menos usado primero).
 
         Las métricas se filtran por el tipo de tarea de `request`
         (app.task_classifier): un modelo bueno en prosa no hereda ese
@@ -264,29 +315,17 @@ class RoutedModelProvider:
         (modelo, tipo de tarea) acumula evidencia de forma independiente.
         """
         routing = self.config.routing
-        if not routing.adaptive_selection or self._stats_loader is None or len(catalog) < 2:
+        if not routing.adaptive_selection or len(catalog) < 2:
             return catalog
-        try:
-            stats = self._stats_loader()
-        except Exception:
-            # La selección nunca debe caerse por un fallo leyendo métricas.
-            logger.warning("routing.stats_unavailable", exc_info=True)
-            return catalog
-        if not stats:
-            return catalog
-
+        # Sin estadísticas el ranking es neutro, pero la exploración sí debe
+        # correr: si aquí se devolviera el catálogo tal cual, el arranque en
+        # frío (nadie tiene historial) nunca generaría el historial que
+        # necesita para dejar de serlo.
+        stats = self._load_stats()
         task_type = classify_task_type(request)
 
-        def entry_key(entry: dict[str, Any]) -> ModelKey:
-            return (
-                str(entry.get("provider") or "").lower(),
-                str(entry.get("deployment") or "").lower(),
-                str(entry.get("name") or "").lower(),
-                task_type,
-            )
-
         def usable(entry: dict[str, Any]) -> ModelStats | None:
-            stat = stats.get(entry_key(entry))
+            stat = stats.get(_entry_key(entry, task_type))
             if stat is None or stat.attempts < routing.min_invocations:
                 return None
             return stat
@@ -318,41 +357,142 @@ class RoutedModelProvider:
                 + routing.cost_weight * cost_component
             ) / total_weight
 
-        ranked = sorted(catalog, key=score, reverse=True)
+        def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple:
+            index, entry = indexed
+            attempts = self._attempts(stats, entry, task_type)
+            # El score manda; el redondeo evita que el ruido del float deshaga
+            # empates que conceptualmente lo son (todo neutro = 0.5).
+            return (
+                -round(score(entry), 6),
+                *self._evidence_rank(attempts, routing.min_invocations),
+                index,
+            )
+
+        ranked = [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
         if ranked != catalog:
             logger.debug(
                 "routing.adaptive_ranking",
                 extra={
                     "event": "routing.adaptive_ranking",
+                    "task_type": task_type,
                     "ranking": [f"{e['provider']}/{e['name']}:{score(e):.3f}" for e in ranked[:5]],
                 },
             )
-        return self._apply_exploration(ranked, routing)
+        return self._apply_exploration(ranked, routing, stats, task_type)
+
+    @staticmethod
+    def _evidence_rank(attempts: int, min_invocations: int) -> tuple[int, int]:
+        """Desempate entre candidatos indistinguibles por score, orientado a
+        reunir evidencia cuanto antes.
+
+        Rotar uno a uno por todo el catálogo repartiría una invocación a cada
+        modelo y ninguno alcanzaría min_invocations en cientos de peticiones.
+        Por eso primero se remata al que ya tiene historial a medias (bucket 0,
+        el más avanzado antes), después se estrena a los no probados (bucket 1)
+        y por último van los que ya tienen evidencia suficiente (bucket 2,
+        el menos usado primero)."""
+        if attempts <= 0:
+            return (1, 0)
+        if attempts < min_invocations:
+            return (0, -attempts)
+        return (2, attempts)
 
     def _apply_exploration(
-        self, ranked: list[dict[str, Any]], routing: Any,
+        self,
+        ranked: list[dict[str, Any]],
+        routing: Any,
+        stats: dict[ModelKey, ModelStats],
+        task_type: str,
     ) -> list[dict[str, Any]]:
-        """Epsilon-greedy: con probabilidad exploration_rate, asciende un
-        candidato aleatorio distinto del actual primero. Sin esto, en cuanto
-        un modelo gana la comparación de score queda fijado para siempre: solo
-        él sigue recibiendo invocaciones, así que ningún otro candidato
-        acumula evidencia para disputarle el puesto (rich-get-richer)."""
+        """Epsilon-greedy dirigido: con probabilidad exploration_rate, asciende
+        otro candidato por delante del primero. Sin esto, en cuanto un modelo
+        gana la comparación de score queda fijado para siempre: solo él sigue
+        recibiendo invocaciones, así que ningún otro candidato acumula
+        evidencia para disputarle el puesto (rich-get-richer).
+
+        La exploración no es uniforme sobre todo el catálogo: se sortea entre
+        los candidatos a los que aún les falta evidencia en este tipo de tarea,
+        y dentro de esos se remata primero al que ya está a medias. Con ~80
+        modelos elegibles, un sorteo uniforme le da a cada alternativa concreta
+        un 0.2% por petición: las exploraciones se dispersarían en decenas de
+        modelos con una o dos invocaciones sueltas, ninguna de ellas suficiente
+        para que su score deje de ser neutro. Rematando de uno en uno, cada
+        modelo pasa a competir de verdad tras min_invocations exploraciones.
+        Si ya todos están medidos se cae al sorteo uniforme, que es lo que
+        evita que el campeón se eternice."""
         if routing.exploration_rate <= 0 or len(ranked) < 2:
             return ranked
         if random.random() >= routing.exploration_rate:
             return ranked
-        index = random.randrange(1, len(ranked))
+        attempts_by_index = {
+            index: self._attempts(stats, ranked[index], task_type)
+            for index in range(1, len(ranked))
+        }
+        under_measured = [
+            index for index, attempts in attempts_by_index.items()
+            if attempts < routing.min_invocations
+        ]
+        started = [index for index in under_measured if attempts_by_index[index] > 0]
+        if started:
+            most_advanced = max(attempts_by_index[index] for index in started)
+            under_measured = [index for index in started if attempts_by_index[index] == most_advanced]
+        index = random.choice(under_measured) if under_measured else random.randrange(1, len(ranked))
         explored = list(ranked)
         explored[0], explored[index] = explored[index], explored[0]
         logger.info(
             "routing.exploration",
             extra={
                 "event": "routing.exploration",
+                "task_type": task_type,
+                "directed": bool(under_measured),
                 "explored": f"{explored[0]['provider']}/{explored[0]['name']}",
                 "displaced": f"{ranked[0]['provider']}/{ranked[0]['name']}",
             },
         )
         return explored
+
+    def _filter_by_task_affinity(
+        self, catalog: list[dict[str, Any]], request: TaskCreateRequest,
+    ) -> list[dict[str, Any]]:
+        """Descarta los modelos que *pueden* atender la petición pero no
+        *deberían* (config.task_affinity): un modelo de código redactando
+        prosa, o un guardarraíl/OCR metido en la rotación general.
+
+        Best-effort por diseño: si el filtro dejara la selección vacía se
+        ignora. Ninguna preferencia debe convertir en irresoluble una tarea
+        que el broker podía atender."""
+        settings = self.config.task_affinity
+        if not settings.enabled or not catalog:
+            return catalog
+        task_type = classify_task_type(request)
+        patterns = [
+            *settings.exclude_always,
+            *settings.exclude_by_task_type.get(task_type, []),
+        ]
+        if not patterns:
+            return catalog
+        kept = [entry for entry in catalog if not _matches_any(entry, patterns)]
+        if not kept:
+            logger.info(
+                "routing.affinity_ignored",
+                extra={
+                    "event": "routing.affinity_ignored",
+                    "task_type": task_type,
+                    "detail": "el filtro de idoneidad dejaría la selección sin candidatos",
+                },
+            )
+            return catalog
+        if len(kept) != len(catalog):
+            logger.debug(
+                "routing.affinity_filtered",
+                extra={
+                    "event": "routing.affinity_filtered",
+                    "task_type": task_type,
+                    "discarded": len(catalog) - len(kept),
+                    "remaining": len(kept),
+                },
+            )
+        return kept
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         allowed = {item.lower() for item in request.model_requirements.allowed_providers}
@@ -372,10 +512,14 @@ class RoutedModelProvider:
             item for item in capability_catalog
             if context_fits_with_capped_output(request, item.get("context_window"))
         ]
-        # Selección adaptativa: reordena por evidencia operativa a los
-        # candidatos ya elegibles. target_model y preferred_model (más abajo)
-        # siguen teniendo prioridad absoluta sobre el score.
-        context_catalog = self._rank_candidates(context_catalog, request)
+        # Idoneidad + selección adaptativa. `context_catalog` sigue siendo el
+        # conjunto ELEGIBLE (lo que el broker puede atender) y decide los
+        # errores de más abajo; `ranked_catalog` es el conjunto PREFERIBLE ya
+        # ordenado, del que sale la elección por defecto. target_model y
+        # preferred_model tienen prioridad absoluta sobre ambos.
+        ranked_catalog = self._rank_candidates(
+            self._filter_by_task_affinity(context_catalog, request), request,
+        )
         target = request.model_requirements.target_model
         if target is not None:
             def matches_target(item: dict[str, Any]) -> bool:
@@ -422,7 +566,12 @@ class RoutedModelProvider:
             preferred_capable = [item for item in capability_catalog if item["name"] == preferred]
             preferred_items = [item for item in context_catalog if item["name"] == preferred]
             if preferred_items:
-                context_catalog = preferred_items + [item for item in context_catalog if item["name"] != preferred]
+                # Una preferencia explícita se respeta aunque el filtro de
+                # idoneidad hubiera descartado ese modelo para este tipo de
+                # tarea: la petición manda sobre la política.
+                promoted = [item for item in ranked_catalog if item["name"] == preferred]
+                promoted += [item for item in preferred_items if item not in promoted]
+                ranked_catalog = promoted + [item for item in ranked_catalog if item["name"] != preferred]
             elif preferred_capable and preferred_capable[0].get("context_window") is None \
                     and not request.model_requirements.fallback_allowed:
                 raise ProviderError("CONTEXT_WINDOW_UNKNOWN", "El modelo preferido no declara su contexto")
@@ -450,9 +599,9 @@ class RoutedModelProvider:
             )
         if not context_catalog:
             raise ProviderError("MODEL_UNAVAILABLE", "No hay modelos permitidos disponibles", retryable=True)
-        return [ModelReference(provider=context_catalog[i % len(context_catalog)]["provider"],
-                               deployment=context_catalog[i % len(context_catalog)]["deployment"],
-                               model=context_catalog[i % len(context_catalog)]["name"], role=roles[i]) for i in range(count)]
+        return [ModelReference(provider=ranked_catalog[i % len(ranked_catalog)]["provider"],
+                               deployment=ranked_catalog[i % len(ranked_catalog)]["deployment"],
+                               model=ranked_catalog[i % len(ranked_catalog)]["name"], role=roles[i]) for i in range(count)]
 
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         system = None
