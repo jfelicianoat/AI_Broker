@@ -342,6 +342,9 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     # desde el panel persistía el YAML pero exploration_rate/pesos/etc.
     # seguían con el valor antiguo hasta reiniciar el proceso.
     target.routing = updated.routing
+    # Misma razón: el filtro de idoneidad se consulta en cada selección contra
+    # el BrokerConfig compartido.
+    target.task_affinity = updated.task_affinity
     target.providers = updated.providers
     # SandboxExecutor e IngestionService leen estas secciones en vivo desde el
     # BrokerConfig compartido: reemplazar el atributo basta, sin reiniciar.

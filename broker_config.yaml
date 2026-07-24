@@ -59,6 +59,7 @@ sandbox:
   cpus: 2.0
   pids_limit: 256
   max_output_chars: 8000
+  work_volume_mb: 256
 resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0
@@ -73,6 +74,40 @@ routing:
   latency_weight: 0.3
   cost_weight: 0.2
   exploration_rate: 0.15
+task_affinity:
+  enabled: true
+  exclude_always:
+  - '*guard*'
+  - '*safety*'
+  - '*topic-control*'
+  - '*-pii*'
+  - '*-ocr*'
+  - ocr-*
+  - '*translate*'
+  - '*detector*'
+  - '*calibration*'
+  exclude_by_task_type:
+    code: []
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    prose:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
 strategy_router:
   enabled: false
   heuristic_classifier: true
@@ -188,8 +223,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-24T19:03:04.274940+00:00'
       compatibility_error: null
       features: {}
       features_checked_at: null
@@ -331,6 +366,20 @@ providers:
         Failed to load model.","type":"invalid_request_error","param":"model","code":null}}'
       features: {}
       features_checked_at: null
+    - name: laguna-s-2.1
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-24T19:02:07.064143+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-24T19:02:42.746920+00:00'
   - id: nvidia
     enabled: true
     adapter: openai_compatible
@@ -423,9 +472,10 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: error
+      compatibility_checked_at: '2026-07-24T19:03:18.490647+00:00'
+      compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"error":"Something went wrong with the request."}'
       features: {}
       features_checked_at: null
     - name: bigcode/starcoder2-15b
@@ -1098,9 +1148,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:03:28.508054+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"status":404,"title":"Not Found","detail":"Function ''09c64e32-2b65-4892-a285-2f585408d118'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
       features: {}
       features_checked_at: null
     - name: nvidia/gliner-pii
@@ -1225,9 +1277,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:03:48.619518+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"status":404,"title":"Not Found","detail":"Function ''6cb5bc77-9adc-48ac-85e2-c0ebceda934f'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
       features: {}
       features_checked_at: null
     - name: nvidia/llama-3.2-nv-embedqa-1b-v1
@@ -1236,9 +1290,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:03:51.360005+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"status":404,"title":"Not Found","detail":"Function ''b51e8011-e772-4c9a-8b02-618e99ae4467'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
       features: {}
       features_checked_at: null
     - name: nvidia/llama-3.3-nemotron-super-49b-v1
@@ -1269,9 +1325,10 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:03:54.515355+00:00'
+      compatibility_error: 'HTTP 400 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"error":"''input_type'' parameter is required for asymmetric models"}'
       features: {}
       features_checked_at: null
     - name: nvidia/llama-nemotron-embed-vl-1b-v2
@@ -1280,9 +1337,10 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:03:56.166471+00:00'
+      compatibility_error: 'HTTP 400 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"error":"''input_type'' parameter is required for asymmetric models"}'
       features: {}
       features_checked_at: null
     - name: nvidia/llama3-chatqa-1.5-70b
@@ -1494,8 +1552,8 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-24T19:04:00.279732+00:00'
       compatibility_error: null
       features: {}
       features_checked_at: null
@@ -1505,9 +1563,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:04:02.407760+00:00'
+      compatibility_error: 'HTTP 400 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"error":"The model expects an input_type from one of `passage` or `query`
+        but none was provided."}'
       features: {}
       features_checked_at: null
     - name: nvidia/nv-embedqa-e5-v5
@@ -1516,9 +1576,10 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:04:04.621235+00:00'
+      compatibility_error: 'HTTP 400 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"error":"''input_type'' parameter is required for asymmetric models"}'
       features: {}
       features_checked_at: null
     - name: nvidia/nv-embedqa-mistral-7b-v2
@@ -1527,9 +1588,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:04:06.754509+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"status":404,"title":"Not Found","detail":"Function ''6caf65cf-1c3a-4823-89a5-21b821640d99'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
       features: {}
       features_checked_at: null
     - name: nvidia/nvclip
@@ -1538,9 +1601,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:04:08.643324+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"status":404,"title":"Not Found","detail":"Function ''3072eebf-b0f0-4318-a5b8-5a45cd035b95'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
       features: {}
       features_checked_at: null
     - name: nvidia/nvidia-nemotron-nano-9b-v2
@@ -1663,9 +1728,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - embedding
-      compatibility: unknown
-      compatibility_checked_at: null
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-24T19:04:11.523736+00:00'
+      compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/embeddings:
+        {"status":404,"title":"Not Found","detail":"Function ''1528a0ad-205a-46ac-a783-94e2372586a9'':
+        Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
       features: {}
       features_checked_at: null
     - name: stepfun-ai/step-3.5-flash
@@ -1837,5 +1904,17 @@ providers:
       compatibility: compatible
       compatibility_checked_at: '2026-07-16T19:42:28.079208+00:00'
       compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nvidia/ising-calibration-1.5-31b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - specialized
+      compatibility: unknown
+      compatibility_checked_at: '2026-07-24T19:03:37.757947+00:00'
+      compatibility_error: Capacidad no-chat catalogada; endpoint de ejecucion aun
+        no soportado.
       features: {}
       features_checked_at: null

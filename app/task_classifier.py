@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 
-from app.providers.base import estimate_required_context
 from app.schemas import TaskCreateRequest
 
 _CODE_FENCE_RE = re.compile(r"```")
@@ -45,6 +44,12 @@ def classify_task_type(request: TaskCreateRequest) -> str:
     largo); si no hay señal de código, decide el tamaño; si no, prosa por
     defecto.
     """
+    # Import diferido: app.providers.base tira de app.providers, que importa
+    # el router, que importa este módulo. Con el import arriba, el ciclo solo
+    # se resolvía si algo cargaba antes app.providers (lo que hace el arranque
+    # del broker, pero no un script que empiece por el clasificador).
+    from app.providers.base import estimate_required_context
+
     prompt = request.content.prompt
     lowered = prompt.lower()
     has_code_signal = bool(

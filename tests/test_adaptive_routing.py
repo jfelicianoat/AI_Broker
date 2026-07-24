@@ -1,4 +1,5 @@
 """Cobertura de la selección adaptativa: métricas por modelo y score multiobjetivo."""
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -6,11 +7,13 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
 
-from app.config import BrokerConfig, RoutingConfig
+from app.config import TASK_AFFINITY_TYPES, BrokerConfig, RoutingConfig, TaskAffinityConfig
 from app.db import Database
+from app.maintenance import backfill_invocation_task_type
 from app.model_stats import ModelStats, load_model_stats
 from app.providers import RoutedModelProvider
 from app.schemas import TaskCreateRequest
+from app.task_classifier import TASK_TYPES
 
 
 def _insert_invocation(db: Database, *, model: str, status: str, latency_ms: float | None,
@@ -62,6 +65,67 @@ class ModelStatsTests(unittest.TestCase):
         self.assertAlmostEqual(entry.success_rate, 0.6)
 
     def test_empty_history_returns_no_stats(self) -> None:
+        self.assertEqual(load_model_stats(self.db, window_days=7), {})
+
+    def test_backfill_recovers_history_written_before_the_task_type_column(self) -> None:
+        # Historial anterior a la columna: invisible para el score aunque esté
+        # en la base, porque load_model_stats descarta los NULL.
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.execute(
+            "UPDATE tasks SET request_json = ? WHERE id = 'task_stats'",
+            (json.dumps({
+                "idempotency_key": "legacy:1",
+                "content": {"prompt": "Refactoriza esta función de Python y corrige el bug."},
+            }),),
+        )
+        for _ in range(2):
+            _insert_invocation(
+                self.db, model="antiguo", status="completed", latency_ms=100,
+                cost_usd=0.0, created_at=now, task_type=None,
+            )
+        self.assertEqual(load_model_stats(self.db, window_days=7), {})
+
+        preview = backfill_invocation_task_type(self.db, dry_run=True)
+        self.assertEqual((preview.pending, preview.classified, preview.skipped), (2, 2, 0))
+        self.assertEqual(load_model_stats(self.db, window_days=7), {}, "dry-run no escribe")
+
+        result = backfill_invocation_task_type(self.db)
+        self.assertEqual(result.classified, 2)
+        self.assertEqual(result.reconstructed, 0)
+        stats = load_model_stats(self.db, window_days=7)
+        self.assertEqual(stats[("ollama", "local", "antiguo", "code")].attempts, 2)
+        # Idempotente: ya no queda nada pendiente.
+        self.assertEqual(backfill_invocation_task_type(self.db).pending, 0)
+
+    def test_backfill_reconstructs_requests_that_no_longer_validate(self) -> None:
+        # El esquema de petición ha evolucionado: lo guardado hace meses puede
+        # no validar hoy. Mientras quede el prompt, la fila es recuperable.
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.execute(
+            "UPDATE tasks SET request_json = ? WHERE id = 'task_stats'",
+            (json.dumps({
+                "content": {"prompt": "Redacta un resumen ejecutivo."},
+                "execution": {"strategy": "estrategia_que_ya_no_existe"},
+            }),),
+        )
+        _insert_invocation(
+            self.db, model="antiguo", status="completed", latency_ms=100,
+            cost_usd=0.0, created_at=now, task_type=None,
+        )
+        result = backfill_invocation_task_type(self.db)
+        self.assertEqual((result.classified, result.reconstructed, result.skipped), (1, 1, 0))
+        stats = load_model_stats(self.db, window_days=7)
+        self.assertEqual(stats[("ollama", "local", "antiguo", "prose")].attempts, 1)
+
+    def test_backfill_skips_rows_without_a_recoverable_prompt(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.execute("UPDATE tasks SET request_json = '{}' WHERE id = 'task_stats'")
+        _insert_invocation(
+            self.db, model="antiguo", status="completed", latency_ms=100,
+            cost_usd=0.0, created_at=now, task_type=None,
+        )
+        result = backfill_invocation_task_type(self.db)
+        self.assertEqual((result.classified, result.skipped), (0, 1))
         self.assertEqual(load_model_stats(self.db, window_days=7), {})
 
 
@@ -121,23 +185,23 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.model for item in selected], ["excelente", "mediocre"])
         await router.close()
 
-    async def test_cold_start_and_disabled_adaptive_preserve_catalog_order(self) -> None:
+    async def test_without_any_history_catalog_order_decides(self) -> None:
+        # Empate total (nadie tiene historial): sin nada que distinga a los
+        # candidatos, el orden del catálogo es el desempate final.
         catalog = [_local_entry("primero"), _local_entry("segundo")]
+        router = _router(catalog, {})
+        selected = await router.select(_request(), 1, ["single"])
+        self.assertEqual(selected[0].model, "primero")
+        await router.close()
 
-        # Sin historial suficiente (min_invocations) todo puntúa neutro:
-        # el orden estable conserva el catálogo.
-        cold_stats = {("ollama", "local", "segundo", "prose"): ModelStats(1, 1, 100.0, 0.0)}
-        cold_router = _router(catalog, cold_stats)
-        cold = await cold_router.select(_request(), 1, ["single"])
-        self.assertEqual(cold[0].model, "primero")
-        await cold_router.close()
-
-        # Con adaptive_selection=false el score ni se calcula.
+    async def test_disabled_adaptive_preserves_catalog_order(self) -> None:
+        # Con adaptive_selection=false el score ni se calcula: reparto clásico.
+        catalog = [_local_entry("primero"), _local_entry("segundo")]
         good_stats = {("ollama", "local", "segundo", "prose"): ModelStats(10, 10, 100.0, 0.0)}
-        disabled_router = _router(catalog, good_stats, routing=RoutingConfig(adaptive_selection=False))
-        disabled = await disabled_router.select(_request(), 1, ["single"])
-        self.assertEqual(disabled[0].model, "primero")
-        await disabled_router.close()
+        router = _router(catalog, good_stats, routing=RoutingConfig(adaptive_selection=False))
+        selected = await router.select(_request(), 1, ["single"])
+        self.assertEqual(selected[0].model, "primero")
+        await router.close()
 
     async def test_stats_loader_failure_degrades_to_catalog_order(self) -> None:
         catalog = [_local_entry("primero"), _local_entry("segundo")]
@@ -224,6 +288,176 @@ class TaskTypeSegmentationTests(unittest.IsolatedAsyncioTestCase):
         await router.close()
 
 
+class EvidenceTieBreakTests(unittest.IsolatedAsyncioTestCase):
+    """Con todo el catálogo en score neutro (arranque en frío), el desempate
+    no puede ser el orden del proveedor: eso ataba cada petición al último
+    modelo descargado en Ollama. El desempate reparte la medición."""
+
+    async def test_partially_measured_model_is_finished_first(self) -> None:
+        # "a_medias" ya tiene 2 de las 3 invocaciones que exige
+        # min_invocations: rematarlo da evidencia utilizable ya, mientras que
+        # estrenar a otro no daría ninguna hasta dentro de tres peticiones.
+        catalog = [_local_entry("sin_probar"), _local_entry("a_medias")]
+        stats = {("ollama", "local", "a_medias", "prose"): ModelStats(2, 2, 100.0, 0.0)}
+        router = _router(catalog, stats)
+        selected = await router.select(_request(), 1, ["single"])
+        self.assertEqual(selected[0].model, "a_medias")
+        await router.close()
+
+    async def test_unmeasured_model_beats_already_measured_one(self) -> None:
+        # "medido" tiene evidencia suficiente, pero su score sale neutro
+        # (0.5 exactos con éxito/latencia/coste medios): a igualdad, la
+        # invocación va a quien todavía no ha sido medido.
+        catalog = [_local_entry("medido"), _local_entry("sin_probar")]
+        stats = {("ollama", "local", "medido", "prose"): ModelStats(8, 3, None, None)}
+        router = _router(catalog, stats)
+        selected = await router.select(_request(), 1, ["single"])
+        self.assertEqual(selected[0].model, "sin_probar")
+        await router.close()
+
+    async def test_score_still_beats_the_tie_break(self) -> None:
+        # El desempate solo actúa a igualdad de score: un modelo con buena
+        # evidencia gana a uno sin probar.
+        catalog = [_local_entry("sin_probar"), _local_entry("fiable")]
+        stats = {("ollama", "local", "fiable", "prose"): ModelStats(10, 10, 100.0, 0.0)}
+        router = _router(catalog, stats)
+        selected = await router.select(_request(), 1, ["single"])
+        self.assertEqual(selected[0].model, "fiable")
+        await router.close()
+
+    async def test_rotation_ends_up_measuring_every_candidate(self) -> None:
+        """El bucle real: cada petición elige, la invocación se registra y la
+        siguiente petición ve ese historial.
+
+        Es la prueba de que el bloqueo de arranque en frío queda roto. En
+        cuanto un modelo completa min_invocations su score deja de ser neutro
+        y ganaría todas las peticiones siguientes; lo que evita que ahí se
+        acabe la historia es la exploración dirigida, que va rematando de uno
+        en uno a los que aún no tienen evidencia."""
+        catalog = [_local_entry("uno"), _local_entry("dos"), _local_entry("tres")]
+        stats: dict = {}
+        router = _router(catalog, stats, routing=RoutingConfig(exploration_rate=1.0))
+        with patch("app.providers.routing.random.random", return_value=0.0), \
+                patch("app.providers.routing.random.choice", side_effect=lambda pool: pool[0]):
+            for _ in range(9):
+                selected = await router.select(_request(), 1, ["single"])
+                key = ("ollama", "local", selected[0].model, "prose")
+                previous = stats.get(key)
+                attempts = (previous.attempts if previous else 0) + 1
+                # Todas completan con las mismas métricas: lo que decide es la
+                # evidencia acumulada, no una diferencia de calidad.
+                stats[key] = ModelStats(attempts, attempts, 100.0, 0.0)
+        for name in ("uno", "dos", "tres"):
+            self.assertGreaterEqual(stats[("ollama", "local", name, "prose")].attempts, 3)
+        await router.close()
+
+    async def test_exploration_finishes_the_started_model_before_starting_another(self) -> None:
+        # Dispersar las exploraciones deja a todo el catálogo con una o dos
+        # invocaciones sueltas: ninguna llega a min_invocations y ningún score
+        # deja de ser neutro. Se remata al que ya está a medias.
+        catalog = [_local_entry("campeon"), _local_entry("sin_probar"), _local_entry("a_medias")]
+        stats = {
+            ("ollama", "local", "campeon", "prose"): ModelStats(20, 20, 100.0, 0.0),
+            ("ollama", "local", "a_medias", "prose"): ModelStats(1, 1, 5000.0, 0.0),
+        }
+        router = _router(catalog, stats, routing=RoutingConfig(exploration_rate=1.0))
+        with patch("app.providers.routing.random.random", return_value=0.0):
+            selected = await router.select(_request(), 1, ["single"])
+        self.assertEqual(selected[0].model, "a_medias")
+        await router.close()
+
+
+class TaskAffinityTests(unittest.IsolatedAsyncioTestCase):
+    """Los filtros de elegibilidad responden a "¿puede atender la petición?".
+    La idoneidad responde a "¿debería?": un modelo de código no redacta prosa
+    solo porque encabece el catálogo o le toque en la rotación."""
+
+    _CODE_PROMPT = "Implementa una función en Python y depura el traceback."
+
+    def test_config_task_types_match_the_classifier(self) -> None:
+        # config.py no puede importar task_classifier (ciclo de imports), así
+        # que la lista está duplicada: aquí se verifica que no diverja.
+        self.assertEqual(sorted(TASK_AFFINITY_TYPES), sorted(TASK_TYPES))
+
+    async def test_code_specialist_is_skipped_for_prose(self) -> None:
+        catalog = [_local_entry("qwen3-coder-next:latest"), _local_entry("gemma4:12b")]
+        router = _router(catalog, {})
+        prose = await router.select(_request(prompt="¿Cómo estás?"), 1, ["single"])
+        self.assertEqual(prose[0].model, "gemma4:12b")
+        await router.close()
+
+    async def test_code_specialist_remains_eligible_for_code(self) -> None:
+        catalog = [_local_entry("qwen3-coder-next:latest"), _local_entry("gemma4:12b")]
+        router = _router(catalog, {})
+        code = await router.select(_request(prompt=self._CODE_PROMPT), 1, ["single"])
+        self.assertEqual(code[0].model, "qwen3-coder-next:latest")
+        await router.close()
+
+    async def test_matches_catalog_id_when_the_local_name_hides_it(self) -> None:
+        # El mismo modelo se llama distinto según el proveedor: el nombre local
+        # no delata la especialidad, el catalog_id de models.dev sí.
+        disfrazado = {
+            **_local_entry("mi-modelo:latest"),
+            "catalog": {"catalog_id": "qwen/qwen3-coder-30b"},
+        }
+        router = _router([disfrazado, _local_entry("gemma4:12b")], {})
+        prose = await router.select(_request(prompt="¿Cómo estás?"), 1, ["single"])
+        self.assertEqual(prose[0].model, "gemma4:12b")
+        await router.close()
+
+    async def test_single_purpose_models_are_excluded_from_every_task_type(self) -> None:
+        # Guardarraíles, OCR y traductores no son modelos de chat: la rotación
+        # no debe estrenarlos nunca.
+        catalog = [_local_entry("meta/llama-guard-4-12b"), _local_entry("gemma4:12b")]
+        router = _router(catalog, {})
+        for prompt in ("¿Cómo estás?", self._CODE_PROMPT):
+            selected = await router.select(_request(prompt=prompt), 1, ["single"])
+            self.assertEqual(selected[0].model, "gemma4:12b")
+        await router.close()
+
+    async def test_words_containing_a_pattern_are_not_excluded(self) -> None:
+        # "mediocre" contiene "ocr" y "decoder" contiene "coder": los patrones
+        # van anclados a separadores para no atrapar palabras completas.
+        catalog = [_local_entry("mediocre:7b"), _local_entry("decoder-lm:8b")]
+        router = _router(catalog, {})
+        selected = await router.select(_request(prompt="¿Cómo estás?"), 2, ["a", "b"])
+        self.assertEqual(
+            sorted(item.model for item in selected), ["decoder-lm:8b", "mediocre:7b"],
+        )
+        await router.close()
+
+    async def test_filter_is_ignored_rather_than_failing_the_task(self) -> None:
+        # Si lo único disponible es un modelo de código, se usa: una
+        # preferencia no puede convertir en irresoluble una tarea atendible.
+        catalog = [_local_entry("qwen3-coder-next:latest")]
+        router = _router(catalog, {})
+        prose = await router.select(_request(prompt="¿Cómo estás?"), 1, ["single"])
+        self.assertEqual(prose[0].model, "qwen3-coder-next:latest")
+        await router.close()
+
+    async def test_explicit_preference_overrides_the_filter(self) -> None:
+        catalog = [_local_entry("gemma4:12b"), _local_entry("qwen3-coder-next:latest")]
+        router = _router(catalog, {})
+        prose = await router.select(
+            _request(prompt="¿Cómo estás?", preferred_model="qwen3-coder-next:latest"),
+            1,
+            ["single"],
+        )
+        self.assertEqual(prose[0].model, "qwen3-coder-next:latest")
+        await router.close()
+
+    async def test_disabled_affinity_restores_the_previous_behaviour(self) -> None:
+        catalog = [_local_entry("qwen3-coder-next:latest"), _local_entry("gemma4:12b")]
+        config = BrokerConfig()
+        config.task_affinity = TaskAffinityConfig(enabled=False)
+        router = RoutedModelProvider(
+            config, ollama=_CatalogStub(catalog), deepseek=_CatalogStub([]), stats_loader=lambda: {},
+        )
+        prose = await router.select(_request(prompt="¿Cómo estás?"), 1, ["single"])
+        self.assertEqual(prose[0].model, "qwen3-coder-next:latest")
+        await router.close()
+
+
 class ExplorationTests(unittest.IsolatedAsyncioTestCase):
     """El score determinista deja fijado a un 'campeón' en cuanto gana: sin
     exploración, ningún otro candidato vuelve a recibir invocaciones para
@@ -261,6 +495,21 @@ class ExplorationTests(unittest.IsolatedAsyncioTestCase):
             selected = await router.select(_request(), 1, ["single"])
         self.assertEqual(selected[0].model, "campeon")
         await router.close()
+
+    async def test_exploration_runs_with_no_history_at_all(self) -> None:
+        # Antes, sin estadísticas el ranking devolvía el catálogo tal cual y ni
+        # siquiera se llegaba a la exploración: el arranque en frío nunca
+        # generaba el historial que necesitaba para dejar de serlo.
+        catalog = [_local_entry("primero"), _local_entry("segundo")]
+        routing = RoutingConfig(exploration_rate=1.0)
+        for stats_loader in (lambda: {}, None):
+            with self.subTest(stats_loader=stats_loader):
+                router = _router(catalog, None, routing=routing, stats_loader=stats_loader)
+                with patch("app.providers.routing.random.random", return_value=0.0), \
+                        patch("app.providers.routing.random.choice", side_effect=lambda pool: pool[0]):
+                    selected = await router.select(_request(), 1, ["single"])
+                self.assertEqual(selected[0].model, "segundo")
+                await router.close()
 
     async def test_preferred_model_overrides_exploration(self) -> None:
         catalog = [_local_entry("campeon"), _local_entry("candidato")]
