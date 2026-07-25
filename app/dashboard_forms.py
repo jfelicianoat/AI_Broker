@@ -14,6 +14,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.config import (
+    TASK_AFFINITY_TYPES,
     BrokerConfig,
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
@@ -103,6 +104,7 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("ingestion.transcription.enabled", "Transcripción de audio activa"),
         ("ingestion.transcription.model_size", "Modelo Whisper"),
         ("ingestion.transcription.ffmpeg_path", "Ruta de ffmpeg"),
+        ("task_affinity.enabled", "Filtro de idoneidad activo"),
         ("providers.ollama.enabled", "Ollama activo"),
         ("providers.ollama.base_url", "Ollama base URL"),
         ("providers.ollama.timeout_seconds", "Ollama timeout"),
@@ -123,6 +125,24 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         after = _nested_value(updated_data, path)
         if before != after:
             changes.append({"label": label, "before": _display_config_value(before), "after": _display_config_value(after)})
+
+    # Las listas de patrones se comparan aparte: el repr de una lista de Python
+    # en la tabla de revisión no se lee, y aquí lo que importa es qué patrón
+    # entró o salió.
+    affinity_lists = [("task_affinity.exclude_always", "Idoneidad: apartar siempre")]
+    affinity_lists += [
+        (f"task_affinity.exclude_by_task_type.{task_type}", f"Idoneidad: apartar en {task_type}")
+        for task_type in TASK_AFFINITY_TYPES
+    ]
+    for path, label in affinity_lists:
+        before_list = _nested_value(current_data, path) or []
+        after_list = _nested_value(updated_data, path) or []
+        if before_list != after_list:
+            changes.append({
+                "label": label,
+                "before": ", ".join(before_list) or "sin patrones",
+                "after": ", ".join(after_list) or "sin patrones",
+            })
 
     current_custom = current_data.get("providers", {}).get("custom", [])
     updated_custom = updated_data.get("providers", {}).get("custom", [])
@@ -260,6 +280,15 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
             "latency_weight": _float_range_field(form, "routing_latency_weight", minimum=0.0, maximum=10.0),
             "cost_weight": _float_range_field(form, "routing_cost_weight", minimum=0.0, maximum=10.0),
             "exploration_rate": _float_range_field(form, "routing_exploration_rate", minimum=0.0, maximum=1.0),
+        }
+    if form.get("task_affinity_exclude_always") is not None:
+        payload["task_affinity"] = {
+            "enabled": _checked(form, "task_affinity_enabled"),
+            "exclude_always": _pattern_lines(form, "task_affinity_exclude_always"),
+            "exclude_by_task_type": {
+                task_type: _pattern_lines(form, f"task_affinity_exclude_{task_type}")
+                for task_type in TASK_AFFINITY_TYPES
+            },
         }
     # Guard de presencia (como los proveedores): un formulario sin la sección
     # no toca esa parte de la config.
@@ -889,6 +918,14 @@ def _ensure_cloud_allowed(models: list[ModelReference], cloud_allowed: bool) -> 
 
 def _checked(form: dict[str, str], key: str) -> bool:
     return form.get(key) in {"1", "true", "on", "yes"}
+
+
+def _pattern_lines(form: dict[str, str], key: str) -> list[str]:
+    """Patrones fnmatch escritos uno por línea en un textarea. Un textarea
+    vacío significa "sin patrones", no "deja los de antes": vaciar la lista es
+    una decisión legítima del usuario y debe poder tomarse desde el panel."""
+    raw = form.get(key, "")
+    return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
 def _int_field(form: dict[str, str], key: str, default: int) -> int:

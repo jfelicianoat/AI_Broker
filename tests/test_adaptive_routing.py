@@ -8,6 +8,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.config import TASK_AFFINITY_TYPES, BrokerConfig, RoutingConfig, TaskAffinityConfig
+from app.dashboard_web import _task_affinity_insights
 from app.db import Database
 from app.maintenance import backfill_invocation_task_type
 from app.model_stats import ModelStats, load_model_stats
@@ -456,6 +457,49 @@ class TaskAffinityTests(unittest.IsolatedAsyncioTestCase):
         prose = await router.select(_request(prompt="¿Cómo estás?"), 1, ["single"])
         self.assertEqual(prose[0].model, "qwen3-coder-next:latest")
         await router.close()
+
+
+class TaskAffinityInsightsTests(unittest.TestCase):
+    """Lo que muestra el panel de Enrutamiento sale de la misma función que
+    aplica el filtro: si divergieran, el panel mentiría sobre el enrutamiento."""
+
+    def test_insights_report_who_is_set_aside_per_task_type(self) -> None:
+        catalog = [
+            _local_entry("qwen3-coder-next:latest"),
+            _local_entry("gemma4:12b"),
+            _local_entry("meta/llama-guard-4-12b"),
+        ]
+        insights = _task_affinity_insights(catalog, BrokerConfig())
+        by_type = {group["task_type"]: group for group in insights["groups"]}
+        self.assertEqual(by_type["prose"]["models"], ["meta/llama-guard-4-12b", "qwen3-coder-next:latest"])
+        self.assertEqual(by_type["prose"]["remaining"], 1)
+        # En código el especialista compite; solo cae el modelo de propósito único.
+        self.assertEqual(by_type["code"]["models"], ["meta/llama-guard-4-12b"])
+        self.assertEqual(by_type["code"]["remaining"], 2)
+
+    def test_insights_flag_the_case_where_the_filter_is_ignored(self) -> None:
+        # El filtro se ignora si dejaría la selección vacía: presentarlo como
+        # exclusión efectiva sería contar algo que no ocurre.
+        insights = _task_affinity_insights([_local_entry("qwen3-coder-next:latest")], BrokerConfig())
+        by_type = {group["task_type"]: group for group in insights["groups"]}
+        self.assertTrue(by_type["prose"]["ignored"])
+        self.assertFalse(by_type["code"]["ignored"])
+
+    def test_insights_list_patterns_that_match_nothing(self) -> None:
+        config = BrokerConfig()
+        config.task_affinity = TaskAffinityConfig(
+            exclude_always=["*guard*", "*inexistente*"],
+            exclude_by_task_type={key: [] for key in TASK_AFFINITY_TYPES},
+        )
+        insights = _task_affinity_insights([_local_entry("meta/llama-guard-4-12b")], config)
+        self.assertEqual(insights["unused_patterns"], ["*inexistente*"])
+
+    def test_disabled_filter_excludes_nobody(self) -> None:
+        config = BrokerConfig()
+        config.task_affinity = TaskAffinityConfig(enabled=False)
+        insights = _task_affinity_insights([_local_entry("qwen3-coder-next:latest")], config)
+        self.assertFalse(insights["enabled"])
+        self.assertEqual([group["excluded"] for group in insights["groups"]], [0, 0, 0])
 
 
 class ExplorationTests(unittest.IsolatedAsyncioTestCase):
