@@ -50,6 +50,18 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tiff", ".tif", ".bmp"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".wmv"}
 
+# Datos tabulares: un CSV/TSV de varios MB convertido a Markdown es
+# esencialmente el fichero entero, y un XLSX grande convertido a tablas
+# Markdown por MarkItDown no es mucho mejor. Inyectarlo íntegro en el prompt
+# (como al resto de texto) revienta el contexto del modelo con ficheros de
+# pocos MB; en vez de eso, expand_request() les da un manifiesto y run_code
+# los abre desde el sandbox con pandas/openpyxl (ver
+# app.ingestion.service.staged_attachment_name; la imagen del sandbox ya trae
+# esas librerías, ver sandbox/Dockerfile). El original (no el Markdown
+# convertido) es el que se copia — record.original_path sigue siendo el
+# .xlsx real, así que pandas.read_excel() funciona igual que con un CSV.
+TABULAR_EXTENSIONS = {".csv", ".tsv", ".xlsx"}
+
 TEXT_EXTENSIONS = PLAIN_TEXT_EXTENSIONS | set(CODE_TEXT_EXTENSIONS)
 
 # Listado para /api/v1/capabilities y mensajes de rechazo.

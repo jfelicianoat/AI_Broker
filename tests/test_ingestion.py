@@ -1,3 +1,4 @@
+import importlib.util
 import time
 from pathlib import Path
 
@@ -5,11 +6,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.ingestion.engines as engines
-from app.config import BrokerConfig, IngestionConfig, PersistenceConfig, ProcessingConfig
+from app.config import BrokerConfig, IngestionConfig, PersistenceConfig, ProcessingConfig, SandboxConfig
 from app.ingestion.detection import UnsupportedFormat, detect
 from app.ingestion.service import neutralize_document_delimiters
 from app.main import create_app
 from app.schemas import ContentAttachment, TaskCreateRequest, attachment_file_id
+
+
+def engine_available(module: str) -> bool:
+    """Los motores de conversión son extras opcionales (`pip install -e
+    .[ingestion]`). Un caso que dependa de uno debe saltarse si falta, no
+    fallar: sin el paquete, el fichero queda en `failed` con ENGINE_MISSING y
+    la tarea que lo adjunta se rechaza con 409, que es el contrato correcto en
+    producción y no una regresión del código bajo prueba."""
+    return importlib.util.find_spec(module) is not None
 
 
 def make_client(tmp_path: Path, **ingestion_overrides) -> TestClient:
@@ -68,6 +78,17 @@ def test_detect_routes_families():
     assert detect("voz.mp3", b"ID3\x04").engine == "whisper"
     assert detect("clip.mp4", b"\x00\x00\x00\x18ftypmp42").engine == "whisper_video"
     assert detect("script.py", b"print('hola')").engine == "passthrough"
+
+
+def test_tabular_extensions_include_csv_tsv_and_xlsx():
+    from app.ingestion.detection import TABULAR_EXTENSIONS
+
+    assert TABULAR_EXTENSIONS == {".csv", ".tsv", ".xlsx"}
+    # xlsx sigue clasificándose como "office"/markitdown (kind/engine no
+    # cambian): TABULAR_EXTENSIONS es una capa aparte que solo mira
+    # expand_request() para decidir manifiesto vs. inyección completa.
+    assert detect("libro.xlsx", b"PK\x03\x04").kind == "office"
+    assert detect("libro.xlsx", b"PK\x03\x04").engine == "markitdown"
 
 
 def test_detect_strips_path_components():
@@ -143,8 +164,9 @@ def test_missing_engine_marks_file_failed(tmp_path, monkeypatch):
 def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
     calls: dict[str, object] = {}
 
-    def fake_extract(video_path, output_wav, *, ffmpeg_path):
+    def fake_extract(video_path, output_wav, *, ffmpeg_path, timeout_seconds):
         calls["ffmpeg"] = str(video_path)
+        calls["ffmpeg_timeout"] = timeout_seconds
         Path(output_wav).write_bytes(b"RIFFfakeWAVE")
 
     def fake_transcribe(path, *, model_size, device, language):
@@ -153,6 +175,7 @@ def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engines, "extract_audio_ffmpeg", fake_extract)
     monkeypatch.setattr(engines, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(engines, "probe_media_duration", lambda path, *, ffmpeg_path: 245.7)
     with make_client(tmp_path) as client:
         body = client.post(
             "/api/v1/files",
@@ -161,6 +184,10 @@ def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
         state = wait_for_file(client, body["file_id"])
         assert state["status"] == "ready"
         assert state["meta"]["engine"] == "ffmpeg+whisper"
+        # La duración de ffprobe (contenedor completo) prevalece sobre la de whisper.
+        assert state["meta"]["duration_seconds"] == 245.7
+        # El timeout de ffmpeg sigue al de conversión, no a un valor fijo.
+        assert calls["ffmpeg_timeout"] == client.app.state.config.ingestion.conversion_timeout_seconds
         assert "ffmpeg" in calls and "whisper" in calls
         markdown = client.get(state["markdown_url"]).text
         assert "hola desde el video" in markdown
@@ -212,6 +239,192 @@ def test_task_with_ready_file_completes_and_expands_prompt(tmp_path):
         assert "attached_document" in expanded.content.prompt
         assert "42 euros" in expanded.content.prompt
         assert request.content.prompt == "Resume el documento"
+
+
+# ------------------------------------------------------- adjuntos tabulares
+
+def _csv_bytes(rows: int = 5) -> bytes:
+    lines = ["open,high,low,close,volume"]
+    lines += [f"{i}.0,{i + 1}.0,{i - 1}.0,{i}.5,{100 + i}" for i in range(rows)]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _xlsx_bytes(rows: int = 5) -> bytes:
+    """XLSX real (no solo unos bytes con la firma zip): abrir un fichero
+    inválido dentro del sandbox con pandas/openpyxl fallaría igual que en
+    producción, así que las pruebas necesitan un workbook genuino."""
+    import io
+
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["open", "high", "low", "close", "volume"])
+    for i in range(rows):
+        sheet.append([float(i), float(i + 1), float(i - 1), float(i) + 0.5, 100 + i])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _make_client_with_sandbox(tmp_path: Path) -> TestClient:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        ingestion=IngestionConfig(storage_dir=str(tmp_path / "files")),
+        sandbox=SandboxConfig(enabled=True),
+    )
+    return TestClient(create_app(config))
+
+
+def test_expand_request_uses_manifest_not_full_csv_content(tmp_path):
+    """El bug reportado: un CSV de varios MB inyectado íntegro revienta el
+    contexto del modelo. expand_request() debe dar solo un manifiesto."""
+    with _make_client_with_sandbox(tmp_path) as client:
+        uploaded = client.post(
+            "/api/v1/files", files={"file": ("precios.csv", _csv_bytes())},
+        ).json()
+        wait_for_file(client, uploaded["file_id"])
+
+        payload = task_payload(
+            attachments=[{"type": "broker_file", "metadata": {"file_id": uploaded["file_id"]}}],
+        )
+        payload["execution"] = {"strategy": "agent", "agent": {"skills": ["run_code"]}}
+        accepted = client.post("/api/v1/tasks", json=payload)
+        task_id = accepted.json()["task_id"]
+
+        ingestion = client.app.state.ingestion
+        request = client.app.state.repository.get_task_request(task_id)
+        expanded = ingestion.expand_request(request)
+        assert "ruta_sandbox: /work/attachments/" in expanded.content.prompt
+        assert "tamaño:" in expanded.content.prompt
+        # Ninguna fila real del CSV debe aparecer en el prompt.
+        assert "100,200" not in expanded.content.prompt
+        assert "0.0,1.0,-1.0,0.5,100" not in expanded.content.prompt
+
+
+def test_tabular_sandbox_files_only_includes_authorized_attachments(tmp_path):
+    """Dos CSV subidos, pero la tarea solo referencia uno: el otro (aunque
+    exista y esté 'ready' en el catálogo de ingesta) nunca debe aparecer en
+    los ficheros a stagear en el sandbox."""
+    with _make_client_with_sandbox(tmp_path) as client:
+        attached = client.post(
+            "/api/v1/files", files={"file": ("autorizado.csv", _csv_bytes())},
+        ).json()
+        other = client.post(
+            "/api/v1/files", files={"file": ("no_autorizado.csv", _csv_bytes(rows=3))},
+        ).json()
+        wait_for_file(client, attached["file_id"])
+        wait_for_file(client, other["file_id"])
+
+        payload = task_payload(
+            attachments=[{"type": "broker_file", "metadata": {"file_id": attached["file_id"]}}],
+        )
+        payload["execution"] = {"strategy": "agent", "agent": {"skills": ["run_code"]}}
+        accepted = client.post("/api/v1/tasks", json=payload)
+        task_id = accepted.json()["task_id"]
+
+        ingestion = client.app.state.ingestion
+        request = client.app.state.repository.get_task_request(task_id)
+        assert ingestion.has_tabular_attachments(request) is True
+        files = ingestion.tabular_sandbox_files(request)
+        assert len(files) == 1
+        (staged_name, local_path), = files.items()
+        assert "autorizado.csv" in staged_name
+        assert "no_autorizado" not in staged_name
+        assert local_path.exists()
+
+
+def test_task_with_tabular_attachment_requires_sandbox(tmp_path):
+    """single (sin tool-calling) y agent sin run_code deben fallar rápido
+    con un código específico, no con CONTEXT_LIMIT_EXCEEDED más tarde."""
+    with make_client(tmp_path) as client:
+        uploaded = client.post(
+            "/api/v1/files", files={"file": ("precios.csv", _csv_bytes())},
+        ).json()
+        wait_for_file(client, uploaded["file_id"])
+        attachments = [{"type": "broker_file", "metadata": {"file_id": uploaded["file_id"]}}]
+
+        single_payload = task_payload(attachments=attachments)
+        response = client.post("/api/v1/tasks", json=single_payload)
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "TABULAR_ATTACHMENT_REQUIRES_SANDBOX"
+
+        agent_payload = task_payload(attachments=attachments)
+        agent_payload["execution"] = {"strategy": "agent", "agent": {"skills": ["web_search"]}}
+        response = client.post("/api/v1/tasks", json=agent_payload)
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "TABULAR_ATTACHMENT_REQUIRES_SANDBOX"
+
+
+def test_task_with_tabular_attachment_and_run_code_is_accepted(tmp_path):
+    with _make_client_with_sandbox(tmp_path) as client:
+        uploaded = client.post(
+            "/api/v1/files", files={"file": ("precios.csv", _csv_bytes())},
+        ).json()
+        wait_for_file(client, uploaded["file_id"])
+        payload = task_payload(
+            attachments=[{"type": "broker_file", "metadata": {"file_id": uploaded["file_id"]}}],
+        )
+        payload["execution"] = {"strategy": "agent", "agent": {"skills": ["run_code"]}}
+        response = client.post("/api/v1/tasks", json=payload)
+        assert response.status_code == 202
+
+
+@pytest.mark.skipif(not engine_available("markitdown"), reason="markitdown no instalado")
+def test_expand_request_uses_manifest_for_xlsx_too(tmp_path):
+    """XLSX pasa por MarkItDown (kind=office), no por passthrough como el
+    CSV, pero el bug es el mismo: un libro grande convertido a tablas
+    Markdown reventaría igual el contexto. Debe recibir manifiesto también."""
+    with _make_client_with_sandbox(tmp_path) as client:
+        uploaded = client.post(
+            "/api/v1/files", files={"file": ("precios.xlsx", _xlsx_bytes())},
+        ).json()
+        wait_for_file(client, uploaded["file_id"])
+
+        payload = task_payload(
+            attachments=[{"type": "broker_file", "metadata": {"file_id": uploaded["file_id"]}}],
+        )
+        payload["execution"] = {"strategy": "agent", "agent": {"skills": ["run_code"]}}
+        accepted = client.post("/api/v1/tasks", json=payload)
+        task_id = accepted.json()["task_id"]
+
+        ingestion = client.app.state.ingestion
+        request = client.app.state.repository.get_task_request(task_id)
+        expanded = ingestion.expand_request(request)
+        assert "ruta_sandbox: /work/attachments/" in expanded.content.prompt
+        # Nada de la tabla Markdown convertida debe colarse: MarkItDown
+        # convertiría la hoja a una tabla "| open | high | low | ... |".
+        assert "| open" not in expanded.content.prompt
+
+        files = ingestion.tabular_sandbox_files(request)
+        assert len(files) == 1
+        (_, local_path), = files.items()
+        assert local_path.read_bytes().startswith(b"PK\x03\x04")  # el .xlsx original, no el Markdown
+
+
+def test_auto_strategy_with_tabular_attachment_fails_after_resolution(tmp_path):
+    """strategy=auto no se puede evaluar en la creación (se resuelve más
+    tarde): la tarea se acepta, pero el coordinador debe rechazarla en el
+    despacho con el mismo código específico en vez de dejarla llegar a
+    expand_request/routing y fallar con CONTEXT_LIMIT_EXCEEDED."""
+    with make_client(tmp_path) as client:
+        uploaded = client.post(
+            "/api/v1/files", files={"file": ("precios.csv", _csv_bytes())},
+        ).json()
+        wait_for_file(client, uploaded["file_id"])
+        payload = task_payload(
+            attachments=[{"type": "broker_file", "metadata": {"file_id": uploaded["file_id"]}}],
+        )
+        payload["execution"] = {"strategy": "auto"}
+        accepted = client.post("/api/v1/tasks", json=payload)
+        assert accepted.status_code == 202
+        task_id = accepted.json()["task_id"]
+
+        client.post("/api/v1/dispatcher/tick")
+        final = client.get(f"/api/v1/tasks/{task_id}").json()
+        assert final["status"] == "failed"
+        assert final["error"]["code"] == "TABULAR_ATTACHMENT_REQUIRES_SANDBOX"
 
 
 def test_task_with_pending_file_is_409(tmp_path, monkeypatch):
@@ -330,6 +543,60 @@ def test_attachment_file_id_sources():
     by_uri = ContentAttachment(type="broker_file", uri="broker://files/file_xyz")
     assert attachment_file_id(by_meta) == "file_abc"
     assert attachment_file_id(by_uri) == "file_xyz"
+
+
+def test_ffprobe_path_derived_from_ffmpeg():
+    from app.ingestion.engines import _ffprobe_path
+
+    assert _ffprobe_path("ffmpeg") == "ffprobe"
+    assert _ffprobe_path(r"C:\herramientas\bin\ffmpeg.exe").endswith("ffprobe.exe")
+    assert "ffprobe" in _ffprobe_path("/usr/bin/ffmpeg")
+    # Un binario con nombre no estándar no se adivina: se confía en el PATH.
+    assert _ffprobe_path(r"C:\raro\convertidor.exe") == "ffprobe"
+
+
+def test_probe_media_duration_fails_soft(tmp_path):
+    from app.ingestion.engines import probe_media_duration
+
+    media = tmp_path / "clip.mp4"
+    media.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    assert probe_media_duration(media, ffmpeg_path="binario-inexistente-xyz") is None
+
+
+def test_stream_upload_cuts_early_and_cleans_temp(tmp_path):
+    import asyncio
+
+    from app.ingestion.service import IngestionError as StreamError
+    from app.ingestion.service import stream_upload_to_temp
+
+    class FakeUpload:
+        """Simula un stream de 10 MB; el corte debe llegar antes de agotarlo."""
+
+        def __init__(self) -> None:
+            self.served = 0
+
+        async def read(self, size: int) -> bytes:
+            if self.served >= 10 * 1024 * 1024:
+                return b""
+            self.served += size
+            return b"x" * size
+
+    upload = FakeUpload()
+    with pytest.raises(StreamError):
+        asyncio.run(stream_upload_to_temp(upload, max_bytes=2 * 1024 * 1024, directory=tmp_path))
+    # Cortó en cuanto superó el límite, sin drenar los 10 MB.
+    assert upload.served <= 3 * 1024 * 1024
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_cleanup_incoming_removes_leftovers(tmp_path):
+    with make_client(tmp_path) as client:
+        ingestion = client.app.state.ingestion
+        ingestion.incoming_dir.mkdir(parents=True, exist_ok=True)
+        leftover = ingestion.incoming_dir / ".upload-crash.tmp"
+        leftover.write_bytes(b"a medias")
+        ingestion.cleanup_incoming()
+        assert not leftover.exists()
 
 
 # ------------------------------------------------------ dashboard y retención

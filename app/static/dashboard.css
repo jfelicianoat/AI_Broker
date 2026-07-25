@@ -196,6 +196,7 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .routing-strat { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
 .routing-strat small { color: var(--muted); }
 .routing-reason { display: block; margin-top: 4px; color: var(--muted); line-height: 1.4; }
+.routing-subheading { margin: 16px 16px 0; font-size: 13px; font-weight: 680; }
 
 .upload-form { display: flex; gap: 14px; align-items: end; padding: 4px 16px 16px; flex-wrap: wrap; }
 .upload-form .field { min-width: 320px; }
@@ -231,6 +232,9 @@ td small { display: block; margin-top: 3px; color: #718599; }
 .config-grid { grid-template-columns: repeat(3, minmax(180px, 1fr)); }
 .config-alert { margin: 14px 16px 0; }
 .config-checks { grid-column: 1 / -1; }
+/* Listas de patrones: ocupan la fila entera porque una línea de patrón
+   truncada a un tercio del ancho no se puede leer ni corregir. */
+.config-field-wide { grid-column: 1 / -1; }
 .config-actions { border-top: 1px solid var(--border-soft); padding-top: 16px; }
 .config-subsection { border-top: 1px solid var(--border-soft); }
 .subsection-heading { min-height: 56px; padding: 13px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }

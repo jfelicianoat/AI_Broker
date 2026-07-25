@@ -45,6 +45,32 @@ def test_docker_command_enforces_isolation_flags():
     assert command[-4:] == ["timeout", "30s", "python", "-I", "-B", "-"][-4:]
 
 
+def test_docker_create_command_uses_volume_not_bind_mount():
+    """El flujo con adjuntos usa un volumen de Docker (tmpfs) para /work en
+    vez de --tmpfs directo (docker cp lo exige, ver _run_python_with_files),
+    pero sigue sin montar NUNCA un directorio del host."""
+    executor = make_executor(memory_mb=512, cpus=1.5, timeout_seconds=30)
+    command = executor._docker_create_command("sbx-test", "sbx-vol-test")
+    joined = " ".join(command)
+    assert "--network none" in joined
+    assert "--read-only" in joined
+    assert "--cap-drop ALL" in joined
+    assert "--user 65534:65534" in joined
+    assert "--mount source=sbx-vol-test,destination=/work" in joined
+    # Ningún bind mount al host: ni -v, ni type=bind.
+    assert "-v" not in command
+    assert "type=bind" not in joined
+    assert command[-4:] == ["timeout", "30s", "python", "-I", "-B", "-"][-4:]
+
+
+def test_docker_volume_create_command_is_tmpfs_backed():
+    executor = make_executor(work_volume_mb=128)
+    command = executor._docker_volume_create_command("sbx-vol-test")
+    joined = " ".join(command)
+    assert "type=tmpfs" in joined and "device=tmpfs" in joined
+    assert "size=128m" in joined
+
+
 def test_format_result_reports_exit_and_truncates():
     executor = make_executor(max_output_chars=500)
     text = executor._format_result(1, "parcial", "Traceback: boom")
@@ -135,13 +161,24 @@ def test_run_skill_without_sandbox_returns_clear_error():
 
 
 class FakeSandbox:
-    async def run_python(self, code: str) -> str:
+    def __init__(self) -> None:
+        self.last_files: dict | None = None
+
+    async def run_python(self, code: str, files: dict | None = None) -> str:
+        self.last_files = files
         return f"ejecutado:{len(code)}"
 
 
 def test_run_skill_delegates_to_sandbox():
     result = asyncio.run(run_skill("run_code", {"code": "print('hola')"}, sandbox=FakeSandbox()))
     assert result == "ejecutado:13"
+
+
+def test_run_skill_forwards_sandbox_files():
+    fake = FakeSandbox()
+    files = {"a1b2_datos.csv": Path("/tmp/datos.csv")}
+    asyncio.run(run_skill("run_code", {"code": "print(1)"}, sandbox=fake, sandbox_files=files))
+    assert fake.last_files == files
 
 
 def test_run_skill_requires_code_argument():
@@ -242,3 +279,74 @@ def test_real_docker_execution_and_isolation():
         "    print('ESCRITURA-BLOQUEADA')\n"
     ))
     assert "ESCRITURA-BLOQUEADA" in fs_probe
+
+
+@pytest.mark.skipif(not docker_ready, reason="requiere Docker en marcha y AI_BROKER_SANDBOX_DOCKER=1")
+def test_real_docker_file_staging(tmp_path: Path) -> None:
+    """CSV grande adjuntado: run_code debe poder abrirlo desde el sandbox y
+    calcular media/mediana exactas — el bug reportado (CONTEXT_LIMIT_EXCEEDED
+    por inyectar el CSV entero en el prompt) se soluciona precisamente porque
+    esto nunca pasa por el contexto del modelo."""
+    csv_path = tmp_path / "precios.csv"
+    csv_path.write_text(
+        "open,high,low,close,volume\n"
+        + "\n".join(f"{i}.0,{i + 1}.0,{i - 1}.0,{i}.5,{100 + i}" for i in range(500)),
+        encoding="utf-8",
+    )
+    executor = make_executor(timeout_seconds=30)
+    result = asyncio.run(executor.run_python(
+        "import csv, statistics\n"
+        "with open('/work/attachments/id123_precios.csv') as f:\n"
+        "    rows = list(csv.DictReader(f))\n"
+        "closes = [float(r['close']) for r in rows]\n"
+        "print('n=', len(closes))\n"
+        "print('mean=', sum(closes) / len(closes))\n"
+        "print('median=', statistics.median(closes))\n",
+        files={"id123_precios.csv": csv_path},
+    ))
+    assert "n= 500" in result
+    closes_ref = [float(i) + 0.5 for i in range(500)]
+    import statistics as _statistics
+    assert f"mean= {sum(closes_ref) / len(closes_ref)}" in result
+    assert f"median= {_statistics.median(closes_ref)}" in result
+
+    # Un fichero NO pasado en `files` nunca debe aparecer en el sandbox.
+    leak_probe = asyncio.run(executor.run_python(
+        "import os\nprint(sorted(os.listdir('/work/attachments')))\n",
+        files={"solo_este.csv": csv_path},
+    ))
+    assert "solo_este.csv" in leak_probe
+    assert "id123_precios.csv" not in leak_probe
+
+
+@pytest.mark.skipif(not docker_ready, reason="requiere Docker en marcha y AI_BROKER_SANDBOX_DOCKER=1")
+def test_real_docker_file_staging_xlsx(tmp_path: Path) -> None:
+    """Mismo caso que el CSV pero para XLSX (MarkItDown, no passthrough):
+    la imagen del sandbox ya trae pandas/openpyxl (ver sandbox/Dockerfile)
+    precisamente para esto."""
+    import openpyxl
+
+    xlsx_path = tmp_path / "precios.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["open", "high", "low", "close", "volume"])
+    for i in range(500):
+        sheet.append([float(i), float(i + 1), float(i - 1), float(i) + 0.5, 100 + i])
+    workbook.save(xlsx_path)
+
+    # image por defecto (python:3.12-slim) no trae pandas/openpyxl: hace
+    # falta la imagen real del broker (ver sandbox/Dockerfile).
+    executor = make_executor(timeout_seconds=30, image="ai-broker-sandbox:latest")
+    result = asyncio.run(executor.run_python(
+        "import pandas as pd, statistics\n"
+        "df = pd.read_excel('/work/attachments/id456_precios.xlsx')\n"
+        "print('n=', len(df))\n"
+        "print('mean=', df['close'].mean())\n"
+        "print('median=', statistics.median(df['close'].tolist()))\n",
+        files={"id456_precios.xlsx": xlsx_path},
+    ))
+    assert "n= 500" in result
+    closes_ref = [float(i) + 0.5 for i in range(500)]
+    import statistics as _statistics
+    assert f"mean= {sum(closes_ref) / len(closes_ref)}" in result
+    assert f"median= {_statistics.median(closes_ref)}" in result

@@ -32,6 +32,7 @@ Pygments==2.20.0
 pytest==9.1.1
 pytest-cov==7.1.0
 python-dotenv==1.2.2
+python-multipart==0.0.32
 pywin32-ctypes==0.2.3
 PyYAML==6.0.3
 ruff==0.15.21

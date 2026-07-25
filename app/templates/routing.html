@@ -84,4 +84,122 @@
       </div>
     {% endif %}
   </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <h2>Selección adaptativa de modelo</h2>
+        <p>Score por (modelo, tipo de tarea) sobre los últimos {{ model_routing.stats_window_days }} días. Un modelo necesita al menos {{ model_routing.min_invocations }} invocaciones <em>en ese tipo</em> para dejar de puntuar neutro (arranque en frío) — el historial de código no se mezcla con el de prosa ni contexto largo.</p>
+      </div>
+      <span class="badge {{ 'badge-completed' if model_routing.adaptive_selection else 'badge-neutral' }}">
+        {{ 'activa' if model_routing.adaptive_selection else 'desactivada' }}
+        {% if model_routing.exploration_rate > 0 %} · exploración {{ (model_routing.exploration_rate * 100)|round|int }}%{% endif %}
+      </span>
+    </div>
+    {% if model_routing.groups %}
+      {% for group in model_routing.groups %}
+        <h3 class="routing-subheading">{{ group.label }}</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Modelo</th>
+                <th>Invocaciones</th>
+                <th>Éxito</th>
+                <th>Latencia media</th>
+                <th>Coste medio</th>
+                <th>Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in group.rows %}
+                <tr>
+                  <td><strong>{{ row.provider }}/{{ row.model }}</strong> <small>({{ row.deployment }})</small></td>
+                  <td>{{ row.attempts }}</td>
+                  <td>{{ row.success_rate }}%</td>
+                  <td>{{ (row.avg_latency_ms ~ ' ms') if row.avg_latency_ms is not none else '—' }}</td>
+                  <td>{{ '$%.4f'|format(row.avg_cost_usd) if row.avg_cost_usd is not none else '—' }}</td>
+                  <td>
+                    {% if row.usable %}
+                      <span class="badge badge-completed">puntúa</span>
+                    {% else %}
+                      <span class="badge badge-neutral">arranque en frío</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-state">
+        <strong>Aún no hay invocaciones clasificadas</strong>
+        <p>Las invocaciones registradas antes de esta versión no tienen tipo de tarea asignado y no participan aquí. Ejecuta <code>python scripts/backfill_task_type.py</code> para reclasificar el historial anterior, o espera a que se completen tareas nuevas.</p>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div>
+        <h2>Idoneidad por tipo de tarea</h2>
+        <p>Qué modelos aparta el broker por no ser adecuados, aunque puedan atender la petición: los de propósito único (guardarraíles, OCR, traducción) y los especialistas de código cuando la tarea es prosa o contexto largo. Es una preferencia, no un veto: <code>target_model</code> y <code>preferred_model</code> mandan sobre ella. Los patrones se editan en <a href="/dashboard/config">Configuración</a>.</p>
+      </div>
+      <span class="badge {{ 'badge-completed' if affinity.enabled else 'badge-neutral' }}">
+        {{ 'activo' if affinity.enabled else 'desactivado' }}
+      </span>
+    </div>
+    {% if catalog_error %}
+      <div class="alert warning"><strong>Catálogo no disponible</strong><p>{{ catalog_error }} — no se puede calcular a quién aparta el filtro ahora mismo.</p></div>
+    {% elif affinity.enabled %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Tipo de tarea</th>
+              <th>Candidatos</th>
+              <th>Apartados</th>
+              <th>Modelos</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for group in affinity.groups %}
+              <tr>
+                <td><strong>{{ group.label }}</strong></td>
+                <td>{{ group.remaining }} de {{ affinity.catalog_size }}</td>
+                <td>
+                  {% if group.ignored %}
+                    <span class="badge badge-failed">se ignora</span>
+                  {% else %}
+                    {{ group.excluded }}
+                  {% endif %}
+                </td>
+                <td>
+                  {% if group.ignored %}
+                    <small>apartaría a todos los candidatos, así que el filtro no se aplica en este tipo</small>
+                  {% elif group.models %}
+                    <small>{{ group.models|join(', ') }}</small>
+                  {% else %}
+                    <small>—</small>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if affinity.unused_patterns %}
+        <div class="alert info">
+          <strong>Patrones sin efecto</strong>
+          <p>No casan con ningún modelo del catálogo actual: {% for pattern in affinity.unused_patterns %}<code>{{ pattern }}</code>{{ ', ' if not loop.last }}{% endfor %}. Puede ser correcto (previenen modelos que aún no tienes) o una errata en el patrón.</p>
+        </div>
+      {% endif %}
+    {% else %}
+      <div class="empty-state">
+        <strong>Filtro desactivado</strong>
+        <p>Todos los modelos elegibles compiten en todos los tipos de tarea, incluidos los de propósito único. Actívalo en <a href="/dashboard/config">Configuración</a>.</p>
+      </div>
+    {% endif %}
+  </section>
 {% endblock %}

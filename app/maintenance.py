@@ -282,3 +282,81 @@ def prune_terminal_task_artifacts(db: Any, artifacts_root: str | Path, *, older_
     if root.exists():
         _cleanup_empty_dirs(root)
     return removed
+
+
+@dataclass(frozen=True)
+class BackfillResult:
+    """Recuento de una reclasificación de `model_invocations.task_type`."""
+
+    pending: int
+    classified: int
+    reconstructed: int
+    skipped: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "pending": self.pending,
+            "classified": self.classified,
+            "reconstructed": self.reconstructed,
+            "skipped": self.skipped,
+        }
+
+
+def backfill_invocation_task_type(db: Any, *, dry_run: bool = False) -> BackfillResult:
+    """Clasifica retroactivamente las invocaciones anteriores a `task_type`.
+
+    `load_model_stats` descarta las filas con task_type NULL: sin clasificar no
+    se sabe a qué segmento pertenecen. Eso deja el enrutamiento adaptativo
+    arrancando desde cero pese a tener meses de historial en la base, y con
+    routing.min_invocations sin alcanzar, el score de todos los modelos es
+    neutro. Reclasificar recupera esa evidencia aplicando el mismo
+    clasificador determinista a la petición ya guardada.
+
+    Cuando la petición guardada no valida contra el esquema actual (el formato
+    ha evolucionado) se reconstruye una equivalente mínima a partir del prompt.
+    Puede desviar la estimación de contexto de una tarea con adjuntos, así que
+    se cuenta aparte. Si no hay ni prompt, la fila se deja como estaba.
+    """
+    from app.schemas import TaskCreateRequest
+    from app.task_classifier import classify_task_type
+
+    rows = db.query_all(
+        "SELECT i.id AS invocation_id, t.request_json AS request_json "
+        "FROM model_invocations i JOIN tasks t ON t.id = i.task_id "
+        "WHERE i.task_type IS NULL"
+    )
+    classified = reconstructed = skipped = 0
+    for row in rows:
+        try:
+            payload = json.loads(row["request_json"] or "{}")
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        try:
+            request = TaskCreateRequest.model_validate(payload)
+            was_reconstructed = False
+        except Exception:
+            prompt = (payload.get("content") or {}).get("prompt")
+            if not prompt:
+                skipped += 1
+                continue
+            try:
+                request = TaskCreateRequest.model_validate({
+                    "idempotency_key": f"backfill:{row['invocation_id']}",
+                    "content": {"prompt": prompt},
+                })
+            except Exception:
+                skipped += 1
+                continue
+            was_reconstructed = True
+        if not dry_run:
+            db.execute(
+                "UPDATE model_invocations SET task_type = ? WHERE id = ?",
+                (classify_task_type(request), row["invocation_id"]),
+            )
+        classified += 1
+        reconstructed += int(was_reconstructed)
+    return BackfillResult(
+        pending=len(rows), classified=classified,
+        reconstructed=reconstructed, skipped=skipped,
+    )

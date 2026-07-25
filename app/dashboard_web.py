@@ -24,8 +24,10 @@ from app.admin_auth import (
     verify_admin_access,
 )
 from app.config import (
+    TASK_AFFINITY_TYPES,
     BrokerConfig,
     OpenAICompatibleProviderConfig,
+    TaskAffinityConfig,
     save_config,
 )
 from app.coordinator import ConsensusCoordinator
@@ -46,9 +48,11 @@ from app.dashboard_forms import (
     _validation_messages,
 )
 from app.ingestion.detection import ALLOWED_FORMATS
-from app.ingestion.service import AttachmentError
+from app.ingestion.service import AttachmentError, stream_upload_to_temp
+from app.model_stats import load_model_stats
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
+from app.providers.routing import task_affinity_excluded, task_affinity_patterns
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
@@ -270,12 +274,16 @@ def create_dashboard_router(
 
     @protected.get("/dashboard/routing", response_class=HTMLResponse)
     async def routing_dashboard(request: Request):
+        catalog, catalog_error = await models()
         return _template_response(
             request,
             "routing.html",
             {
                 "router": config.strategy_router,
                 "buckets": _routing_insights(repository, config),
+                "model_routing": _model_routing_insights(repository, config),
+                "affinity": _task_affinity_insights(catalog, config),
+                "catalog_error": catalog_error,
                 "nav_active": "enrutamiento",
             },
         )
@@ -286,11 +294,13 @@ def create_dashboard_router(
         views: list[dict[str, Any]] = []
         for record in ingestion.list_files():
             size_mb = record.size_bytes / (1024 * 1024)
+            duration = record.meta.get("duration_seconds")
             views.append({
                 "id": record.id,
                 "filename": record.filename,
                 "kind": record.kind,
                 "engine": record.meta.get("engine", record.engine),
+                "duration_human": _format_duration(duration) if duration else None,
                 "status": record.status,
                 "status_class": {
                     "ready": "badge-completed",
@@ -342,17 +352,10 @@ def create_dashboard_router(
                 request, "files.html", _files_page_context(upload_error="Selecciona un fichero."),
             )
         max_bytes = config.ingestion.max_file_mb * 1024 * 1024
-        data = await upload.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            return _template_response(
-                request, "files.html",
-                _files_page_context(
-                    upload_error=f"El fichero supera el límite de {config.ingestion.max_file_mb} MB.",
-                ),
-            )
         try:
+            temp_path = await stream_upload_to_temp(upload, max_bytes, ingestion.incoming_dir)
             record, created = await run_in_threadpool(
-                ingestion.store_upload, upload.filename or "fichero", data,
+                ingestion.store_upload_from_file, upload.filename or "fichero", temp_path,
             )
         except ValueError as error:  # IngestionError / UnsupportedFormat
             return _template_response(
@@ -854,6 +857,17 @@ def create_dashboard_router(
     return router
 
 
+def _format_duration(seconds: float) -> str:
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours} h {minutes:02d} min"
+    if minutes:
+        return f"{minutes} min {secs:02d} s"
+    return f"{secs} s"
+
+
 def _template_response(request: Request, name: str, context: dict[str, Any]):
     token = _csrf_token(request)
     response = templates.TemplateResponse(
@@ -1001,6 +1015,102 @@ def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[
             "recommendation": recommendation,
         })
     return insights
+
+
+_TASK_TYPE_LABELS = {"code": "Código", "long_context": "Contexto largo", "prose": "Prosa"}
+
+
+def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) -> dict[str, Any]:
+    """Quién lidera la selección adaptativa por tipo de tarea (app.task_classifier)
+    y cuánta evidencia (invocaciones) respalda esa posición: el historial de un
+    modelo en código no se mezcla con el de prosa ni contexto largo (ver
+    app.model_stats.ModelKey)."""
+    routing = config.routing
+    stats = load_model_stats(repository.db, window_days=routing.stats_window_days)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for (provider, deployment, model, task_type), stat in stats.items():
+        groups.setdefault(task_type, []).append({
+            "provider": provider,
+            "deployment": deployment,
+            "model": model,
+            "attempts": stat.attempts,
+            "success_rate": round(stat.success_rate * 100),
+            "avg_latency_ms": round(stat.avg_latency_ms) if stat.avg_latency_ms is not None else None,
+            "avg_cost_usd": stat.avg_cost_usd,
+            "usable": stat.attempts >= routing.min_invocations,
+        })
+    task_groups = []
+    for task_type in sorted(groups, key=lambda t: _TASK_TYPE_LABELS.get(t, t)):
+        rows = sorted(
+            groups[task_type],
+            key=lambda r: (r["usable"], r["success_rate"], r["attempts"]),
+            reverse=True,
+        )
+        task_groups.append({
+            "task_type": task_type,
+            "label": _TASK_TYPE_LABELS.get(task_type, task_type),
+            "rows": rows,
+        })
+    return {
+        "adaptive_selection": routing.adaptive_selection,
+        "exploration_rate": routing.exploration_rate,
+        "min_invocations": routing.min_invocations,
+        "stats_window_days": routing.stats_window_days,
+        "groups": task_groups,
+    }
+
+
+def _task_affinity_insights(
+    catalog: list[dict[str, Any]], config: BrokerConfig,
+) -> dict[str, Any]:
+    """Efecto real del filtro de idoneidad sobre el catálogo de hoy: qué
+    modelos aparta en cada tipo de tarea y cuántos quedan.
+
+    Los patrones sin efecto son la señal útil (un patrón mal escrito no falla,
+    simplemente no casa con nada), así que se listan aparte. Y como el filtro
+    es best-effort — si dejara la selección vacía se ignora — se marca ese caso
+    en vez de prometer una exclusión que no ocurriría."""
+    settings = config.task_affinity
+    groups = []
+    for task_type in TASK_AFFINITY_TYPES:
+        excluded = task_affinity_excluded(catalog, settings, task_type)
+        names = sorted(str(entry.get("name") or "") for entry in excluded)
+        groups.append({
+            "task_type": task_type,
+            "label": _TASK_TYPE_LABELS.get(task_type, task_type),
+            "excluded": len(excluded),
+            "remaining": len(catalog) - len(excluded),
+            "models": names,
+            # El filtro se ignora si no dejaría ningún candidato: mostrarlo
+            # como exclusión efectiva sería mentir sobre lo que hace.
+            "ignored": bool(catalog) and len(excluded) == len(catalog),
+        })
+    all_patterns = sorted({
+        pattern
+        for task_type in TASK_AFFINITY_TYPES
+        for pattern in task_affinity_patterns(settings, task_type)
+    })
+    unused = [
+        pattern for pattern in all_patterns
+        if not task_affinity_excluded(catalog, _one_pattern(pattern), "code")
+    ]
+    return {
+        "enabled": settings.enabled,
+        "groups": groups,
+        "catalog_size": len(catalog),
+        "unused_patterns": unused,
+    }
+
+
+def _one_pattern(pattern: str) -> TaskAffinityConfig:
+    """Config de idoneidad con un solo patrón, en `exclude_always` para que el
+    tipo de tarea no influya: sirve para saber si ese patrón casa con algo del
+    catálogo actual."""
+    return TaskAffinityConfig(
+        enabled=True,
+        exclude_always=[pattern],
+        exclude_by_task_type={key: [] for key in TASK_AFFINITY_TYPES},
+    )
 
 
 def _model_dashboard_stats(

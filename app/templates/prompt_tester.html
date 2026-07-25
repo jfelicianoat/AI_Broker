@@ -196,6 +196,13 @@
                 <span>Modelo único exacto</span>
                 {{ model_combo('single_model', form.single_model, available_models) }}
               </label>
+              <div class="check-row" data-show-strategy="single">
+                <label>
+                  <input type="checkbox" name="long_context_map_reduce" {% if form.long_context_map_reduce %}checked{% endif %}>
+                  Trocear si los adjuntos no caben (map-reduce)
+                </label>
+              </div>
+              <small class="form-hint" data-show-strategy="single">Si los documentos adjuntos exceden el contexto del modelo, el broker los procesa por fragmentos y sintetiza. Sin marcar, la tarea falla explícita (comportamiento clásico).</small>
               <div class="mixture-fields" data-show-strategy="agent">
                 <p class="form-hint">El modelo puede usar herramientas (buscar en la web, leer una URL) en un bucle hasta responder. Requiere un modelo con tools verificado.</p>
                 <label class="field">

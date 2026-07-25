@@ -124,6 +124,82 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
+        <h3>Selección adaptativa de modelo</h3>
+        <p>Ordena los modelos candidatos por evidencia operativa (éxito, latencia, coste), segmentada por tipo de tarea — código, contexto largo, prosa — en vez de un único score agregado para todo. Detalle por modelo en <a href="/dashboard/routing">Enrutamiento</a>.</p>
+      </div>
+      <span class="badge badge-neutral">routing</span>
+    </div>
+    <div class="form-body config-grid">
+      {% set routing = config.routing %}
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="routing_adaptive_selection" {% if routing.adaptive_selection %}checked{% endif %}>
+          Activar selección adaptativa (si no, se respeta el orden del catálogo)
+        </label>
+      </div>
+      <label class="field">
+        <span>Ventana de histórico (días)</span>
+        <input name="routing_stats_window_days" value="{{ routing.stats_window_days }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Mín. invocaciones para puntuar (arranque en frío)</span>
+        <input name="routing_min_invocations" value="{{ routing.min_invocations }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Peso — fiabilidad</span>
+        <input name="routing_success_weight" value="{{ routing.success_weight }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Peso — latencia</span>
+        <input name="routing_latency_weight" value="{{ routing.latency_weight }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Peso — coste</span>
+        <input name="routing_cost_weight" value="{{ routing.cost_weight }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Tasa de exploración (0-1)</span>
+        <input name="routing_exploration_rate" value="{{ routing.exploration_rate }}" inputmode="decimal">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Idoneidad por tipo de tarea</h3>
+        <p>Los filtros de arriba responden a «¿puede este modelo atender la petición?»; estos, a «¿debería?». Un patrón por línea, estilo <code>*-coder*</code> (comodines, sin distinguir mayúsculas), contra el nombre del modelo y su identificador en models.dev. Es una preferencia, no un veto: si dejara la selección sin candidatos se ignora. Efecto sobre el catálogo actual en <a href="/dashboard/routing">Enrutamiento</a>.</p>
+      </div>
+      <span class="badge badge-neutral">task_affinity</span>
+    </div>
+    <div class="form-body config-grid">
+      {% set affinity = config.task_affinity %}
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="task_affinity_enabled" {% if affinity.enabled %}checked{% endif %}>
+          Aplicar el filtro de idoneidad
+        </label>
+      </div>
+      <label class="field config-field-wide">
+        <span>Apartar siempre (propósito único: guardarraíles, OCR, traducción, detectores)</span>
+        <textarea name="task_affinity_exclude_always" rows="5">{{ affinity.exclude_always|join('\n') }}</textarea>
+      </label>
+      <label class="field">
+        <span>Apartar en prosa</span>
+        <textarea name="task_affinity_exclude_prose" rows="4">{{ affinity.exclude_by_task_type.get('prose', [])|join('\n') }}</textarea>
+      </label>
+      <label class="field">
+        <span>Apartar en contexto largo</span>
+        <textarea name="task_affinity_exclude_long_context" rows="4">{{ affinity.exclude_by_task_type.get('long_context', [])|join('\n') }}</textarea>
+      </label>
+      <label class="field">
+        <span>Apartar en código</span>
+        <textarea name="task_affinity_exclude_code" rows="4">{{ affinity.exclude_by_task_type.get('code', [])|join('\n') }}</textarea>
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
         <h3>Compresión de prompts</h3>
         <p>Reduce tokens del prompt (cortesías, muletillas, relleno) antes de enviarlo a los LLMs. El código y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
       </div>

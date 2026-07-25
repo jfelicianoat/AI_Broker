@@ -12,9 +12,12 @@ from datetime import datetime, timedelta, timezone
 
 from app.db import Database
 
-# Clave de identidad de un modelo en el catálogo: (provider, deployment, name),
-# siempre en minúsculas para casar con las comparaciones del router.
-ModelKey = tuple[str, str, str]
+# Clave de identidad de un modelo EN UN TIPO DE TAREA dado:
+# (provider, deployment, name, task_type), siempre en minúsculas para casar
+# con las comparaciones del router. Segmentar por task_type (app.task_classifier)
+# evita que un modelo bueno en prosa "gane" también el ranking de código solo
+# por tener más volumen agregado.
+ModelKey = tuple[str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -40,13 +43,15 @@ class _Accumulator:
 
 
 def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelStats]:
-    """Agrega éxito, latencia media y coste medio por modelo en la ventana dada."""
+    """Agrega éxito, latencia media y coste medio por (modelo, tipo de tarea)
+    en la ventana dada. Las filas anteriores a la columna task_type (NULL) se
+    descartan: sin clasificar, no se puede saber a qué segmento pertenecen."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
     rows = db.query_all(
         """
-        SELECT provider, deployment, model, status, latency_ms, cost_usd
+        SELECT provider, deployment, model, task_type, status, latency_ms, cost_usd
         FROM model_invocations
-        WHERE created_at >= ? AND status IN ('completed', 'failed')
+        WHERE created_at >= ? AND status IN ('completed', 'failed') AND task_type IS NOT NULL
         """,
         (cutoff,),
     )
@@ -56,6 +61,7 @@ def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelS
             str(row["provider"]).lower(),
             str(row["deployment"]).lower(),
             str(row["model"]).lower(),
+            str(row["task_type"]).lower(),
         )
         bucket = accumulator.setdefault(key, _Accumulator())
         bucket.attempts += 1

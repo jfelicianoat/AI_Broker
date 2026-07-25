@@ -85,11 +85,11 @@ como `[Figura N: imagen no descrita]` sin abortar la conversión.
 ingestion:
   enabled: true
   storage_dir: state/files
-  max_file_mb: 200
-  max_pdf_pages: 500
+  max_file_mb: 8192        # subida en streaming a disco: el tope no toca RAM
+  max_pdf_pages: 2000
   ocr_enabled: true
   ocr_languages: [es, en]
-  conversion_timeout_seconds: 1800
+  conversion_timeout_seconds: 7200   # 2 h: audio de varias horas en CPU
   images:
     enabled: true
     base_url: http://127.0.0.1:1234/v1   # LM Studio
@@ -147,6 +147,47 @@ contenido clave (los formatos pueden variar entre versiones de motor; perder
 contenido es la regresión). Los casos con motor pesado se saltan si el paquete
 no está instalado; el caso PDF/Docling es opt-in con `AI_BROKER_CORPUS_PDF=1`
 (verificado en local: pasa con Docling real).
+
+## Ficheros grandes y duración (2026-07-19)
+
+No hay límite en minutos: los límites reales son tamaño de subida y timeout
+de conversión, ambos ampliados para la máquina del usuario (64 GB RAM):
+
+- **Subida en streaming**: `stream_upload_to_temp` vuelca el multipart a
+  `state/files/incoming/` por chunks de 1 MB, corta en cuanto supera
+  `max_file_mb` (sin drenar el resto del stream) y el hash SHA-256 de dedupe
+  se calcula también en streaming — un vídeo de gigabytes nunca pasa por RAM.
+  `store_upload_from_file` consume siempre el temporal (movido con
+  `os.replace` al almacén, mismo volumen, o borrado); los temporales
+  huérfanos de un crash se limpian en el arranque (`cleanup_incoming`).
+- **Timeout de ffmpeg**: sigue a `conversion_timeout_seconds` (antes 1800 s
+  fijos). Whisper no impone límite de duración (procesa por segmentos con
+  memoria constante); con `small` en CPU rinde ~4–8× tiempo real, así que el
+  plazo de 2 h cubre audios de ~8 h o más.
+- **Duración en meta**: al iniciar la transcripción, ffprobe (derivado de
+  `ffmpeg_path`) mide el contenedor y `meta.duration_seconds` se publica
+  ANTES de terminar la conversión (visible en el panel junto al tamaño);
+  falla en blando (sin ffprobe → sin dato, la transcripción no depende de él).
+- Equivalencias orientativas del tope de 8 GB: ~10 h de vídeo de reunión
+  (~1,5 Mbps), días de audio comprimido, ~13 h de WAV sin comprimir.
+- El límite práctico posterior es la ventana de contexto del modelo destino:
+  una transcripción de 3 h ronda 30–45k tokens (`meta.tokens_estimate` lo
+  anticipa; el preflight falla explícito, nunca trunca).
+
+## Map-reduce de contexto largo (2026-07-19)
+
+Resuelto el límite práctico posterior: con `execution.long_context:
+"map_reduce"` (opt-in por tarea, contrato 2.5 — el default sigue fallando
+explícito, el broker jamás trocea en silencio), si los documentos exceden el
+contexto de todos los modelos elegibles, el coordinador divide la sección de
+documentos del prompt expandido (split por el centinela compartido
+`ATTACHED_DOCS_SENTINEL`), procesa cada fragmento con la instrucción íntegra
+(rol `chunk_map`, estado `chunking`) y sintetiza (rol `chunk_reduce`, con
+reducción jerárquica hasta 4 rondas si las parciales no caben juntas).
+Presupuesto verificado entre invocaciones, cancelación entre fragmentos,
+eventos `chunking.planned`/`chunking.completed` y desglose en
+`result.long_context`. Detalle del contrato en
+[`../Agent_AI_Broker.md`](../Agent_AI_Broker.md) (Novedades 2.5).
 
 ## Pendiente / siguientes pasos
 

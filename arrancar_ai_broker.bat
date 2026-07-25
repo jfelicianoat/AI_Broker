@@ -39,8 +39,9 @@ if defined PUERTO_PID (
   echo.
   tasklist /fi "PID eq %PUERTO_PID%"
   echo.
-  echo Si es AI Broker ^(python.exe^), el panel ya esta disponible en:
-  echo   http://127.0.0.1:8765/dashboard
+  echo Si es AI Broker ^(python.exe^), el panel ya esta disponible en la URL
+  echo que mostro su ventana de arranque ^(http://^<server.host^>:8765/dashboard,
+  echo con el host definido en broker_config.yaml^).
   echo   Para reiniciarlo, ejecuta primero parar_ai_broker.bat
   echo.
   echo Si es OTRO programa, cierralo o cambia server.port en broker_config.yaml
@@ -53,9 +54,7 @@ if defined PUERTO_PID (
 
 echo.
 echo Arrancando AI Broker...
-echo.
-echo Panel:
-echo   http://127.0.0.1:8765/dashboard
+echo La URL del panel y el token de esta sesion se muestran a continuacion.
 echo.
 echo Para parar el servidor: pulsa Ctrl+C en esta ventana.
 echo.
