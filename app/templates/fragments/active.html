@@ -3,7 +3,8 @@
      hx-get="/dashboard/fragments/active"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
-     data-refresh-pauseable>
+     data-refresh-pauseable
+     data-announce="{% if active %}Tarea activa en fase {{ active.progress.get('phase', active.task.status.value)|status_label }}, {{ active.progress.get('invocations_completed', 0) }} de {{ active.progress.get('invocations_total', 'un número indeterminado de') }} invocaciones{% else %}Sin tarea activa{% endif %}">
   <div class="panel-heading">
     <div>
       <h2>Tarea activa</h2>

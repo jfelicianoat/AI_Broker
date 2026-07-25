@@ -87,17 +87,6 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    code: []
-    long_context:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
     prose:
     - '*-coder*'
     - '*_coder*'
@@ -108,6 +97,17 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    code: []
 strategy_router:
   enabled: false
   heuristic_classifier: true
@@ -380,6 +380,20 @@ providers:
         json_mode: false
         tools: true
       features_checked_at: '2026-07-24T19:02:42.746920+00:00'
+    - name: laguna-xs-2.1
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-25T20:04:43.056369+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-25T20:05:01.061431+00:00'
   - id: nvidia
     enabled: true
     adapter: openai_compatible
@@ -1913,7 +1927,7 @@ providers:
       capabilities:
       - specialized
       compatibility: unknown
-      compatibility_checked_at: '2026-07-24T19:03:37.757947+00:00'
+      compatibility_checked_at: '2026-07-25T21:35:01.375952+00:00'
       compatibility_error: Capacidad no-chat catalogada; endpoint de ejecucion aun
         no soportado.
       features: {}

@@ -64,10 +64,26 @@
       <span>Máx. modelos locales cargados</span>
       <input name="max_loaded_local_models" value="{{ config.resources.max_loaded_local_models }}" placeholder="auto">
     </label>
+    <label class="field">
+      <span>Reintentos por tarea</span>
+      <input name="max_task_attempts" value="{{ config.processing.max_task_attempts }}" inputmode="numeric">
+    </label>
+    <label class="field">
+      <span>Intervalo del dispatcher (s)</span>
+      <input name="dispatcher_interval_seconds" value="{{ config.processing.dispatcher_interval_seconds }}" inputmode="decimal">
+    </label>
     <div class="check-row config-checks">
       <label>
         <input type="checkbox" name="allow_execution_waves" {% if config.resources.allow_execution_waves %}checked{% endif %}>
         Permitir waves si no cabe todo en paralelo
+      </label>
+      <label>
+        <input type="checkbox" name="unload_after_task" {% if config.processing.unload_after_task %}checked{% endif %}>
+        Descargar modelos locales al terminar cada tarea
+      </label>
+      <label>
+        <input type="checkbox" name="auto_dispatch" {% if config.processing.auto_dispatch %}checked{% endif %}>
+        Despacho automático (desactivarlo detiene la cola)
       </label>
     </div>
   </div>
@@ -118,6 +134,14 @@
       <label class="field">
         <span>Mín. casos por tipo para aprender</span>
         <input name="strategy_router_learning_min_cases" value="{{ router.learning_min_cases }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Umbral de escalado aprendido (0-1)</span>
+        <input name="strategy_router_learning_escalation_threshold" value="{{ router.learning_escalation_threshold }}" inputmode="decimal">
+      </label>
+      <label class="field">
+        <span>Umbral de fallo aprendido (0-1)</span>
+        <input name="strategy_router_learning_failure_threshold" value="{{ router.learning_failure_threshold }}" inputmode="decimal">
       </label>
     </div>
   </div>
@@ -262,12 +286,28 @@
         <input name="ingestion_conversion_timeout_seconds" value="{{ config.ingestion.conversion_timeout_seconds }}" inputmode="numeric">
       </label>
       <label class="field">
-        <span>Endpoint de visión (OpenAI-compatible)</span>
+        <span>Máx. páginas por PDF</span>
+        <input name="ingestion_max_pdf_pages" value="{{ config.ingestion.max_pdf_pages }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Idiomas de OCR</span>
+        <input name="ingestion_ocr_languages" value="{{ config.ingestion.ocr_languages|join(', ') }}" placeholder="es, en">
+      </label>
+      <label class="field">
+        <span>Máx. figuras descritas por documento</span>
+        <input name="ingestion_images_max_images" value="{{ config.ingestion.images.max_images }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Endpoint de visión (override opcional)</span>
         <input name="ingestion_images_base_url" value="{{ config.ingestion.images.base_url }}">
       </label>
       <label class="field">
-        <span>Modelo de visión</span>
-        <input name="ingestion_images_model" value="{{ config.ingestion.images.model }}" placeholder="google/gemma-4-31b-qat">
+        <span>Modelo de visión (override opcional)</span>
+        <input name="ingestion_images_model" value="{{ config.ingestion.images.model }}" placeholder="vacío = lo elige el broker">
+      </label>
+      <label class="field">
+        <span>Variable API key de visión</span>
+        <input name="ingestion_images_api_key_env" value="{{ config.ingestion.images.api_key_env or '' }}" placeholder="ninguna">
       </label>
       <label class="field">
         <span>Modelo Whisper</span>
@@ -276,6 +316,18 @@
             <option value="{{ size }}" {% if config.ingestion.transcription.model_size == size %}selected{% endif %}>{{ size }}</option>
           {% endfor %}
         </select>
+      </label>
+      <label class="field">
+        <span>Dispositivo de Whisper</span>
+        <select name="ingestion_whisper_device">
+          {% for device in ['auto', 'cpu', 'cuda'] %}
+            <option value="{{ device }}" {% if config.ingestion.transcription.device == device %}selected{% endif %}>{{ device }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>Idioma de transcripción</span>
+        <input name="ingestion_whisper_language" value="{{ config.ingestion.transcription.language or '' }}" placeholder="autodetectar">
       </label>
       <label class="field">
         <span>Ruta de ffmpeg</span>
@@ -318,6 +370,130 @@
         <span>CPUs</span>
         <input name="sandbox_cpus" value="{{ config.sandbox.cpus }}" inputmode="numeric">
       </label>
+      <label class="field">
+        <span>Límite de procesos</span>
+        <input name="sandbox_pids_limit" value="{{ config.sandbox.pids_limit }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Salida máxima (caracteres)</span>
+        <input name="sandbox_max_output_chars" value="{{ config.sandbox.max_output_chars }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Volumen de trabajo (MB)</span>
+        <input name="sandbox_work_volume_mb" value="{{ config.sandbox.work_volume_mb }}" inputmode="numeric">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Retención de datos</h3>
+        <p>Podas que corren al arrancar el broker. <strong>0 conserva siempre</strong>: no hay borrado silencioso por defecto. Los eventos <code>prompt.compressed</code> están exentos y duran lo que la tarea.</p>
+      </div>
+      <span class="badge badge-neutral">persistence</span>
+    </div>
+    <div class="form-body config-grid">
+      <label class="field">
+        <span>Eventos (días)</span>
+        <input name="persistence_events_retention_days" value="{{ config.persistence.events_retention_days }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Artefactos (días)</span>
+        <input name="persistence_artifacts_retention_days" value="{{ config.persistence.artifacts_retention_days }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Ficheros ingeridos (días)</span>
+        <input name="persistence_files_retention_days" value="{{ config.persistence.files_retention_days }}" inputmode="numeric">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Catálogo externo de modelos</h3>
+        <p>Rellena contexto, precios y corte de conocimiento desde models.dev. Gratuito y sin clave; se cachea en disco y <strong>nunca pisa un dato verificado por sondeo</strong>.</p>
+      </div>
+      <span class="badge badge-neutral">model_enrichment</span>
+    </div>
+    <div class="form-body config-grid">
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="model_enrichment_enabled" {% if config.model_enrichment.enabled %}checked{% endif %}>
+          Enriquecer el catálogo con models.dev
+        </label>
+      </div>
+      <label class="field">
+        <span>URL del catálogo</span>
+        <input name="model_enrichment_url" value="{{ config.model_enrichment.url }}">
+      </label>
+      <label class="field">
+        <span>Refresco (horas)</span>
+        <input name="model_enrichment_refresh_hours" value="{{ config.model_enrichment.refresh_hours }}" inputmode="decimal">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Salud y sondeos</h3>
+        <p>Cada cuánto se comprueba cada dependencia. Los resultados se ven en <a href="/dashboard#salud">Resumen</a> con su hora de comprobación.</p>
+      </div>
+      <span class="badge badge-neutral">health</span>
+    </div>
+    <div class="form-body config-grid">
+      <label class="field">
+        <span>Sondeo de SQLite (s)</span>
+        <input name="health_sqlite_interval_seconds" value="{{ config.health.sqlite_interval_seconds }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Sondeo de dependencias locales (s)</span>
+        <input name="health_local_dependencies_interval_seconds" value="{{ config.health.local_dependencies_interval_seconds }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Sondeo de proveedores externos (s)</span>
+        <input name="health_external_providers_interval_seconds" value="{{ config.health.external_providers_interval_seconds }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Aviso de disco libre (GB)</span>
+        <input name="health_disk_free_alert_gb" value="{{ config.health.disk_free_alert_gb }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Timeout de sondeo (s)</span>
+        <input name="health_probe_timeout_seconds" value="{{ config.health.probe_timeout_seconds }}" inputmode="decimal">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Registro</h3>
+        <p>JSON Lines con rotación. El access log nunca registra cuerpos, prompts ni respuestas. Los cambios aquí <strong>reinstalan los handlers al guardar</strong>: aplican sin reiniciar.</p>
+      </div>
+      <span class="badge badge-neutral">logging</span>
+    </div>
+    <div class="form-body config-grid">
+      <label class="field">
+        <span>Nivel</span>
+        <select name="logging_level">
+          {% for level in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] %}
+            <option value="{{ level }}" {% if config.logging.level|upper == level %}selected{% endif %}>{{ level }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>Tamaño máximo por fichero (bytes)</span>
+        <input name="logging_max_bytes" value="{{ config.logging.max_bytes }}" inputmode="numeric">
+      </label>
+      <label class="field">
+        <span>Ficheros conservados</span>
+        <input name="logging_backup_count" value="{{ config.logging.backup_count }}" inputmode="numeric">
+      </label>
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="logging_console_enabled" {% if config.logging.console_enabled %}checked{% endif %}>
+          Registrar también por consola
+        </label>
+      </div>
     </div>
   </div>
   <div class="config-subsection">
@@ -535,6 +711,29 @@
           </div>
         </div>
       {% endfor %}
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Arranque y rutas</h3>
+        <p>Solo lectura desde el panel. No es una carencia: cambiar estos valores en caliente dejaría el broker en un estado que no puede alcanzar sin reiniciar, o abriría una frontera de seguridad desde el navegador. Se editan en <code>broker_config.yaml</code>.</p>
+      </div>
+      <span class="badge badge-neutral">solo lectura</span>
+    </div>
+    <div class="form-body config-grid">
+      <dl class="detail-list config-readonly">
+        <div><dt>Escucha</dt><dd>{{ config.server.host }}:{{ config.server.port }} · {{ config.server.workers }} worker(s)<small>Cambiarlo requiere reiniciar el proceso.</small></dd></div>
+        <div><dt>Acceso sin autenticar en LAN</dt><dd>{{ 'permitido' if config.server.allow_unauthenticated_lan else 'bloqueado' }}<small>Frontera de seguridad: el arranque es fail-closed y no debe poder abrirse desde un formulario web.</small></dd></div>
+        <div><dt>CORS</dt><dd>{{ 'activado' if config.server.cors_enabled else 'desactivado' }}<small>Se aplica al montar la app.</small></dd></div>
+        <div><dt>Origen del token admin</dt><dd>variable {{ config.server.admin_token_env or '—' }} · keyring {{ config.server.admin_keyring_service }}/{{ config.server.admin_keyring_username }}<small>Dónde busca el broker la credencial. El token nunca se muestra ni se edita aquí.</small></dd></div>
+        <div><dt>Base de datos</dt><dd>{{ config.persistence.database }} · journal {{ config.persistence.journal_mode }}<small>La conexión se abre al arrancar; moverla en caliente dejaría escrituras a medias.</small></dd></div>
+        <div><dt>Directorio de logs</dt><dd>{{ config.logging.directory }}/{{ config.logging.filename }}<small>El nivel y la rotación sí se editan arriba; la ruta no, porque los handlers ya escriben en ella.</small></dd></div>
+        <div><dt>Almacén de ficheros</dt><dd>{{ config.ingestion.storage_dir }}<small>Cambiarlo dejaría huérfanos los ficheros ya ingeridos.</small></dd></div>
+        <div><dt>Workflows activos</dt><dd>{{ config.processing.max_active_workflows }}<small>Invariante del broker: un único workflow activo. Validado en la configuración.</small></dd></div>
+        <div><dt>Modo de proveedores</dt><dd>{{ config.processing.provider_mode }}<small><code>bootstrap</code> sustituye los proveedores reales por dobles de prueba; no debe activarse por accidente.</small></dd></div>
+        <div><dt>Política de planificación</dt><dd>{{ config.resources.scheduling_policy }}<small>Solo <code>adaptive</code> está implementada.</small></dd></div>
+      </dl>
     </div>
   </div>
   <div class="panel-actions config-actions">

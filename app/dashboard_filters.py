@@ -16,6 +16,27 @@ STATUS_LABELS = {
     "completed": "Completada",
     "failed": "Fallida",
     "cancelled": "Cancelada",
+    # Estados propios de una invocación, no de la tarea.
+    "started": "En curso",
+    "ambiguous": "Ambigua",
+}
+
+# El estado de salud viaja por la API en inglés (`healthy`/`degraded`/
+# `unavailable`) porque es contrato; el panel no debe mostrarlo así. El
+# vocabulario se alinea con COMPATIBILITY_TEXTS ("No operativo").
+HEALTH_LABELS = {
+    "healthy": "Operativo",
+    "degraded": "Degradado",
+    "unavailable": "No disponible",
+}
+
+# Estados de un fichero ingerido. Mapa aparte del de tareas porque `failed`
+# concuerda distinto: una tarea es "Fallida", un fichero es "Fallido".
+FILE_STATUS_LABELS = {
+    "received": "Recibido",
+    "converting": "Convirtiendo",
+    "ready": "Preparado",
+    "failed": "Fallido",
 }
 
 COMPATIBILITY_LABELS = {
@@ -128,6 +149,16 @@ def status_label(value: Any) -> str:
     return STATUS_LABELS.get(key, str(key))
 
 
+def health_label(value: Any) -> str:
+    key = getattr(value, "value", value)
+    return HEALTH_LABELS.get(key, str(key))
+
+
+def file_status_label(value: Any) -> str:
+    key = getattr(value, "value", value)
+    return FILE_STATUS_LABELS.get(key, str(key))
+
+
 def register_filters(env: Any) -> None:
     env.filters["gb"] = gb
     env.filters["short_time"] = short_time
@@ -140,3 +171,5 @@ def register_filters(env: Any) -> None:
     env.filters["model_features_text"] = model_features_text
     env.filters["model_effective_caps"] = model_effective_caps
     env.filters["status_label"] = status_label
+    env.filters["health_label"] = health_label
+    env.filters["file_status_label"] = file_status_label

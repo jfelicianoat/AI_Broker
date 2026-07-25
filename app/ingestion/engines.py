@@ -14,8 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.config import IngestionImagesConfig
-
 # Marcador que Docling emite por cada figura al exportar con ImageRefMode.PLACEHOLDER.
 IMAGE_PLACEHOLDER = "<!-- image -->"
 
@@ -226,41 +224,65 @@ _DESCRIBE_PROMPT = (
 )
 
 
-def describe_image_openai(
-    config: IngestionImagesConfig,
+def describe_image(
+    target: Any,
     png_bytes: bytes,
     context_text: str,
-    api_key: str | None,
+    timeout_seconds: float,
 ) -> str:
-    """Descripción de una figura con un LLM de visión (endpoint OpenAI-compatible)."""
+    """Describe una figura con el modelo de visión que el broker haya elegido.
+
+    `target` es un `app.ingestion.vision.VisionTarget`. Cada proveedor recibe
+    la imagen en su propio dialecto: Ollama expone `/api/chat` con las imágenes
+    en un campo `images` de base64 suelto, mientras que los OpenAI-compatibles
+    esperan `/chat/completions` con la imagen como `image_url` en un data URI.
+    Enviar el formato equivocado no da un error claro: da una descripción
+    inventada a partir del texto, que es peor.
+    """
     import httpx
 
     encoded = base64.b64encode(png_bytes).decode("ascii")
+    prompt = _DESCRIBE_PROMPT + context_text[:1200]
+
+    if getattr(target, "dialect", "openai") == "ollama":
+        response = httpx.post(
+            target.base_url.rstrip("/") + "/api/chat",
+            json={
+                "model": target.model,
+                "stream": False,
+                "options": {"temperature": 0.2},
+                "messages": [{"role": "user", "content": prompt, "images": [encoded]}],
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        content = (response.json().get("message") or {}).get("content")
+        return str(content or "").strip()
+
     headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    payload = {
-        "model": config.model,
-        "temperature": 0.2,
-        "max_tokens": 600,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _DESCRIBE_PROMPT + context_text[:1200]},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{encoded}"},
-                    },
-                ],
-            }
-        ],
-    }
+    if target.api_key:
+        headers["Authorization"] = f"Bearer {target.api_key}"
     response = httpx.post(
-        config.base_url.rstrip("/") + "/chat/completions",
-        json=payload,
+        target.base_url.rstrip("/") + "/chat/completions",
+        json={
+            "model": target.model,
+            "temperature": 0.2,
+            "max_tokens": 600,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                        },
+                    ],
+                }
+            ],
+        },
         headers=headers,
-        timeout=config.timeout_seconds,
+        timeout=timeout_seconds,
     )
     response.raise_for_status()
     body = response.json()
