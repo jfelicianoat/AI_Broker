@@ -22,6 +22,7 @@ from app.config import BrokerConfig
 from app.db import Database, dumps_json, loads_json
 from app.ingestion import engines
 from app.ingestion.detection import CODE_TEXT_EXTENSIONS, TABULAR_EXTENSIONS, detect, safe_filename
+from app.ingestion.vision import VisionTarget, select_vision_target
 from app.providers.base import estimate_tokens_upper_bound
 from app.schemas import TaskCreateRequest, attachment_file_id
 
@@ -128,11 +129,38 @@ def _record_from_row(row: Any) -> FileRecord:
 
 
 class IngestionService:
-    def __init__(self, db: Database, config: BrokerConfig) -> None:
+    def __init__(self, db: Database, config: BrokerConfig, provider: Any | None = None) -> None:
         self.db = db
         self.config = config
+        # El proveedor enrutado es opcional: sin él la descripción de figuras
+        # solo puede usar el endpoint fijo de `ingestion.images`. Con él, el
+        # broker elige entre todos los modelos que declaran visión.
+        self.provider = provider
         self.root = Path(config.ingestion.storage_dir)
         self._jobs: set[asyncio.Task] = set()
+
+    async def _resolve_vision_target(self) -> VisionTarget | None:
+        """Elige el modelo de visión antes de entrar al hilo de conversión.
+
+        La selección es asíncrona (consulta el catálogo) y `_convert` es
+        síncrono, así que se resuelve una vez por fichero aquí y viaja como
+        argumento. Una sola elección por documento es además la granularidad
+        correcta: cambiar de modelo entre figuras del mismo PDF daría
+        descripciones con voces distintas.
+        """
+        settings = self.config.ingestion.images
+        if not settings.enabled or self.provider is None:
+            return None
+        try:
+            catalog = await self.provider.models()
+        except Exception as error:  # noqa: BLE001 - el catálogo es best-effort
+            logger.warning(
+                "ingestion.vision_catalog_failed: %s",
+                str(error)[:200],
+                extra={"event": "ingestion.vision_catalog_failed"},
+            )
+            return None
+        return select_vision_target(self.config, catalog)
 
     # ------------------------------------------------------------------ subida
 
@@ -288,9 +316,10 @@ class IngestionService:
             return
         self._set_status(file_id, CONVERTING)
         timeout = self.config.ingestion.conversion_timeout_seconds
+        vision = await self._resolve_vision_target()
         try:
             markdown, meta = await asyncio.wait_for(
-                asyncio.to_thread(self._convert, record), timeout=timeout,
+                asyncio.to_thread(self._convert, record, vision), timeout=timeout,
             )
         except asyncio.CancelledError:
             raise
@@ -341,7 +370,9 @@ class IngestionService:
 
     # ------------------------------------------------------ conversión (hilo)
 
-    def _convert(self, record: FileRecord) -> tuple[str, dict[str, Any]]:
+    def _convert(
+        self, record: FileRecord, vision: VisionTarget | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         settings = self.config.ingestion
         path = Path(record.original_path)
         if record.kind == "pdf":
@@ -352,19 +383,26 @@ class IngestionService:
                 max_pages=settings.max_pdf_pages,
                 extract_images=settings.images.enabled,
             )
-            markdown, described, errors = self._describe_pictures(result.markdown, result.pictures)
+            markdown, described, errors = self._describe_pictures(
+                result.markdown, result.pictures, vision,
+            )
             meta: dict[str, Any] = {
                 "engine": "docling", "pages": result.pages, "ocr": result.ocr_enabled,
                 "pictures": len(result.pictures), "pictures_described": described,
                 "pictures_describe_errors": errors,
             }
+            # Qué modelo describió las figuras y por qué se le creyó capaz de
+            # verlas: sin esto, una descripción generada no tiene procedencia.
+            if vision is not None and described:
+                meta["vision_model"] = f"{vision.provider}/{vision.model}"
+                meta["vision_evidence"] = vision.evidence
             return markdown, meta
         if record.kind == "office":
             return engines.convert_with_markitdown(path), {"engine": "markitdown"}
         if record.kind == "text":
             return self._convert_text(record, path)
         if record.kind == "image":
-            return self._convert_image(record, path)
+            return self._convert_image(record, path, vision)
         if record.kind == "audio":
             return self._transcribe(record, path)
         if record.kind == "video":
@@ -404,21 +442,25 @@ class IngestionService:
             text = f"{fence}{language}\n{text}\n{fence}"
         return text, {"engine": "passthrough"}
 
-    def _convert_image(self, record: FileRecord, path: Path) -> tuple[str, dict[str, Any]]:
+    def _convert_image(
+        self, record: FileRecord, path: Path, vision: VisionTarget | None = None,
+    ) -> tuple[str, dict[str, Any]]:
         settings = self.config.ingestion
         parts: list[str] = []
         meta: dict[str, Any] = {"engine": "docling", "ocr": settings.ocr_enabled}
-        if settings.images.enabled:
+        if settings.images.enabled and vision is not None:
             try:
-                description = engines.describe_image_openai(
-                    settings.images,
+                description = engines.describe_image(
+                    vision,
                     path.read_bytes(),
                     f"Imagen suelta adjuntada por el usuario: {record.filename}",
-                    self._images_api_key(),
+                    settings.images.timeout_seconds,
                 )
                 if description:
                     parts.append(f"**Descripción de la imagen (generada por IA):** {description}")
                     meta["described"] = True
+                    meta["vision_model"] = f"{vision.provider}/{vision.model}"
+                    meta["vision_evidence"] = vision.evidence
             except Exception as error:
                 meta["describe_error"] = str(error)[:500]
         if settings.ocr_enabled:
@@ -479,12 +521,8 @@ class IngestionService:
             meta["duration_seconds"] = round(probed, 1)
         return text, meta
 
-    def _images_api_key(self) -> str | None:
-        env_name = self.config.ingestion.images.api_key_env
-        return os.environ.get(env_name) if env_name else None
-
     def _describe_pictures(
-        self, markdown: str, pictures: list[bytes | None],
+        self, markdown: str, pictures: list[bytes | None], vision: VisionTarget | None = None,
     ) -> tuple[str, int, int]:
         """Sustituye los placeholders de figura por descripciones del LLM de visión.
 
@@ -494,18 +532,26 @@ class IngestionService:
         settings = self.config.ingestion.images
         if not pictures or engines.IMAGE_PLACEHOLDER not in markdown:
             return markdown, 0, 0
+        if vision is None:
+            # Sin modelo elegible no se inventa una descripción: cada figura
+            # queda declarada como no descrita, que es información honesta.
+            logger.info(
+                "ingestion.vision_unavailable",
+                extra={"event": "ingestion.vision_unavailable"},
+            )
         segments = markdown.split(engines.IMAGE_PLACEHOLDER)
-        api_key = self._images_api_key()
         described = 0
         errors = 0
         rebuilt: list[str] = [segments[0]]
         for index, segment_after in enumerate(segments[1:]):
             png = pictures[index] if index < len(pictures) else None
             replacement = f"> [Figura {index + 1}: imagen no descrita]"
-            if settings.enabled and png is not None and described < settings.max_images:
+            if settings.enabled and vision is not None and png is not None and described < settings.max_images:
                 context = rebuilt[-1][-800:] + "\n[FIGURA AQUÍ]\n" + segment_after[:400]
                 try:
-                    description = engines.describe_image_openai(settings, png, context, api_key)
+                    description = engines.describe_image(
+                        vision, png, context, settings.timeout_seconds,
+                    )
                     if description:
                         replacement = (
                             f"> **[Figura {index + 1} — descripción generada por IA]:** {description}"
@@ -513,10 +559,12 @@ class IngestionService:
                         described += 1
                 except Exception as error:
                     errors += 1
-                    logger.warning("ingestion.describe_failed", extra={
-                        "event": "ingestion.describe_failed",
-                        "figure": index + 1, "message": str(error)[:300],
-                    })
+                    logger.warning(
+                        "ingestion.describe_failed figure=%s: %s",
+                        index + 1,
+                        str(error)[:300],
+                        extra={"event": "ingestion.describe_failed", "figure": index + 1},
+                    )
             rebuilt.append(replacement)
             rebuilt.append(segment_after)
         return "".join(rebuilt), described, errors

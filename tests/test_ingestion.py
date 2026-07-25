@@ -6,9 +6,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.ingestion.engines as engines
-from app.config import BrokerConfig, IngestionConfig, PersistenceConfig, ProcessingConfig, SandboxConfig
+from app.config import (
+    BrokerConfig,
+    IngestionConfig,
+    IngestionImagesConfig,
+    OpenAICompatibleProviderConfig,
+    PersistenceConfig,
+    ProcessingConfig,
+    ProvidersConfig,
+    SandboxConfig,
+)
 from app.ingestion.detection import UnsupportedFormat, detect
-from app.ingestion.service import neutralize_document_delimiters
+from app.ingestion.service import IngestionService, neutralize_document_delimiters
+from app.ingestion.vision import VisionTarget, select_vision_target
 from app.main import create_app
 from app.schemas import ContentAttachment, TaskCreateRequest, attachment_file_id
 
@@ -159,6 +169,51 @@ def test_missing_engine_marks_file_failed(tmp_path, monkeypatch):
         state = wait_for_file(client, body["file_id"])
         assert state["status"] == "failed"
         assert state["error"]["code"] == "ENGINE_MISSING"
+
+
+def test_pdf_picture_description_failure_is_non_fatal(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        engines,
+        "convert_pdf_docling",
+        lambda *args, **kwargs: engines.DoclingResult(
+            markdown=f"Antes\n\n{engines.IMAGE_PLACEHOLDER}\n\nDespués",
+            pages=1,
+            ocr_enabled=True,
+            pictures=[b"fake-png"],
+        ),
+    )
+    monkeypatch.setattr(
+        engines,
+        "describe_image",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("400 Bad Request")),
+    )
+    # El modelo de visión lo elige ahora el broker consultando el catálogo; aquí
+    # se fija un destino para poder ejercitar el fallo de la llamada, que es lo
+    # que este test cubre.
+    target = VisionTarget(
+        provider="lmstudio", model="vision-test", base_url="http://127.0.0.1:1234/v1",
+        api_key=None, dialect="openai", evidence="probe",
+    )
+
+    async def _fixed_target(self):
+        return target
+
+    monkeypatch.setattr(IngestionService, "_resolve_vision_target", _fixed_target)
+    images = IngestionImagesConfig(enabled=True, model="vision-test", max_images=1)
+
+    with make_client(tmp_path, images=images) as client:
+        body = client.post(
+            "/api/v1/files",
+            files={"file": ("informe.pdf", b"%PDF-1.7 fake", "application/pdf")},
+        ).json()
+        state = wait_for_file(client, body["file_id"])
+
+        assert state["status"] == "ready"
+        assert state["error"] is None
+        assert state["meta"]["pictures_described"] == 0
+        assert state["meta"]["pictures_describe_errors"] == 1
+        markdown = client.get(state["markdown_url"]).text
+        assert "[Figura 1: imagen no descrita]" in markdown
 
 
 def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
@@ -634,6 +689,10 @@ def test_dashboard_files_page_upload_and_delete(tmp_path):
 
         fragment = client.get("/dashboard/fragments/files")
         assert "badge-completed" in fragment.text
+        assert f'href="/dashboard/files/{file_id}/markdown"' in fragment.text
+        markdown = client.get(f"/dashboard/files/{file_id}/markdown")
+        assert markdown.status_code == 200
+        assert markdown.text == "subido desde el panel"
 
         deleted = client.post(
             f"/dashboard/actions/files/{file_id}/delete",
@@ -642,6 +701,45 @@ def test_dashboard_files_page_upload_and_delete(tmp_path):
         assert deleted.status_code == 204
         assert client.app.state.ingestion.get(file_id) is None
         assert not (tmp_path / "files" / file_id).exists()
+
+
+def test_dashboard_markdown_uses_authenticated_dashboard_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_BROKER_ADMIN_TOKEN", "secreto-admin")
+    admin = {"X-Admin-Token": "secreto-admin"}
+
+    with make_client(tmp_path) as client:
+        body = client.post(
+            "/api/v1/files",
+            files={"file": ("privado.md", b"# Markdown privado", "text/markdown")},
+            headers=admin,
+        ).json()
+        file_id = body["file_id"]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            state = client.get(f"/api/v1/files/{file_id}", headers=admin).json()
+            if state["status"] in {"ready", "failed"}:
+                break
+            time.sleep(0.05)
+        assert state["status"] == "ready"
+
+        anonymous = client.get(
+            f"/dashboard/files/{file_id}/markdown",
+            follow_redirects=False,
+        )
+        assert anonymous.status_code == 303
+        assert anonymous.headers["location"] == "/dashboard/login"
+
+        csrf = dashboard_csrf(client)
+        login = client.post(
+            "/dashboard/actions/login",
+            data={"csrf_token": csrf, "admin_token": "secreto-admin"},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        markdown = client.get(f"/dashboard/files/{file_id}/markdown")
+        assert markdown.status_code == 200
+        assert markdown.text == "# Markdown privado"
 
 
 def test_dashboard_upload_requires_csrf(tmp_path):
@@ -709,3 +807,76 @@ def test_ingestion_disabled_rejects_upload(tmp_path):
         response = client.post("/api/v1/files", files={"file": ("a.txt", b"hola")})
         assert response.status_code == 409
         assert response.json()["detail"] == "INGESTION_DISABLED"
+
+
+def _vision_config(model: str = "") -> BrokerConfig:
+    """Config con un proveedor OpenAI-compatible y Ollama activos."""
+    return BrokerConfig(
+        ingestion=IngestionConfig(images=IngestionImagesConfig(enabled=True, model=model)),
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="lmstudio", enabled=True, base_url="http://127.0.0.1:1234/v1",
+                    deployment="local",
+                )
+            ]
+        ),
+    )
+
+
+def test_select_vision_target_prefers_probed_over_catalog_declared() -> None:
+    """La certeza manda sobre el catálogo externo: un modelo sondeado va antes
+    que uno que solo está declarado, aunque el declarado aparezca primero."""
+    catalog = [
+        {"name": "declarado", "provider": "lmstudio", "catalog": {"vision": True}},
+        {"name": "sondeado", "provider": "lmstudio", "features": {"vision": True}},
+    ]
+    target = select_vision_target(_vision_config(), catalog)
+    assert target is not None
+    assert (target.model, target.evidence) == ("sondeado", "probe")
+
+
+def test_select_vision_target_excludes_verified_negatives_and_unknown() -> None:
+    """Un negativo verificado excluye aunque el catálogo diga lo contrario, y
+    un modelo sin evidencia alguna no entra en la rotación."""
+    catalog = [
+        {"name": "ciego", "provider": "lmstudio", "features": {"vision": False},
+         "catalog": {"vision": True}},
+        {"name": "desconocido", "provider": "lmstudio"},
+    ]
+    assert select_vision_target(_vision_config(), catalog) is None
+
+
+def test_select_vision_target_ignores_disabled_providers() -> None:
+    catalog = [{"name": "v", "provider": "apagado", "features": {"vision": True}}]
+    assert select_vision_target(_vision_config(), catalog) is None
+
+
+def test_select_vision_target_uses_ollama_dialect() -> None:
+    """Ollama recibe la imagen en `images: [b64]`, no como `image_url`: enviar
+    el formato equivocado no falla, alucina."""
+    catalog = [{"name": "gemma-vision", "provider": "ollama", "features": {"vision": True}}]
+    target = select_vision_target(_vision_config(), catalog)
+    assert target is not None
+    assert target.dialect == "ollama"
+
+
+def test_select_vision_target_honours_explicit_override() -> None:
+    """Con un modelo nombrado en la config manda ese; y si el nombrado no
+    existe no se le sustituye otro en silencio."""
+    catalog = [
+        {"name": "elegido-por-score", "provider": "lmstudio", "features": {"vision": True}},
+        {"name": "el-que-quiero", "provider": "lmstudio", "features": {"vision": True}},
+    ]
+    target = select_vision_target(_vision_config("el-que-quiero"), catalog)
+    assert target is not None and target.model == "el-que-quiero"
+    assert select_vision_target(_vision_config("inexistente"), catalog) is None
+
+
+def test_select_vision_target_respects_router_ranking_within_a_tier() -> None:
+    catalog = [
+        {"name": "lento", "provider": "lmstudio", "features": {"vision": True}},
+        {"name": "rapido", "provider": "lmstudio", "features": {"vision": True}},
+    ]
+    target = select_vision_target(_vision_config(), catalog, ranked_names=["rapido", "lento"])
+    assert target is not None and target.model == "rapido"

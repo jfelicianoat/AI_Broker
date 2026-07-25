@@ -40,12 +40,12 @@ def test_checked_accepts_common_truthy_form_values() -> None:
 def test_int_and_float_fields_reject_non_numeric_input() -> None:
     assert _int_field({"n": " 7 "}, "n", 1) == 7
     assert _int_field({}, "n", 42) == 42
-    with pytest.raises(PromptTesterError, match="numero entero"):
+    with pytest.raises(PromptTesterError, match="número entero"):
         _int_field({"n": "siete"}, "n", 1)
 
     assert _float_field({"t": "0.5"}, "t", 1.0) == 0.5
     assert _float_field({}, "t", 1.5) == 1.5
-    with pytest.raises(PromptTesterError, match="numerico"):
+    with pytest.raises(PromptTesterError, match="debe ser un número"):
         _float_field({"t": "medio"}, "t", 1.0)
 
 
@@ -63,7 +63,7 @@ def test_auto_or_int_field_accepts_auto_and_validates_numbers() -> None:
     assert _auto_or_int_field({}, "p", minimum=1, maximum=8) == "auto"
     assert _auto_or_int_field({"p": "AUTO"}, "p", minimum=1, maximum=8) == "auto"
     assert _auto_or_int_field({"p": "4"}, "p", minimum=1, maximum=8) == 4
-    with pytest.raises(PromptTesterError, match="'auto' o un numero"):
+    with pytest.raises(PromptTesterError, match="'auto' o un número"):
         _auto_or_int_field({"p": "muchos"}, "p", minimum=1, maximum=8)
     with pytest.raises(PromptTesterError, match="'auto' o estar entre"):
         _auto_or_int_field({"p": "99"}, "p", minimum=1, maximum=8)
@@ -312,3 +312,38 @@ def test_model_features_text_and_effective_caps_merge_catalog_claims() -> None:
 
     assert model_features_text({}) == "sin sondear"
     assert model_effective_caps({}) == []
+
+
+def test_every_config_form_field_is_parsed() -> None:
+    """Guardarraíl: un campo en el formulario que el parser no lee es un control
+    muerto —el usuario lo cambia, pulsa Guardar y no pasa nada—. Este test cayó
+    en producción con `ingestion.max_pdf_pages`, configurable en el YAML y sin
+    control en el panel; ahora la deriva en cualquiera de los dos sentidos falla.
+    """
+    import re
+    from pathlib import Path
+
+    template = Path("app/templates/fragments/config.html").read_text(encoding="utf-8")
+    parser_src = Path("app/dashboard_forms.py").read_text(encoding="utf-8")
+
+    # Campos de formulario que no son configuración del broker.
+    infra = {"csrf_token", "config_action", "config_fingerprint"}
+    names = {
+        name
+        for name in re.findall(r'name="([a-z0-9_]+)"', template)
+        if name not in infra and not name.startswith("custom_provider_")
+    }
+    assert names, "el formulario de configuración no expone ningún campo"
+
+    def is_parsed(name: str) -> bool:
+        if f'"{name}"' in parser_src:
+            return True
+        # Nombres construidos con f-string (`f"task_affinity_exclude_{tipo}"`):
+        # basta con que algún prefijo del nombre aparezca seguido de la llave.
+        return any(f'"{name[:cut]}{{' in parser_src for cut in range(len(name), 0, -1))
+
+    unparsed = sorted(name for name in names if not is_parsed(name))
+    assert not unparsed, (
+        "campos del formulario que dashboard_forms no lee (controles muertos): "
+        + ", ".join(unparsed)
+    )

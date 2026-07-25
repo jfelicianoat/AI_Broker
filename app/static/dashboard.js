@@ -128,7 +128,9 @@
     const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 8;
     panel.hidden = false;
     panel.dataset.phase = progress.phase || "running";
-    if (bar) bar.style.width = `${percent}%`;
+    // scaleX en vez de width: el ancho es fijo al 100% y solo se escala, así
+    // que el avance no fuerza recálculo de layout en cada fotograma.
+    if (bar) bar.style.transform = `scaleX(${(percent / 100).toFixed(4)})`;
     if (label) {
       if (progress.phase === "completed") label.textContent = `Tanda completada: ${completed}/${total || completed}`;
       else if (progress.phase === "failed") label.textContent = "Análisis detenido";
@@ -372,13 +374,83 @@
     return panel.contains(node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode);
   }
 
+  // Controles cuyo hover sí debe pausar el refresco: el swap con outerHTML
+  // destruiría el nodo justo antes del clic y el puntero acabaría sobre otra
+  // fila. El resto del panel no pausa.
+  const HOVER_GUARD = "a:hover, button:hover, input:hover, select:hover, textarea:hover, summary:hover, label:hover";
+
   function refreshPaused(element) {
     const panel = element.closest("[data-refresh-pauseable]") || element;
+    if (!panel.matches("[data-refresh-pauseable]")) return false;
+    // El hover sobre el panel ENTERO no pausa. Pausarlo así dejaba la tabla de
+    // ficheros congelada mientras se convertía un documento: el cursor descansa
+    // sobre la tabla precisamente porque estás mirando cómo cambia el estado, y
+    // el refresco de 5 s no llegaba a dispararse nunca.
     const active = document.activeElement;
     return Boolean(
-      panel.matches("[data-refresh-pauseable]") &&
-      (panel.matches(":hover") || (active && panel.contains(active)) || selectionInside(panel))
+      panel.querySelector(HOVER_GUARD) || (active && panel.contains(active)) || selectionInside(panel)
     );
+  }
+
+  // Anuncio accesible de cambios de estado. Los paneles se reemplazan enteros
+  // cada 3-30 s, así que un `aria-live` puesto sobre ellos se destruiría en cada
+  // swap y no llegaría a anunciar nada. La región viva es estable (base.html) y
+  // aquí solo se escribe cuando el resumen del panel CAMBIA: anunciar cada
+  // refresco convertiría el lector de pantalla en un metrónomo.
+  const announcedState = new Map();
+
+  function announceStateChanges() {
+    const region = document.getElementById("live-region");
+    if (!region) return;
+    const messages = [];
+    document.querySelectorAll("[data-announce]").forEach((panel) => {
+      const key = panel.id || panel.getAttribute("data-announce");
+      const value = panel.getAttribute("data-announce");
+      if (announcedState.get(key) === value) return;
+      // El primer render no se anuncia: el lector ya está leyendo la página.
+      if (announcedState.has(key)) messages.push(value);
+      announcedState.set(key, value);
+    });
+    if (messages.length) region.textContent = messages.join(". ");
+  }
+
+  // Movimiento continuo de la barra de fase. Dos problemas que el CSS solo no
+  // puede resolver: (1) el fragmento de tarea activa se reemplaza entero cada
+  // 3 s con outerHTML, así que la animación reiniciaría desde el fotograma 0 y
+  // produciría un salto visible cada 3 s — se compensa con un desfase negativo
+  // calculado sobre un reloj continuo; (2) un bucle infinito no debe seguir
+  // corriendo cuando nadie lo ve, así que se pausa fuera del viewport.
+  const MOTION_EPOCH = performance.now();
+  const PHASE_CYCLE_MS = 5200; // 2.6s de ida + 2.6s de vuelta (alternate)
+  let phaseObserver = null;
+
+  function syncPhaseBand(band) {
+    const offset = (performance.now() - MOTION_EPOCH) % PHASE_CYCLE_MS;
+    band.style.animationDelay = `-${Math.round(offset)}ms`;
+  }
+
+  function bindPhaseTracks() {
+    // Los nodos observados se destruyen en cada swap; desconectar antes de
+    // volver a observar evita retener nodos muertos.
+    if (phaseObserver) phaseObserver.disconnect();
+    const bands = document.querySelectorAll(".phase-track > span");
+    if (!bands.length) return;
+    if (!phaseObserver && "IntersectionObserver" in window) {
+      phaseObserver = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            syncPhaseBand(entry.target);
+            entry.target.style.animationPlayState = "running";
+          } else {
+            entry.target.style.animationPlayState = "paused";
+          }
+        });
+      });
+    }
+    bands.forEach((band) => {
+      syncPhaseBand(band);
+      if (phaseObserver) phaseObserver.observe(band);
+    });
   }
 
   function bind(root) {
@@ -517,6 +589,8 @@
         await submitHtmlForm(form, event.submitter, "main.content", "Probador actualizado");
       });
     });
+    bindPhaseTracks();
+    announceStateChanges();
   }
 
   function testerModelFieldNames() {

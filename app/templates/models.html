@@ -61,14 +61,14 @@
                 <table id="models-catalog-table">
                   <thead>
                     <tr>
-                      <th>Modelo</th>
-                      <th>Proveedor</th>
-                      <th>Deployment</th>
-                      <th>Contexto</th>
-                      <th>Capacidades</th>
-                      <th>Funciones</th>
-                      <th>Precio 1M</th>
-                      <th>Compatibilidad</th>
+                      <th scope="col">Modelo</th>
+                      <th scope="col">Proveedor</th>
+                      <th scope="col">Deployment</th>
+                      <th scope="col">Contexto</th>
+                      <th scope="col">Capacidades</th>
+                      <th scope="col">Funciones</th>
+                      <th scope="col">Precio 1M</th>
+                      <th scope="col">Compatibilidad</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -127,7 +127,7 @@
               <div class="panel-heading">
                 <div>
                   <h2>Runtime local</h2>
-                  <p>{{ resources.provider }} - {{ resources.status }}</p>
+                  <p>{{ resources.provider }} - {{ resources.status|health_label }}</p>
                 </div>
                 <span class="badge badge-{{ resources.status }}">{{ resources.max_parallel_invocations }} slow</span>
               </div>

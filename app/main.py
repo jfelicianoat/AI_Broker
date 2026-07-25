@@ -111,7 +111,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         broker_config,
         stats_loader=lambda: load_model_stats(db, window_days=broker_config.routing.stats_window_days),
     )
-    ingestion = IngestionService(db, broker_config)
+    # El proveedor enrutado permite que la descripción de figuras elija entre
+    # todos los modelos con visión en vez de usar siempre un endpoint fijo.
+    ingestion = IngestionService(db, broker_config, provider=provider)
     # Siempre construido: lee sandbox.* en vivo, así que activarlo/desactivarlo
     # desde el panel de Configuración aplica sin reiniciar el broker.
     sandbox = SandboxExecutor(broker_config)

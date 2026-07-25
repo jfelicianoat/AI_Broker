@@ -3,7 +3,8 @@
      hx-get="/dashboard/fragments/files"
      hx-trigger="every 5s"
      hx-swap="outerHTML"
-     data-refresh-pauseable>
+     data-refresh-pauseable
+     data-announce="Ficheros: {% if files %}{% for file in files %}{{ file.filename }} {{ file.status|file_status_label }}{{ ', ' if not loop.last }}{% endfor %}{% else %}ninguno{% endif %}">
   <div class="panel-heading">
     <div>
       <h2>Ficheros ingeridos</h2>
@@ -16,12 +17,12 @@
       <table>
         <thead>
           <tr>
-            <th>Fichero</th>
-            <th>Tipo</th>
-            <th>Tamaño</th>
-            <th>Tokens (est.)</th>
-            <th>Estado</th>
-            <th class="align-right">Acciones</th>
+            <th scope="col">Fichero</th>
+            <th scope="col">Tipo</th>
+            <th scope="col">Tamaño</th>
+            <th scope="col">Tokens (est.)</th>
+            <th scope="col">Estado</th>
+            <th scope="col" class="align-right">Acciones</th>
           </tr>
         </thead>
         <tbody>
@@ -41,7 +42,7 @@
               </td>
               <td>{% if file.tokens_estimate %}{{ '{:,}'.format(file.tokens_estimate).replace(',', '.') }}{% else %}—{% endif %}</td>
               <td>
-                <span class="badge {{ file.status_class }}">{{ file.status }}</span>
+                <span class="badge {{ file.status_class }}">{{ file.status|file_status_label }}</span>
                 {% if file.error %}
                   <small class="file-error" title="{{ file.error }}">{{ file.error_code }}: {{ file.error[:120] }}</small>
                 {% endif %}

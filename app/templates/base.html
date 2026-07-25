@@ -42,6 +42,10 @@
       </main>
     </div>
   </div>
+  {# Región viva estable. Los paneles se reemplazan enteros cada 3-30 s, así que
+     un aria-live puesto sobre ellos se destruiría en cada swap y no anunciaría
+     nada; dashboard.js escribe aquí, y solo cuando el estado cambia de verdad. #}
+  <div id="live-region" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div id="conn-banner" class="conn-banner" role="alert" hidden></div>
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-message">

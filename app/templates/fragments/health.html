@@ -3,13 +3,14 @@
      hx-get="/dashboard/fragments/health"
      hx-trigger="every 30s"
      hx-swap="outerHTML"
-     data-refresh-pauseable>
+     data-refresh-pauseable
+     data-announce="Salud de dependencias: {{ health.status|health_label }}{% for name, dependency in health.dependencies.items() if dependency.status != 'healthy' %}. {{ name }}: {{ dependency.status|health_label }}{% endfor %}">
   <div class="panel-heading" id="salud">
     <div>
       <h2>Salud de dependencias</h2>
       <p>Comprobado {{ health.checked_at|short_time }}</p>
     </div>
-    <span class="badge badge-{{ health.status }}">{{ health.status }}</span>
+    <span class="badge badge-{{ health.status }}">{{ health.status|health_label }}</span>
   </div>
   <div class="health-list">
     {% for name, dependency in health.dependencies.items() %}
@@ -18,7 +19,7 @@
         <span class="status-dot status-{{ dependency.status }}"></span>
         <strong>{{ name }}</strong>
       </div>
-      <span class="health-detail">{{ dependency.detail or 'Sin detalle' }}</span>
+      <span class="health-detail">{{ dependency.detail or dependency.status|health_label }}</span>
       <span>{{ '%.0f ms'|format(dependency.latency_ms) if dependency.latency_ms is not none else '—' }}</span>
     </div>
     {% endfor %}

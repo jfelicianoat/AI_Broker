@@ -9,7 +9,7 @@ from typing import Any, Literal, TypeGuard
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -313,7 +313,11 @@ def create_dashboard_router(
                 "error": (record.error or {}).get("message"),
                 "error_code": (record.error or {}).get("code"),
                 "created_at": record.created_at,
-                "markdown_url": f"/api/v1/files/{record.id}/markdown" if record.status == "ready" else None,
+                "markdown_url": (
+                    f"/dashboard/files/{record.id}/markdown"
+                    if record.status == "ready"
+                    else None
+                ),
             })
         return views
 
@@ -338,6 +342,22 @@ def create_dashboard_router(
             name="fragments/files_table.html",
             context={"files": _file_views()},
         )
+
+    @protected.get("/dashboard/files/{file_id}/markdown")
+    async def view_dashboard_file_markdown(request: Request, file_id: str) -> PlainTextResponse:
+        if ingestion is None:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        record = ingestion.get(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
+        if record.status != "ready" or not record.markdown_path:
+            raise HTTPException(status_code=409, detail="FILE_NOT_READY")
+        content = Path(record.markdown_path).read_text(encoding="utf-8")
+        response = PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
+        renewal = getattr(request.state, "admin_cookie_renewal", None)
+        if renewal:
+            _set_admin_cookie(response, renewal)
+        return response
 
     @protected.post("/dashboard/actions/files/upload", response_class=HTMLResponse)
     async def upload_dashboard_file(request: Request):

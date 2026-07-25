@@ -39,11 +39,11 @@
         <table>
           <thead>
             <tr>
-              <th>Tipo de petición</th>
-              <th>Casos</th>
-              <th>Estrategias (éxito)</th>
-              <th>Escalado de single</th>
-              <th>Recomendación aprendida</th>
+              <th scope="col">Tipo de petición</th>
+              <th scope="col">Casos</th>
+              <th scope="col">Estrategias (éxito)</th>
+              <th scope="col">Escalado de single</th>
+              <th scope="col">Recomendación aprendida</th>
             </tr>
           </thead>
           <tbody>
@@ -58,7 +58,9 @@
                 </td>
                 <td>
                   {% if bucket.single_chosen %}
-                    <span class="badge {{ 'badge-failed' if bucket.escalation_rate >= 50 else 'badge-neutral' }}">{{ bucket.escalation_rate }}%</span>
+                    {# El umbral no puede viajar solo en el color: una captura en
+                       escala de grises debe seguir diciendo que es alto. #}
+                    <span class="badge {{ 'badge-failed' if bucket.escalation_rate >= 50 else 'badge-neutral' }}">{{ bucket.escalation_rate }}%{{ ' · alto' if bucket.escalation_rate >= 50 else '' }}</span>
                     <small>({{ bucket.single_chosen }} intentos)</small>
                   {% else %}
                     <small>—</small>
@@ -103,12 +105,12 @@
           <table>
             <thead>
               <tr>
-                <th>Modelo</th>
-                <th>Invocaciones</th>
-                <th>Éxito</th>
-                <th>Latencia media</th>
-                <th>Coste medio</th>
-                <th>Estado</th>
+                <th scope="col">Modelo</th>
+                <th scope="col">Invocaciones</th>
+                <th scope="col">Éxito</th>
+                <th scope="col">Latencia media</th>
+                <th scope="col">Coste medio</th>
+                <th scope="col">Estado</th>
               </tr>
             </thead>
             <tbody>
@@ -157,10 +159,10 @@
         <table>
           <thead>
             <tr>
-              <th>Tipo de tarea</th>
-              <th>Candidatos</th>
-              <th>Apartados</th>
-              <th>Modelos</th>
+              <th scope="col">Tipo de tarea</th>
+              <th scope="col">Candidatos</th>
+              <th scope="col">Apartados</th>
+              <th scope="col">Modelos</th>
             </tr>
           </thead>
           <tbody>

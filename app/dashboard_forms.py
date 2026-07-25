@@ -19,12 +19,103 @@ from app.config import (
     OpenAICompatibleModelConfig,
     OpenAICompatibleProviderConfig,
 )
+from app.logging_config import configure_logging
 from app.providers.base import infer_openai_compatible_capabilities
 from app.schemas import ModelReference, OutputFormat, TaskCreateRequest, is_local_deployment
 
 
 class PromptTesterError(ValueError):
     pass
+
+
+# Etiqueta visible y sección de cada campo del formulario de configuración.
+# Generado desde app/templates/fragments/config.html: un error de validación
+# debe nombrar el campo como el usuario lo ve, no con su clave interna.
+CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
+    'deepseek_api_key_env': ('Variable API key', 'Proveedores'),
+    'deepseek_context_window': ('Contexto', 'Proveedores'),
+    'deepseek_default_model': ('Modelo por defecto', 'Proveedores'),
+    'deepseek_input_cost_per_million': ('Coste input / 1M', 'Proveedores'),
+    'deepseek_output_cost_per_million': ('Coste output / 1M', 'Proveedores'),
+    'deepseek_timeout_seconds': ('Timeout segundos', 'Proveedores'),
+    'dispatcher_interval_seconds': ('Intervalo del dispatcher (s)', 'Configuración'),
+    'health_disk_free_alert_gb': ('Aviso de disco libre (GB)', 'Salud y sondeos'),
+    'health_external_providers_interval_seconds': ('Sondeo de proveedores externos (s)', 'Salud y sondeos'),
+    'health_local_dependencies_interval_seconds': ('Sondeo de dependencias locales (s)', 'Salud y sondeos'),
+    'health_probe_timeout_seconds': ('Timeout de sondeo (s)', 'Salud y sondeos'),
+    'health_sqlite_interval_seconds': ('Sondeo de SQLite (s)', 'Salud y sondeos'),
+    'ingestion_conversion_timeout_seconds': ('Timeout de conversión (s)', 'Ingesta de ficheros'),
+    'ingestion_ffmpeg_path': ('Ruta de ffmpeg', 'Ingesta de ficheros'),
+    'ingestion_images_api_key_env': ('Variable API key de visión', 'Ingesta de ficheros'),
+    'ingestion_images_base_url': ('Endpoint de visión (override opcional)', 'Ingesta de ficheros'),
+    'ingestion_images_max_images': ('Máx. figuras descritas por documento', 'Ingesta de ficheros'),
+    'ingestion_images_model': ('Modelo de visión (override opcional)', 'Ingesta de ficheros'),
+    'ingestion_max_file_mb': ('Tamaño máximo de fichero (MB)', 'Ingesta de ficheros'),
+    'ingestion_max_pdf_pages': ('Máx. páginas por PDF', 'Ingesta de ficheros'),
+    'ingestion_ocr_languages': ('Idiomas de OCR', 'Ingesta de ficheros'),
+    'ingestion_whisper_device': ('Dispositivo de Whisper', 'Ingesta de ficheros'),
+    'ingestion_whisper_language': ('Idioma de transcripción', 'Ingesta de ficheros'),
+    'ingestion_whisper_model': ('Modelo Whisper', 'Ingesta de ficheros'),
+    'local_vram_budget_gb': ('Presupuesto VRAM local (GB)', 'Configuración'),
+    'logging_backup_count': ('Ficheros conservados', 'Registro'),
+    'logging_level': ('Nivel', 'Registro'),
+    'logging_max_bytes': ('Tamaño máximo por fichero (bytes)', 'Registro'),
+    'max_loaded_local_models': ('Máx. modelos locales cargados', 'Configuración'),
+    'max_parallel_invocations': ('Máx. invocaciones paralelas slow', 'Configuración'),
+    'max_task_attempts': ('Reintentos por tarea', 'Configuración'),
+    'model_enrichment_refresh_hours': ('Refresco (horas)', 'Catálogo externo de modelos'),
+    'model_enrichment_url': ('URL del catálogo', 'Catálogo externo de modelos'),
+    'ollama_catalog_cache_seconds': ('Caché de catálogo (s)', 'Proveedores'),
+    'ollama_timeout_seconds': ('Timeout segundos', 'Proveedores'),
+    'ollama_unload_timeout_seconds': ('Timeout de descarga de VRAM (s)', 'Proveedores'),
+    'persistence_artifacts_retention_days': ('Artefactos (días)', 'Retención de datos'),
+    'persistence_events_retention_days': ('Eventos (días)', 'Retención de datos'),
+    'persistence_files_retention_days': ('Ficheros ingeridos (días)', 'Retención de datos'),
+    'prompt_compression_level': ('Nivel de compresión', 'Compresión de prompts'),
+    'prompt_compression_min_chars': ('Mínimo de caracteres para comprimir', 'Compresión de prompts'),
+    'queue_max_size': ('Tamaño máximo de cola', 'Configuración'),
+    'routing_cost_weight': ('Peso — coste', 'Selección adaptativa de modelo'),
+    'routing_exploration_rate': ('Tasa de exploración (0-1)', 'Selección adaptativa de modelo'),
+    'routing_latency_weight': ('Peso — latencia', 'Selección adaptativa de modelo'),
+    'routing_min_invocations': ('Mín. invocaciones para puntuar (arranque en frío)', 'Selección adaptativa de modelo'),
+    'routing_stats_window_days': ('Ventana de histórico (días)', 'Selección adaptativa de modelo'),
+    'routing_success_weight': ('Peso — fiabilidad', 'Selección adaptativa de modelo'),
+    'sandbox_cpus': ('CPUs', 'Sandbox de código'),
+    'sandbox_docker_path': ('Binario docker', 'Sandbox de código'),
+    'sandbox_image': ('Imagen Docker', 'Sandbox de código'),
+    'sandbox_max_output_chars': ('Salida máxima (caracteres)', 'Sandbox de código'),
+    'sandbox_memory_mb': ('Memoria (MB)', 'Sandbox de código'),
+    'sandbox_pids_limit': ('Límite de procesos', 'Sandbox de código'),
+    'sandbox_timeout_seconds': ('Timeout por ejecución (s)', 'Sandbox de código'),
+    'sandbox_work_volume_mb': ('Volumen de trabajo (MB)', 'Sandbox de código'),
+    'strategy_router_escalation_min_confidence': ('Umbral de confianza (0-1) para escalar', 'Meta-router de estrategia'),
+    'strategy_router_learning_escalation_threshold': ('Umbral de escalado aprendido (0-1)', 'Meta-router de estrategia'),
+    'strategy_router_learning_failure_threshold': ('Umbral de fallo aprendido (0-1)', 'Meta-router de estrategia'),
+    'strategy_router_learning_min_cases': ('Mín. casos por tipo para aprender', 'Meta-router de estrategia'),
+    'strategy_router_mixture_min_budget_usd': ('Mín. presupuesto USD para mixture', 'Meta-router de estrategia'),
+    'strategy_router_mixture_min_prompt_chars': ('Mín. caracteres para mixture', 'Meta-router de estrategia'),
+    'task_affinity_exclude_code': ('Apartar en código', 'Idoneidad por tipo de tarea'),
+    'task_affinity_exclude_long_context': ('Apartar en contexto largo', 'Idoneidad por tipo de tarea'),
+    'task_affinity_exclude_prose': ('Apartar en prosa', 'Idoneidad por tipo de tarea'),
+    'task_timeout_seconds': ('Timeout global por tarea (segundos)', 'Configuración'),
+    'vram_safety_margin_gb': ('Margen seguridad VRAM (GB)', 'Configuración'),
+}
+
+
+def _field_label(key: str) -> str:
+    """Nombre legible de un campo, con su sección, para mensajes de error.
+
+    Sin entrada en el mapa (proveedores dados de alta por el usuario, cuyos
+    campos son dinámicos) se devuelve la clave: es peor que la etiqueta, pero
+    sigue siendo localizable con el buscador del navegador."""
+    entry = CONFIG_FIELD_LABELS.get(key)
+    if entry is None:
+        return key
+    label, section = entry
+    return f"«{label}», en {section},"
+
+
+
 
 
 def _prompt_tester_defaults() -> dict[str, str]:
@@ -86,6 +177,27 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("resources.vram_safety_margin_gb", "Margen seguridad VRAM"),
         ("resources.max_loaded_local_models", "Máx. modelos locales cargados"),
         ("resources.allow_execution_waves", "Permitir waves"),
+        ("processing.max_task_attempts", "Reintentos por tarea"),
+        ("processing.dispatcher_interval_seconds", "Intervalo del dispatcher"),
+        ("processing.unload_after_task", "Descargar modelos al terminar"),
+        ("processing.auto_dispatch", "Despacho automático"),
+        ("persistence.events_retention_days", "Retención de eventos"),
+        ("persistence.artifacts_retention_days", "Retención de artefactos"),
+        ("persistence.files_retention_days", "Retención de ficheros ingeridos"),
+        ("model_enrichment.enabled", "Catálogo externo activo"),
+        ("model_enrichment.url", "URL del catálogo externo"),
+        ("model_enrichment.refresh_hours", "Refresco del catálogo externo"),
+        ("health.sqlite_interval_seconds", "Sondeo de SQLite"),
+        ("health.local_dependencies_interval_seconds", "Sondeo de dependencias locales"),
+        ("health.external_providers_interval_seconds", "Sondeo de proveedores externos"),
+        ("health.disk_free_alert_gb", "Aviso de disco libre"),
+        ("health.probe_timeout_seconds", "Timeout de sondeo"),
+        ("logging.level", "Nivel de registro"),
+        ("logging.max_bytes", "Tamaño máximo del log"),
+        ("logging.backup_count", "Ficheros de log conservados"),
+        ("logging.console_enabled", "Registro por consola"),
+        ("strategy_router.learning_escalation_threshold", "Umbral de escalado aprendido"),
+        ("strategy_router.learning_failure_threshold", "Umbral de fallo aprendido"),
         ("prompt_compression.enabled", "Compresión de prompts activa"),
         ("prompt_compression.level", "Nivel de compresión de prompts"),
         ("prompt_compression.min_chars", "Mínimo de caracteres para comprimir"),
@@ -94,6 +206,9 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("sandbox.timeout_seconds", "Timeout del sandbox"),
         ("sandbox.memory_mb", "Memoria del sandbox"),
         ("sandbox.cpus", "CPUs del sandbox"),
+        ("sandbox.pids_limit", "Límite de procesos del sandbox"),
+        ("sandbox.max_output_chars", "Salida máxima del sandbox"),
+        ("sandbox.work_volume_mb", "Volumen de trabajo del sandbox"),
         ("ingestion.enabled", "Ingesta de ficheros activa"),
         ("ingestion.max_file_mb", "Tamaño máximo de fichero"),
         ("ingestion.ocr_enabled", "OCR de escaneos activo"),
@@ -101,6 +216,12 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("ingestion.images.enabled", "Descripción de figuras activa"),
         ("ingestion.images.base_url", "Endpoint de visión"),
         ("ingestion.images.model", "Modelo de visión"),
+        ("ingestion.images.max_images", "Máx. figuras descritas"),
+        ("ingestion.images.api_key_env", "Variable API key de visión"),
+        ("ingestion.max_pdf_pages", "Máx. páginas por PDF"),
+        ("ingestion.ocr_languages", "Idiomas de OCR"),
+        ("ingestion.transcription.device", "Dispositivo de Whisper"),
+        ("ingestion.transcription.language", "Idioma de transcripción"),
         ("ingestion.transcription.enabled", "Transcripción de audio activa"),
         ("ingestion.transcription.model_size", "Modelo Whisper"),
         ("ingestion.transcription.ffmpeg_path", "Ruta de ffmpeg"),
@@ -239,6 +360,17 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         form, "max_loaded_local_models", minimum=1, maximum=64
     )
     resources["allow_execution_waves"] = _checked(form, "allow_execution_waves")
+    # Guard de presencia: sin él, un formulario parcial que no incluya estas
+    # casillas desactivaría el dispatcher automático al guardar.
+    if form.get("max_task_attempts") is not None:
+        processing["max_task_attempts"] = _int_range_field(
+            form, "max_task_attempts", minimum=1, maximum=100
+        )
+        processing["dispatcher_interval_seconds"] = _float_range_field(
+            form, "dispatcher_interval_seconds", minimum=0.01, maximum=60.0
+        )
+        processing["unload_after_task"] = _checked(form, "unload_after_task")
+        processing["auto_dispatch"] = _checked(form, "auto_dispatch")
     if resources["vram_safety_margin_gb"] >= resources["local_vram_budget_gb"]:
         raise PromptTesterError("El margen de VRAM debe ser menor que el presupuesto total de VRAM.")
     level = form.get("prompt_compression_level", "medium").strip().lower() or "medium"
@@ -269,6 +401,12 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
             ),
             "learning_min_cases": _int_range_field(
                 form, "strategy_router_learning_min_cases", minimum=1, maximum=10000,
+            ),
+            "learning_escalation_threshold": _float_range_field(
+                form, "strategy_router_learning_escalation_threshold", minimum=0.0, maximum=1.0,
+            ),
+            "learning_failure_threshold": _float_range_field(
+                form, "strategy_router_learning_failure_threshold", minimum=0.0, maximum=1.0,
             ),
         }
     if form.get("routing_min_invocations") is not None:
@@ -302,6 +440,13 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         )
         sandbox["memory_mb"] = _int_range_field(form, "sandbox_memory_mb", minimum=64, maximum=16384)
         sandbox["cpus"] = _float_range_field(form, "sandbox_cpus", minimum=0.1, maximum=32.0)
+        sandbox["pids_limit"] = _int_range_field(form, "sandbox_pids_limit", minimum=16, maximum=4096)
+        sandbox["max_output_chars"] = _int_range_field(
+            form, "sandbox_max_output_chars", minimum=500, maximum=100000
+        )
+        sandbox["work_volume_mb"] = _int_range_field(
+            form, "sandbox_work_volume_mb", minimum=32, maximum=4096
+        )
         payload["sandbox"] = sandbox
     if form.get("ingestion_max_file_mb") is not None:
         ingestion = dict(payload["ingestion"])
@@ -313,15 +458,82 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         ingestion["conversion_timeout_seconds"] = _int_range_field(
             form, "ingestion_conversion_timeout_seconds", minimum=10, maximum=43200,
         )
+        ingestion["max_pdf_pages"] = _int_range_field(
+            form, "ingestion_max_pdf_pages", minimum=1, maximum=10000
+        )
+        ingestion["ocr_languages"] = _csv_list(form, "ingestion_ocr_languages") or ingestion["ocr_languages"]
         images["enabled"] = _checked(form, "ingestion_images_enabled")
         images["base_url"] = form.get("ingestion_images_base_url", "").strip().rstrip("/") or images["base_url"]
         images["model"] = form.get("ingestion_images_model", "").strip()
+        images["max_images"] = _int_range_field(
+            form, "ingestion_images_max_images", minimum=0, maximum=200
+        )
+        images["api_key_env"] = form.get("ingestion_images_api_key_env", "").strip() or None
         transcription["enabled"] = _checked(form, "ingestion_transcription_enabled")
         transcription["model_size"] = form.get("ingestion_whisper_model", "").strip() or transcription["model_size"]
         transcription["ffmpeg_path"] = form.get("ingestion_ffmpeg_path", "").strip() or transcription["ffmpeg_path"]
+        device = form.get("ingestion_whisper_device", "auto").strip().lower() or "auto"
+        if device not in {"auto", "cpu", "cuda"}:
+            raise PromptTesterError("El dispositivo de Whisper debe ser auto, cpu o cuda.")
+        transcription["device"] = device
+        transcription["language"] = form.get("ingestion_whisper_language", "").strip() or None
         ingestion["images"] = images
         ingestion["transcription"] = transcription
         payload["ingestion"] = ingestion
+    if form.get("persistence_events_retention_days") is not None:
+        persistence = dict(payload["persistence"])
+        persistence["events_retention_days"] = _int_range_field(
+            form, "persistence_events_retention_days", minimum=0, maximum=36500
+        )
+        persistence["artifacts_retention_days"] = _int_range_field(
+            form, "persistence_artifacts_retention_days", minimum=0, maximum=36500
+        )
+        persistence["files_retention_days"] = _int_range_field(
+            form, "persistence_files_retention_days", minimum=0, maximum=36500
+        )
+        payload["persistence"] = persistence
+    if form.get("model_enrichment_url") is not None:
+        enrichment = dict(payload["model_enrichment"])
+        enrichment["enabled"] = _checked(form, "model_enrichment_enabled")
+        enrichment["url"] = form.get("model_enrichment_url", "").strip() or enrichment["url"]
+        enrichment["refresh_hours"] = _float_range_field(
+            form, "model_enrichment_refresh_hours", minimum=0.1, maximum=720.0
+        )
+        payload["model_enrichment"] = enrichment
+    if form.get("health_sqlite_interval_seconds") is not None:
+        health = dict(payload["health"])
+        health["sqlite_interval_seconds"] = _int_range_field(
+            form, "health_sqlite_interval_seconds", minimum=1, maximum=3600
+        )
+        health["local_dependencies_interval_seconds"] = _int_range_field(
+            form, "health_local_dependencies_interval_seconds", minimum=1, maximum=3600
+        )
+        health["external_providers_interval_seconds"] = _int_range_field(
+            form, "health_external_providers_interval_seconds", minimum=1, maximum=86400
+        )
+        health["disk_free_alert_gb"] = _int_range_field(
+            form, "health_disk_free_alert_gb", minimum=0, maximum=100000
+        )
+        health["probe_timeout_seconds"] = _float_range_field(
+            form, "health_probe_timeout_seconds", minimum=0.1, maximum=120.0
+        )
+        payload["health"] = health
+    if form.get("logging_level") is not None:
+        logging_cfg = dict(payload["logging"])
+        log_level = form.get("logging_level", "INFO").strip().upper() or "INFO"
+        if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise PromptTesterError(
+                "El nivel de registro debe ser DEBUG, INFO, WARNING, ERROR o CRITICAL."
+            )
+        logging_cfg["level"] = log_level
+        logging_cfg["max_bytes"] = _int_range_field(
+            form, "logging_max_bytes", minimum=1024, maximum=1073741824
+        )
+        logging_cfg["backup_count"] = _int_range_field(
+            form, "logging_backup_count", minimum=1, maximum=100
+        )
+        logging_cfg["console_enabled"] = _checked(form, "logging_console_enabled")
+        payload["logging"] = logging_cfg
     payload["providers"]["ollama"] = _parse_ollama_provider(current, form)
     payload["providers"]["deepseek"] = _parse_deepseek_provider(current, form)
     payload["providers"]["custom"] = _parse_custom_providers(current, form)
@@ -379,6 +591,20 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     # BrokerConfig compartido: reemplazar el atributo basta, sin reiniciar.
     target.sandbox = updated.sandbox
     target.ingestion = updated.ingestion
+    # Retenciones: las lee maintenance.py en cada poda, así que aplican sin
+    # reiniciar. Enriquecimiento y salud: sus servicios consultan el
+    # BrokerConfig compartido en cada ciclo.
+    target.persistence = updated.persistence
+    target.model_enrichment = updated.model_enrichment
+    target.health = updated.health
+    # El registro se reconfigura de verdad: configure_logging cierra los
+    # handlers vivos y los reinstala, así que nivel, rotación, número de
+    # ficheros y salida por consola aplican sin reiniciar. Reemplazar solo el
+    # atributo habría guardado el YAML dejando el logger con el valor viejo.
+    logging_changed = target.logging != updated.logging
+    target.logging = updated.logging
+    if logging_changed:
+        configure_logging(target.logging)
 
 
 
@@ -928,6 +1154,13 @@ def _pattern_lines(form: dict[str, str], key: str) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
+def _csv_list(form: dict[str, str], key: str) -> list[str]:
+    """Lista separada por comas. Vacío devuelve [] para que el llamante decida
+    si eso significa «sin valores» o «conserva los de antes»."""
+    raw = form.get(key, "")
+    return [part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()]
+
+
 def _int_field(form: dict[str, str], key: str, default: int) -> int:
     raw = form.get(key, "").strip()
     if not raw:
@@ -935,13 +1168,13 @@ def _int_field(form: dict[str, str], key: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError as error:
-        raise PromptTesterError(f"{key} debe ser un numero entero.") from error
+        raise PromptTesterError(f"{_field_label(key)} debe ser un número entero.") from error
 
 
 def _int_range_field(form: dict[str, str], key: str, *, minimum: int, maximum: int) -> int:
     value = _int_field(form, key, minimum)
     if value < minimum or value > maximum:
-        raise PromptTesterError(f"{key} debe estar entre {minimum} y {maximum}.")
+        raise PromptTesterError(f"{_field_label(key)} debe estar entre {minimum} y {maximum}.")
     return value
 
 
@@ -952,13 +1185,13 @@ def _float_field(form: dict[str, str], key: str, default: float) -> float:
     try:
         return float(raw)
     except ValueError as error:
-        raise PromptTesterError(f"{key} debe ser numerico.") from error
+        raise PromptTesterError(f"{_field_label(key)} debe ser un número.") from error
 
 
 def _float_range_field(form: dict[str, str], key: str, *, minimum: float, maximum: float) -> float:
     value = _float_field(form, key, minimum)
     if value < minimum or value > maximum:
-        raise PromptTesterError(f"{key} debe estar entre {minimum:g} y {maximum:g}.")
+        raise PromptTesterError(f"{_field_label(key)} debe estar entre {minimum:g} y {maximum:g}.")
     return value
 
 
@@ -969,9 +1202,9 @@ def _auto_or_int_field(form: dict[str, str], key: str, *, minimum: int, maximum:
     try:
         value = int(raw)
     except ValueError as error:
-        raise PromptTesterError(f"{key} debe ser 'auto' o un numero entero.") from error
+        raise PromptTesterError(f"{_field_label(key)} debe ser 'auto' o un número entero.") from error
     if value < minimum or value > maximum:
-        raise PromptTesterError(f"{key} debe ser 'auto' o estar entre {minimum} y {maximum}.")
+        raise PromptTesterError(f"{_field_label(key)} debe ser 'auto' o estar entre {minimum} y {maximum}.")
     return value
 
 
@@ -983,10 +1216,23 @@ def _optional_float(form: dict[str, str], key: str) -> float | None:
 
 
 def _validation_messages(error: ValidationError) -> list[str]:
+    """Traduce errores de Pydantic al vocabulario del panel.
+
+    La ruta que emite Pydantic (`strategy_router.learning_min_cases`) no es un
+    nombre que el usuario haya visto nunca. Cuando corresponde a un campo del
+    formulario se sustituye por su etiqueta y su sección; si no —validadores de
+    modelo, listas de proveedores— se conserva la ruta como única pista útil.
+    """
     messages = []
     for item in error.errors():
-        location = ".".join(str(part) for part in item.get("loc", ()))
-        messages.append(f"{location}: {item.get('msg')}")
+        parts = [str(part) for part in item.get("loc", ())]
+        label = next(
+            (_field_label(name) for name in ("_".join(parts), parts[-1] if parts else "")
+             if name in CONFIG_FIELD_LABELS),
+            None,
+        )
+        prefix = label or f"{'.'.join(parts)}:"
+        messages.append(f"{prefix} {item.get('msg')}")
     return messages
 
 
