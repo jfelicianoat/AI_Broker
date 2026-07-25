@@ -12,7 +12,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Un nivel más abajo:** es un servicio que corre en tu propio ordenador (no depende de ninguna nube para funcionar), expone una API y un panel web local, y gestiona una cola de tareas de inferencia. Cada tarea declara qué necesita (privacidad, coste máximo, formato de salida) y el broker decide qué modelo o modelos la ejecutan, entre los que tengas en Ollama, LM Studio o proveedores de API como DeepSeek o NVIDIA.
 
-**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.4) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
+**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.5) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
 
 ## 2. Qué sabe hacer
 
@@ -63,9 +63,15 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 ## 5. Cómo elige los modelos
 
-**Para empezar:** no todos los modelos valen para todo, y algunos fallan más que otros. El broker aprende de la experiencia: recuerda qué modelos responden bien, rápido y barato, y prefiere esos. Y antes de usar un modelo comprueba qué sabe hacer de verdad (¿entiende imágenes? ¿puede usar herramientas?), en lugar de fiarse del nombre.
+**Para empezar:** no todos los modelos valen para todo, y algunos fallan más que otros. El broker aprende de la experiencia: recuerda qué modelos responden bien, rápido y barato, y prefiere esos. Antes de usar un modelo comprueba qué sabe hacer de verdad (¿entiende imágenes? ¿puede usar herramientas?), en lugar de fiarse del nombre. Y no manda a un especialista en código a redactar prosa solo porque esté a mano.
 
-**Las capas de decisión:** primero se filtran los candidatos (proveedores permitidos, política cloud/local, capacidad requerida, ventana de contexto suficiente); después se reordenan por un score multiobjetivo sobre evidencia real — tasa de éxito con suavizado de Laplace, latencia y coste medios normalizados min-max — calculado sobre `model_invocations` en una ventana configurable. Un modelo sin historial puntúa neutro (el arranque en frío no castiga). `target_model`/`preferred_model` mantienen prioridad absoluta.
+**Las capas de decisión:** primero se filtran los candidatos por **elegibilidad** (proveedores permitidos, política cloud/local, capacidad requerida, ventana de contexto suficiente) y por **idoneidad** (`task_affinity`: qué modelos *deberían* atender cada tipo de tarea); después se reordenan por un score multiobjetivo sobre evidencia real — tasa de éxito con suavizado de Laplace, latencia y coste medios normalizados min-max — calculado sobre `model_invocations` en una ventana configurable. Un modelo sin historial puntúa neutro (el arranque en frío no castiga). `target_model`/`preferred_model` mantienen prioridad absoluta sobre ambas capas.
+
+**Idoneidad por tipo de tarea (`task_affinity`):** los filtros de elegibilidad solo responden a "¿puede este modelo atender la petición?". Sin una capa que responda a "¿debería?", un modelo de código es candidato de pleno derecho para redactar prosa, y un guardarraíl o un OCR entran en la rotación general. `exclude_always` aparta los modelos de propósito único; `exclude_by_task_type` aparta a los especialistas de código en `prose`/`long_context`. Los patrones son fnmatch (insensibles a mayúsculas) contra el nombre del modelo y su `catalog_id` de models.dev — el mismo modelo se llama distinto según el proveedor. El filtro es best-effort: si dejara la selección sin candidatos se ignora, porque una preferencia nunca debe convertir en irresoluble una tarea atendible.
+
+**Cómo se reparte la evidencia:** el score solo distingue a los modelos que ya tienen `min_invocations` en ese tipo de tarea; el resto empatan en neutro, y ese empate es el caso normal al principio. Deshacerlo por orden de catálogo ataba cada petición al primer modelo que devolviera el proveedor (en Ollama, el último descargado), que así se llevaba el 100% del tráfico y era el único que acumulaba historial. El desempate lo decide ahora la evidencia pendiente: primero se remata al que ya está a medias, luego se estrena a los no probados, y por último van los ya medidos (el menos usado antes). Y cuando alguien gana por score, `exploration_rate` cede una fracción de las peticiones a los candidatos aún sin medir — dirigida, rematando de uno en uno: un sorteo uniforme sobre ~80 candidatos dispersaría las exploraciones en invocaciones sueltas que nunca llegan a `min_invocations`.
+
+**Historial anterior a `task_type`:** las métricas se segmentan por tipo de tarea, así que las invocaciones registradas antes de esa columna se descartan (sin clasificar no se sabe a qué segmento pertenecen) y el enrutamiento arranca en frío pese a tener meses de datos. `python scripts/backfill_task_type.py [--dry-run]` las reclasifica aplicando el mismo clasificador determinista a la petición ya guardada.
 
 **Detalle técnico — jerarquía de evidencia sobre capacidades:** sondeo real contra el endpoint (peticiones de 1 token para chat/visión/JSON/tools, persistidas en `features` con timestamp) > capacidades declaradas por el runtime (Ollama `/api/show`) > catálogo externo [models.dev](https://models.dev) (opt-in, descarga diaria cacheada en disco: contexto real, precios por 1M, corte de conocimiento) > heurística por nombre. El catálogo rellena huecos, nunca pisa un dato verificado. La compatibilidad distingue `incompatible` (error de contrato 400/404/422: vetado) de `error` (fallo temporal 5xx/timeout: se reintenta). El preflight de contexto usa una cota superior conservadora de tokens y **nunca** trunca en silencio: si no cabe, recorta `max_output_tokens` o falla con `CONTEXT_LIMIT_EXCEEDED` explicando los números.
 
@@ -196,7 +202,7 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 | `/api/v1/models` | GET | Catálogo con compatibilidad y capacidades sondeadas |
 | `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
 | `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo |
-| `/api/v1/capabilities` | GET | Contrato 2.4: estrategias, presets, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `agent_skills`, flags del router |
+| `/api/v1/capabilities` | GET | Contrato 2.5: estrategias, presets, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, flags del router |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/api/v1/dashboard/*` | GET | Read models: summary, tasks, resources |
 | `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico (el dispatcher es autónomo) |
@@ -209,7 +215,7 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 ```
 ├── app/
 │   ├── main.py                # FastAPI app (factory) + endpoints API
-│   ├── schemas.py             # Contrato Pydantic completo (v2.4)
+│   ├── schemas.py             # Contrato Pydantic completo (v2.5)
 │   ├── coordinator.py         # Orquestación: single, mixture, agent, auto
 │   ├── strategy_router.py     # Meta-router: clasificador + aprendizaje
 │   ├── skills.py              # Skills del agente (web, URL, cálculo, código)

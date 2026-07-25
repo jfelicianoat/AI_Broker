@@ -74,6 +74,16 @@ warn_unused_ignores = false
 warn_redundant_casts = true
 no_implicit_optional = true
 
+# numpy entra como dependencia transitiva (docling/pandas) y sus stubs usan la
+# sintaxis `type X = ...` de 3.12, que mypy no sabe parsear con
+# python_version = "3.10" y aborta el chequeo entero. El broker no importa
+# numpy: se salta el módulo (queda como Any) en vez de subir python_version,
+# que dejaría de verificar la compatibilidad 3.10 declarada en el proyecto.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 # El parseo de formularios HTML (str -> tipos de config) es inherentemente
 # dinámico; el override queda acotado a ese módulo. El resto del panel
 # (app.dashboard_web) se chequea con la configuración completa.

@@ -175,23 +175,28 @@ class TaskRepository:
         )
         return str(row["id"]) if row else None
 
-    def start_invocation(self, task_id: str, run_id: str | None, role: str, model: ModelReference) -> str:
+    def start_invocation(
+        self, task_id: str, run_id: str | None, role: str, model: ModelReference, task_type: str,
+    ) -> str:
         """Checkpoint pre-vuelo: la fila existe ANTES de llamar al proveedor.
 
         Si el proceso muere con la llamada en el aire, la recuperación
         encontrará esta fila en 'started' y sabrá que la inferencia pudo
         llegar a ejecutarse (y facturarse) aunque no haya respuesta persistida.
+        task_type (app.task_classifier) permite luego segmentar las métricas
+        de enrutamiento por naturaleza de la tarea (código/prosa/contexto
+        largo) en vez de agregarlas todas en un único score.
         """
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             connection.execute(
                 "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
-                "tokens_input, tokens_output, cost_usd, started_at, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
+                "task_type, tokens_input, tokens_output, cost_usd, started_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
                 (
                     invocation_id, task_id, run_id, role,
-                    model.provider, model.deployment, model.model,
+                    model.provider, model.deployment, model.model, task_type,
                     now, now, now,
                 ),
             )

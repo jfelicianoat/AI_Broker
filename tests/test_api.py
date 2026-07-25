@@ -379,7 +379,7 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.4"
+    assert body["contract_version"] == "2.5"
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
     assert body["presets"]["agent"] == ["fast"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]
@@ -560,6 +560,106 @@ def test_dashboard_configuration_updates_runtime_and_yaml(tmp_path: Path) -> Non
     assert config.resources.max_loaded_local_models == "auto"
     assert saved.processing.task_timeout_seconds == 900
     assert saved.resources.allow_execution_waves is True
+
+
+def test_dashboard_configuration_updates_routing_live(tmp_path: Path) -> None:
+    """El router (RoutedModelProvider) guarda una referencia al BrokerConfig
+    compartido y lee config.routing en vivo: guardar desde el panel debe
+    reemplazar ese atributo en memoria, no solo el YAML en disco."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-routing.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard/config")
+        assert "routing_exploration_rate" in page.text
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+                "routing_adaptive_selection": "on",
+                "routing_stats_window_days": "10",
+                "routing_min_invocations": "5",
+                "routing_success_weight": "0.6",
+                "routing_latency_weight": "0.2",
+                "routing_cost_weight": "0.2",
+                "routing_exploration_rate": "0.2",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert response.status_code == 200
+    assert "Configuración guardada" in response.text
+    # En memoria (lo que de verdad usa RoutedModelProvider en la próxima selección):
+    assert config.routing.min_invocations == 5
+    assert config.routing.exploration_rate == 0.2
+    # Y persistido en disco, para que sobreviva a un reinicio:
+    assert saved.routing.min_invocations == 5
+    assert saved.routing.exploration_rate == 0.2
+
+
+def test_dashboard_configuration_updates_task_affinity(tmp_path: Path) -> None:
+    """Los patrones de idoneidad se consultan en vivo contra el BrokerConfig
+    compartido en cada selección: guardarlos debe cambiar memoria y disco.
+    Y un textarea vacío significa 'sin patrones', no 'deja los de antes'."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-affinity.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard/config")
+        assert "task_affinity_exclude_always" in page.text
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "task_affinity_enabled": "on",
+                "task_affinity_exclude_always": "*guard*\n  *-ocr*  \n\n",
+                "task_affinity_exclude_prose": "*-coder*",
+                "task_affinity_exclude_long_context": "",
+                "task_affinity_exclude_code": "",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert response.status_code == 200
+    assert config.task_affinity.enabled is True
+    assert config.task_affinity.exclude_always == ["*guard*", "*-ocr*"]
+    assert config.task_affinity.exclude_by_task_type["prose"] == ["*-coder*"]
+    assert config.task_affinity.exclude_by_task_type["long_context"] == []
+    assert saved.task_affinity.exclude_always == ["*guard*", "*-ocr*"]
+
+
+def test_dashboard_routing_shows_task_affinity_effect(tmp_path: Path) -> None:
+    """El panel muestra a quién aparta el filtro en el catálogo de hoy: sin
+    esa vista, los patrones son una lista de texto sin efecto observable."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-routing-affinity.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        page = client.get("/dashboard/routing")
+
+    assert page.status_code == 200
+    assert "Idoneidad por tipo de tarea" in page.text
 
 
 def test_dashboard_configuration_rejects_concurrent_edit(tmp_path: Path) -> None:
@@ -2285,10 +2385,10 @@ def test_recovery_distinguishes_local_and_remote_in_flight_calls(tmp_path: Path)
         db.execute("UPDATE tasks SET status = 'generating' WHERE id = ?", (local_id,))
         db.execute("UPDATE tasks SET status = 'proposing' WHERE id = ?", (remote_id,))
         local_inv = repository.start_invocation(
-            local_id, None, "single", ModelReference(provider="ollama", deployment="local", model="llama3")
+            local_id, None, "single", ModelReference(provider="ollama", deployment="local", model="llama3"), "prose",
         )
         remote_inv = repository.start_invocation(
-            remote_id, None, "proposer", ModelReference(provider="nvidia", deployment="api", model="yi-large")
+            remote_id, None, "proposer", ModelReference(provider="nvidia", deployment="api", model="yi-large"), "prose",
         )
 
         recovered = repository.recover_interrupted_tasks(max_attempts=3)

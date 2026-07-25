@@ -264,6 +264,13 @@ class AgentExecutionConfig(StrictBaseModel):
 class ExecutionConfig(StrictBaseModel):
     strategy: ExecutionStrategy = ExecutionStrategy.single
     preset: ExecutionPreset = ExecutionPreset.fast
+    # Política cuando los documentos adjuntos no caben en el contexto de ningún
+    # modelo elegible. "fail" (default) conserva el contrato clásico: error
+    # explícito, nunca se divide en silencio. "map_reduce" AUTORIZA al broker a
+    # trocear los documentos, procesar cada fragmento y sintetizar (algoritmo
+    # técnico versionado, como el árbitro del consenso). Solo estrategia
+    # single/auto con inference chat.
+    long_context: Literal["fail", "map_reduce"] = "fail"
     scheduling: SchedulingPolicy = SchedulingPolicy.adaptive
     max_proposers: int = Field(default=3, ge=1, le=5)
     max_judges: int = Field(default=1, ge=0, le=2)
@@ -301,6 +308,25 @@ class ExecutionConfig(StrictBaseModel):
         return self
 
 
+def run_code_available(execution: ExecutionConfig) -> bool:
+    """True si esta ejecución podría llegar a invocar la skill run_code.
+
+    single no tiene mecanismo de tool-calling en absoluto: nunca es True.
+    auto se resuelve más tarde (ver strategy_router); antes de resolverse no
+    se puede saber con certeza, así que se trata como True (no bloquear
+    prematuramente una tarea que auto podría resolver a agent/mixture con
+    run_code) — el bloqueo real para auto ocurre después de resolver, en
+    ConsensusCoordinator._process_task_request.
+    """
+    if execution.strategy == ExecutionStrategy.agent:
+        return "run_code" in execution.agent.skills
+    if execution.strategy == ExecutionStrategy.mixture_of_agents:
+        return "run_code" in execution.proposer_skills
+    if execution.strategy == ExecutionStrategy.auto:
+        return True
+    return False
+
+
 class RiskConfig(StrictBaseModel):
     data_classification: DataClassification = DataClassification.internal
     human_review_required: bool = False
@@ -328,6 +354,13 @@ class TaskCreateRequest(StrictBaseModel):
                 raise ValueError("agent strategy only supports chat inference")
             if self.output.format == OutputFormat.json:
                 raise ValueError("agent strategy does not support json output format yet")
+        if self.execution.long_context == "map_reduce":
+            if self.execution.strategy not in {ExecutionStrategy.single, ExecutionStrategy.auto}:
+                raise ValueError("long_context=map_reduce only supports single or auto strategy")
+            if self.inference_kind != InferenceKind.chat:
+                raise ValueError("long_context=map_reduce only supports chat inference")
+            if self.output.format == OutputFormat.json:
+                raise ValueError("long_context=map_reduce does not support json output format")
         return self
 
     @model_validator(mode="after")
@@ -485,6 +518,9 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     file_ingestion: bool = False
     # Skill run_code disponible (sandbox Docker habilitado en la configuración).
     sandbox_run_code: bool = False
+    # La tarea puede autorizar map-reduce cuando los adjuntos exceden el
+    # contexto (execution.long_context: "map_reduce"); default sigue siendo fail.
+    long_context_map_reduce: bool = False
     # Extensiones admitidas por la ingesta, agrupadas por tipo.
     ingestion_formats: dict[str, list[str]] = Field(default_factory=dict)
 

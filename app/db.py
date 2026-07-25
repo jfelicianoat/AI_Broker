@@ -203,9 +203,19 @@ class Database:
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN started_at TEXT")
             if "completed_at" not in invocation_columns:
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN completed_at TEXT")
+            if "task_type" not in invocation_columns:
+                # Segmenta las métricas de enrutamiento por naturaleza de la
+                # tarea (app.task_classifier): NULL en filas anteriores a esta
+                # columna, se tratan como sin clasificar y no participan en el
+                # score adaptativo por tipo.
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN task_type TEXT")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_invocations_task_type "
+                "ON model_invocations(task_type, provider, model, status)"
             )
             self._conn.commit()
 

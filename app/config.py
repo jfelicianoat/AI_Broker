@@ -113,13 +113,15 @@ class IngestionConfig(BaseModel):
     """
     enabled: bool = True
     storage_dir: str = "state/files"
-    max_file_mb: int = Field(default=100, ge=1, le=4096)
+    # La subida es en streaming a disco (nunca se carga el fichero entero en
+    # RAM), así que el tope real es espacio en disco, no memoria.
+    max_file_mb: int = Field(default=100, ge=1, le=32768)
     max_pdf_pages: int = Field(default=500, ge=1, le=10000)
     ocr_enabled: bool = True
     ocr_languages: list[str] = Field(default_factory=lambda: ["es", "en"])
     # La conversión corre en un hilo; al agotarse el plazo la tarea de ingesta
     # se marca failed aunque el hilo siga drenando en segundo plano.
-    conversion_timeout_seconds: int = Field(default=900, ge=10, le=7200)
+    conversion_timeout_seconds: int = Field(default=900, ge=10, le=43200)
     images: IngestionImagesConfig = Field(default_factory=IngestionImagesConfig)
     transcription: IngestionTranscriptionConfig = Field(default_factory=IngestionTranscriptionConfig)
 
@@ -127,10 +129,15 @@ class IngestionConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """Sandbox de ejecución de código (skill run_code de la estrategia agent).
 
-    Contenedores Docker efímeros SIEMPRE sin red, sin volúmenes del host y sin
-    privilegios: esas fronteras no son configurables a propósito. Requiere
-    Docker Desktop en marcha; si no responde, la skill devuelve un error claro
-    al modelo sin afectar al resto del broker.
+    Contenedores Docker efímeros SIEMPRE sin red y sin privilegios: esas
+    fronteras no son configurables a propósito. Nunca se monta un directorio
+    del host (ningún bind mount): cuando la tarea tiene adjuntos tabulares
+    autorizados, se usa un volumen de Docker efímero respaldado por tmpfs
+    (nunca por disco) para poder copiarlos con `docker cp` antes de ejecutar
+    el código — `docker cp` no funciona contra un tmpfs montado directamente
+    en un contenedor `--read-only` (verificado empíricamente), de ahí el
+    volumen intermedio. Requiere Docker Desktop en marcha; si no responde, la
+    skill devuelve un error claro al modelo sin afectar al resto del broker.
     """
     enabled: bool = False
     docker_path: str = Field(default="docker", min_length=1, max_length=512)
@@ -140,6 +147,17 @@ class SandboxConfig(BaseModel):
     cpus: float = Field(default=2.0, gt=0, le=32)
     pids_limit: int = Field(default=256, ge=16, le=4096)
     max_output_chars: int = Field(default=8000, ge=500, le=100_000)
+    # Tamaño del volumen tmpfs /work usado solo cuando run_code recibe
+    # adjuntos a stagear (ver app.sandbox.SandboxExecutor). El tmpfs cuenta
+    # contra memory_mb, así que debe quedar cómodamente por debajo: escribir
+    # el adjunto ya podría agotar memoria antes de ejecutar una línea de código.
+    work_volume_mb: int = Field(default=256, ge=32, le=4096)
+
+    @model_validator(mode="after")
+    def validate_work_volume_fits_memory(self) -> SandboxConfig:
+        if self.work_volume_mb >= self.memory_mb:
+            raise ValueError("sandbox.work_volume_mb debe ser menor que sandbox.memory_mb")
+        return self
 
 
 class ResourceConfig(BaseModel):
@@ -211,11 +229,95 @@ class RoutingConfig(BaseModel):
     success_weight: float = Field(default=0.5, ge=0)
     latency_weight: float = Field(default=0.3, ge=0)
     cost_weight: float = Field(default=0.2, ge=0)
+    # Probabilidad de ignorar el score y ascender otro candidato a la primera
+    # posición. Sin esto, un modelo que gana la comparación en cuanto supera
+    # min_invocations se autorrefuerza indefinidamente: solo él sigue
+    # acumulando invocaciones, así que ningún otro candidato alcanza nunca
+    # evidencia suficiente para competir. La exploración prioriza a los
+    # candidatos que aún no llegan a min_invocations en ese tipo de tarea
+    # (ver RoutedModelProvider._apply_exploration). 0 = desactivado
+    # (comportamiento clásico, determinista).
+    exploration_rate: float = Field(default=0.0, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_weights(self) -> RoutingConfig:
         if self.success_weight + self.latency_weight + self.cost_weight <= 0:
             raise ValueError("routing: al menos un peso debe ser mayor que cero")
+        return self
+
+
+# Tipos de tarea admitidos en task_affinity. Duplica a propósito
+# app.task_classifier.TASK_TYPES (importarlo aquí crearía un ciclo
+# config -> task_classifier -> providers.base -> config); un test de
+# contrato verifica que ambas listas no diverjan.
+TASK_AFFINITY_TYPES = ("code", "long_context", "prose")
+
+# Modelos especializados en código. Anclados a separador para no atrapar
+# "encoder"/"decoder", que son otra cosa.
+_CODE_SPECIALIST_PATTERNS = (
+    "*-coder*",
+    "*_coder*",
+    "*starcoder*",
+    "*codestral*",
+    "*codegemma*",
+    "*codellama*",
+    "*-code-*",
+    "*-code",
+    "*-code:*",
+)
+
+
+class TaskAffinityConfig(BaseModel):
+    """Qué modelos son *idóneos* para cada tipo de tarea.
+
+    Los filtros de `select()` (proveedor, cloud, capacidad, contexto) solo
+    responden a "¿puede este modelo atender la petición?", nunca a "¿debería?".
+    Sin esta capa, un modelo de código es candidato de pleno derecho para
+    redactar prosa y gana en cuanto encabeza el catálogo o sale sorteado en la
+    exploración.
+
+    Los patrones son estilo fnmatch, insensibles a mayúsculas, y se comparan
+    contra el nombre del modelo y contra su `catalog_id` de models.dev. El
+    filtro es best-effort: si dejara la selección sin candidatos, se ignora
+    (nunca se rechaza una tarea por una preferencia).
+    """
+
+    enabled: bool = True
+    # Modelos de propósito único (guardarraíles, OCR, traducción, detectores):
+    # no son modelos de chat y no deben entrar en ninguna rotación general.
+    # Los patrones van anclados a separadores a propósito: un "*ocr*" suelto
+    # casaría con "mediocre", y una exclusión de más es tan dañina como una
+    # de menos.
+    exclude_always: list[str] = Field(
+        default_factory=lambda: [
+            "*guard*",
+            "*safety*",
+            "*topic-control*",
+            "*-pii*",
+            "*-ocr*",
+            "ocr-*",
+            "*translate*",
+            "*detector*",
+            "*calibration*",
+        ]
+    )
+    # Exclusiones por tipo de tarea (app.task_classifier.classify_task_type).
+    exclude_by_task_type: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "prose": list(_CODE_SPECIALIST_PATTERNS),
+            "long_context": list(_CODE_SPECIALIST_PATTERNS),
+            "code": [],
+        }
+    )
+
+    @model_validator(mode="after")
+    def validate_task_types(self) -> TaskAffinityConfig:
+        unknown = sorted(set(self.exclude_by_task_type) - set(TASK_AFFINITY_TYPES))
+        if unknown:
+            raise ValueError(
+                "task_affinity.exclude_by_task_type: tipos desconocidos "
+                f"{unknown} (admitidos: {list(TASK_AFFINITY_TYPES)})"
+            )
         return self
 
 
@@ -346,6 +448,7 @@ class BrokerConfig(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    task_affinity: TaskAffinityConfig = Field(default_factory=TaskAffinityConfig)
     strategy_router: StrategyRouterConfig = Field(default_factory=StrategyRouterConfig)
     model_enrichment: ModelEnrichmentConfig = Field(default_factory=ModelEnrichmentConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
