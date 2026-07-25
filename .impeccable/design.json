@@ -1,0 +1,623 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-25T21:30:01.742Z",
+  "title": "Design System: AI Broker",
+  "extensions": {
+    "colorMeta": {
+      "bg": {
+        "role": "neutral",
+        "displayName": "Abismo",
+        "canonical": "oklch(17.5% 0.029 253.1)",
+        "tonalRamp": [
+          "oklch(15% 0.029 253.1)",
+          "oklch(26% 0.029 253.1)",
+          "oklch(37% 0.029 253.1)",
+          "oklch(48% 0.029 253.1)",
+          "oklch(59% 0.029 253.1)",
+          "oklch(70% 0.029 253.1)",
+          "oklch(81% 0.029 253.1)",
+          "oklch(92% 0.029 253.1)"
+        ]
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "Chasis",
+        "canonical": "oklch(19.2% 0.032 251.5)",
+        "tonalRamp": [
+          "oklch(15% 0.032 251.5)",
+          "oklch(26% 0.032 251.5)",
+          "oklch(37% 0.032 251.5)",
+          "oklch(48% 0.032 251.5)",
+          "oklch(59% 0.032 251.5)",
+          "oklch(70% 0.032 251.5)",
+          "oklch(81% 0.032 251.5)",
+          "oklch(92% 0.032 251.5)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Panel",
+        "canonical": "oklch(20.9% 0.034 251.4)",
+        "tonalRamp": [
+          "oklch(15% 0.034 251.4)",
+          "oklch(26% 0.034 251.4)",
+          "oklch(37% 0.034 251.4)",
+          "oklch(48% 0.034 251.4)",
+          "oklch(59% 0.034 251.4)",
+          "oklch(70% 0.034 251.4)",
+          "oklch(81% 0.034 251.4)",
+          "oklch(92% 0.034 251.4)"
+        ]
+      },
+      "well": {
+        "role": "neutral",
+        "displayName": "Pozo",
+        "canonical": "oklch(19.1% 0.032 249.6)"
+      },
+      "elevated": {
+        "role": "neutral",
+        "displayName": "Realzado",
+        "canonical": "oklch(21.7% 0.034 249.6)"
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "Realce",
+        "canonical": "oklch(24.1% 0.038 248.3)",
+        "tonalRamp": [
+          "oklch(15% 0.038 248.3)",
+          "oklch(26% 0.038 248.3)",
+          "oklch(37% 0.038 248.3)",
+          "oklch(48% 0.038 248.3)",
+          "oklch(59% 0.038 248.3)",
+          "oklch(70% 0.038 248.3)",
+          "oklch(81% 0.038 248.3)",
+          "oklch(92% 0.038 248.3)"
+        ]
+      },
+      "track": {
+        "role": "neutral",
+        "displayName": "Pista",
+        "canonical": "oklch(28.9% 0.038 246.4)"
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Filo",
+        "canonical": "oklch(31.9% 0.042 250.5)",
+        "tonalRamp": [
+          "oklch(15% 0.042 250.5)",
+          "oklch(26% 0.042 250.5)",
+          "oklch(37% 0.042 250.5)",
+          "oklch(48% 0.042 250.5)",
+          "oklch(59% 0.042 250.5)",
+          "oklch(70% 0.042 250.5)",
+          "oklch(81% 0.042 250.5)",
+          "oklch(92% 0.042 250.5)"
+        ]
+      },
+      "border-soft": {
+        "role": "neutral",
+        "displayName": "Filo Suave",
+        "canonical": "oklch(27.8% 0.04 248.1)"
+      },
+      "border-strong": {
+        "role": "neutral",
+        "displayName": "Filo Vivo",
+        "canonical": "oklch(45.6% 0.062 247.8)"
+      },
+      "muted-line": {
+        "role": "neutral",
+        "displayName": "Filo Inerte",
+        "canonical": "oklch(52% 0.036 248.5)"
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Blanco de Instrumento",
+        "canonical": "oklch(96.7% 0.011 243.7)",
+        "tonalRamp": [
+          "oklch(15% 0.011 243.7)",
+          "oklch(26% 0.011 243.7)",
+          "oklch(37% 0.011 243.7)",
+          "oklch(48% 0.011 243.7)",
+          "oklch(59% 0.011 243.7)",
+          "oklch(70% 0.011 243.7)",
+          "oklch(81% 0.011 243.7)",
+          "oklch(92% 0.011 243.7)"
+        ]
+      },
+      "text-2": {
+        "role": "neutral",
+        "displayName": "Texto Enfático",
+        "canonical": "oklch(92% 0.016 245.1)"
+      },
+      "text-3": {
+        "role": "neutral",
+        "displayName": "Texto Corriente",
+        "canonical": "oklch(87.6% 0.021 243.4)"
+      },
+      "text-4": {
+        "role": "neutral",
+        "displayName": "Texto Técnico",
+        "canonical": "oklch(81.9% 0.025 244.2)"
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Acero Apagado",
+        "canonical": "oklch(70.7% 0.033 248.3)",
+        "tonalRamp": [
+          "oklch(15% 0.033 248.3)",
+          "oklch(26% 0.033 248.3)",
+          "oklch(37% 0.033 248.3)",
+          "oklch(48% 0.033 248.3)",
+          "oklch(59% 0.033 248.3)",
+          "oklch(70% 0.033 248.3)",
+          "oklch(81% 0.033 248.3)",
+          "oklch(92% 0.033 248.3)"
+        ]
+      },
+      "teal": {
+        "role": "primary",
+        "displayName": "Verde Osciloscopio",
+        "canonical": "oklch(74.5% 0.125 179)",
+        "tonalRamp": [
+          "oklch(15% 0.125 179)",
+          "oklch(26% 0.125 179)",
+          "oklch(37% 0.125 179)",
+          "oklch(48% 0.125 179)",
+          "oklch(59% 0.125 179)",
+          "oklch(70% 0.125 179)",
+          "oklch(81% 0.125 179)",
+          "oklch(92% 0.125 179)"
+        ]
+      },
+      "on-teal": {
+        "role": "primary",
+        "displayName": "Tinta Osciloscopio",
+        "canonical": "oklch(19.2% 0.027 190.9)"
+      },
+      "teal-fill": {
+        "role": "primary",
+        "displayName": "Relleno de Acento",
+        "canonical": "oklch(23.6% 0.03 184.3)"
+      },
+      "teal-ink": {
+        "role": "primary",
+        "displayName": "Tinta de Acento",
+        "canonical": "oklch(88% 0.074 184.2)"
+      },
+      "blue": {
+        "role": "secondary",
+        "displayName": "Azul de Traza",
+        "canonical": "oklch(72.9% 0.135 246.9)",
+        "tonalRamp": [
+          "oklch(15% 0.135 246.9)",
+          "oklch(26% 0.135 246.9)",
+          "oklch(37% 0.135 246.9)",
+          "oklch(48% 0.135 246.9)",
+          "oklch(59% 0.135 246.9)",
+          "oklch(70% 0.135 246.9)",
+          "oklch(81% 0.135 246.9)",
+          "oklch(92% 0.135 246.9)"
+        ]
+      },
+      "green": {
+        "role": "tertiary",
+        "displayName": "Verde Confirmación",
+        "canonical": "oklch(76.4% 0.175 149.1)",
+        "tonalRamp": [
+          "oklch(15% 0.175 149.1)",
+          "oklch(26% 0.175 149.1)",
+          "oklch(37% 0.175 149.1)",
+          "oklch(48% 0.175 149.1)",
+          "oklch(59% 0.175 149.1)",
+          "oklch(70% 0.175 149.1)",
+          "oklch(81% 0.175 149.1)",
+          "oklch(92% 0.175 149.1)"
+        ]
+      },
+      "green-fill": {
+        "role": "tertiary",
+        "displayName": "Relleno Confirmación",
+        "canonical": "oklch(25.6% 0.04 159)"
+      },
+      "green-line": {
+        "role": "tertiary",
+        "displayName": "Borde Confirmación",
+        "canonical": "oklch(44.6% 0.088 154)"
+      },
+      "green-ink": {
+        "role": "tertiary",
+        "displayName": "Tinta Confirmación",
+        "canonical": "oklch(81.1% 0.15 149.9)"
+      },
+      "amber": {
+        "role": "tertiary",
+        "displayName": "Ámbar de Aviso",
+        "canonical": "oklch(79.7% 0.154 75.6)",
+        "tonalRamp": [
+          "oklch(15% 0.154 75.6)",
+          "oklch(26% 0.154 75.6)",
+          "oklch(37% 0.154 75.6)",
+          "oklch(48% 0.154 75.6)",
+          "oklch(59% 0.154 75.6)",
+          "oklch(70% 0.154 75.6)",
+          "oklch(81% 0.154 75.6)",
+          "oklch(92% 0.154 75.6)"
+        ]
+      },
+      "amber-fill": {
+        "role": "tertiary",
+        "displayName": "Relleno Aviso",
+        "canonical": "oklch(22.5% 0.026 87.1)"
+      },
+      "amber-line": {
+        "role": "tertiary",
+        "displayName": "Borde Aviso",
+        "canonical": "oklch(45.2% 0.075 81)"
+      },
+      "amber-ink": {
+        "role": "tertiary",
+        "displayName": "Tinta Aviso",
+        "canonical": "oklch(88.7% 0.118 83.7)"
+      },
+      "red": {
+        "role": "tertiary",
+        "displayName": "Rojo de Fallo",
+        "canonical": "oklch(68.8% 0.166 22.4)",
+        "tonalRamp": [
+          "oklch(15% 0.166 22.4)",
+          "oklch(26% 0.166 22.4)",
+          "oklch(37% 0.166 22.4)",
+          "oklch(48% 0.166 22.4)",
+          "oklch(59% 0.166 22.4)",
+          "oklch(70% 0.166 22.4)",
+          "oklch(81% 0.166 22.4)",
+          "oklch(92% 0.166 22.4)"
+        ]
+      },
+      "red-fill": {
+        "role": "tertiary",
+        "displayName": "Relleno Fallo",
+        "canonical": "oklch(23.3% 0.033 356.3)"
+      },
+      "red-line": {
+        "role": "tertiary",
+        "displayName": "Borde Fallo",
+        "canonical": "oklch(40.2% 0.081 13.7)"
+      },
+      "red-ink": {
+        "role": "tertiary",
+        "displayName": "Tinta Fallo",
+        "canonical": "oklch(79.6% 0.119 14.9)"
+      },
+      "info-fill": {
+        "role": "tertiary",
+        "displayName": "Relleno Información",
+        "canonical": "oklch(23% 0.043 250.2)"
+      },
+      "info-line": {
+        "role": "tertiary",
+        "displayName": "Borde Información",
+        "canonical": "oklch(40.1% 0.073 247.1)"
+      },
+      "info-ink": {
+        "role": "tertiary",
+        "displayName": "Tinta Información",
+        "canonical": "oklch(81.9% 0.071 246.8)"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "La cifra de una tarjeta de métrica. Único tamaño grande del sistema; existe para leerse desde lejos con numérica tabular."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Exclusivamente el logotipo textual «AI Broker» en la barra lateral. No se reutiliza."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Encabezado de panel (h2). Un panel, un título."
+      },
+      "title-sm": {
+        "displayName": "Title Small",
+        "purpose": "Encabezado de subsección dentro de un panel (h3)."
+      },
+      "control": {
+        "displayName": "Control",
+        "purpose": "Texto de botón. Deliberadamente mayor que el cuerpo: un control es una diana y su etiqueta debe leerse sin buscarla. Los botones compactos bajan a Body, nunca a Label."
+      },
+      "read": {
+        "displayName": "Read",
+        "purpose": "Única superficie de lectura larga del panel: la respuesta del modelo y los prompts del detalle de tarea. Medida máxima 74ch. Es el único rol que rompe la densidad del sistema, y lo hace donde se leen párrafos en vez de escanear datos."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Texto general: celdas de tabla, campos, listas de detalle, párrafos de alerta. Cabeceras de tabla al mismo tamaño con peso 560."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Unidades, marcas de tiempo, contexto bajo una cifra, pistas de formulario. Suelo del sistema: nada baja de aquí."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "IDs de tarea, prompts, salidas del modelo, resultados de herramientas. Monoespaciado reservado a identificadores y a texto que viajó literalmente."
+      }
+    },
+    "shadows": [
+      {
+        "name": "reposo",
+        "value": "0 8px 24px rgba(0, 0, 0, 0.13)",
+        "purpose": "Toda tarjeta de métrica y todo panel. Despega la superficie del fondo. Constante: no reacciona al hover."
+      },
+      {
+        "name": "flotante",
+        "value": "0 12px 30px rgba(0, 0, 0, 0.3)",
+        "purpose": "Elementos superpuestos y efímeros: toast de acción y banner de conexión."
+      },
+      {
+        "name": "modal",
+        "value": "0 18px 44px rgba(0, 0, 0, 0.45)",
+        "purpose": "Diálogo de confirmación, con velo rgba(3, 9, 15, 0.62). Única sombra claramente perceptible; lo es porque interrumpe."
+      }
+    ],
+    "motion": [
+      {
+        "name": "acuse",
+        "value": "0.18s ease",
+        "purpose": "Aparición y retirada del toast (opacidad + translateY). Movimiento provocado por el usuario: puede ser inmediato y visible porque está mirando. Con movimiento reducido conserva la opacidad y pierde el desplazamiento."
+      },
+      {
+        "name": "progreso-indeterminado",
+        "value": "2.6s ease-in-out infinite alternate",
+        "purpose": "Banda del 34% recorriendo la pista de fase mediante transform. Único bucle infinito del panel. Va lenta a propósito: la salencia periférica crece con la velocidad. dashboard.js le aplica un animation-delay negativo para que no reinicie en cada swap de fragmento, y la pausa fuera del viewport. Con movimiento reducido desaparece: congelarla al 34% mentiría sobre un progreso no medido."
+      },
+      {
+        "name": "medidor",
+        "value": "0.24s ease (transform)",
+        "purpose": "Avance de la barra de sondeo de compatibilidad. El relleno ocupa el ancho completo y se escala con scaleX desde el borde izquierdo: animar width forzaria recalculo de layout en cada fotograma. Con movimiento reducido salta al valor sin recorrerlo."
+      },
+      {
+        "name": "refresco",
+        "value": "ninguno",
+        "purpose": "Los diez bloques que se auto-refrescan cada 3-30s cambian su contenido sin transición. Deliberado: animar la llegada de datos convertiría el panel en un parpadeo permanente."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stack",
+        "value": "1150px"
+      },
+      {
+        "name": "mobile",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "La acción principal de una región. Única superficie amplia que lleva el acento; como mucho una por región visible.",
+      "html": "<button class=\"ds-btn-primary\">Encolar prueba</button>",
+      "css": ".ds-btn-primary { min-height: 36px; padding: 0 13px; border-radius: 4px; border: 1px solid var(--teal); background: var(--teal); color: var(--on-teal); font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 1rem; font-weight: 650; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; } .ds-btn-primary:hover { filter: brightness(1.08); } .ds-btn-primary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "La opción por defecto para todo lo que no es la acción principal. Fondo Realce, sin acento.",
+      "html": "<button class=\"ds-btn-secondary\">Cancelar</button>",
+      "css": ".ds-btn-secondary { min-height: 36px; padding: 0 13px; border-radius: 4px; border: 1px solid var(--border); background: var(--raised); color: var(--text-3); font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 1rem; font-weight: 650; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; } .ds-btn-secondary:hover { filter: brightness(1.08); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Acción destructiva. Tríada de fallo completa, nunca rojo pleno: se lee como advertencia, no como alarma disparada.",
+      "html": "<button class=\"ds-btn-danger\">Eliminar proveedor</button>",
+      "css": ".ds-btn-danger { min-height: 36px; padding: 0 13px; border-radius: 4px; border: 1px solid var(--red-line); background: var(--red-fill); color: var(--red-ink); font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 1rem; font-weight: 650; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; } .ds-btn-danger:hover { filter: brightness(1.08); } .ds-btn-danger:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }"
+    },
+    {
+      "name": "Input Field",
+      "kind": "input",
+      "refersTo": "input-field",
+      "description": "Campo de entrada. Se hunde hacia el Pozo en vez de elevarse: la dirección de la profundidad tiene significado.",
+      "html": "<label class=\"ds-field\"><span>Prompt de la prueba</span><input type=\"text\" value=\"Resume el informe adjunto\"></label>",
+      "css": ".ds-field { display: grid; gap: 6px; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 0.8125rem; } .ds-field span { color: var(--muted); font-size: 0.75rem; } .ds-field input { width: 100%; border: 1px solid var(--border); border-radius: 4px; background: var(--well); color: var(--text); padding: 9px 10px; font: inherit; } .ds-field input:focus { outline: 2px solid var(--blue); outline-offset: 1px; }"
+    },
+    {
+      "name": "Status Badge",
+      "kind": "chip",
+      "refersTo": "badge-ok",
+      "description": "El componente más repetido del panel. Cada estado es una tríada relleno/borde/tinta, nunca solo un color de texto, y siempre acompañado de su palabra.",
+      "html": "<span class=\"ds-badge ds-badge-ok\">Completada</span> <span class=\"ds-badge ds-badge-warn\">En cola</span> <span class=\"ds-badge ds-badge-fail\">Fallida</span>",
+      "css": ".ds-badge { display: inline-flex; align-items: center; min-height: 23px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--raised); color: var(--text-4); font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 0.75rem; font-weight: 650; white-space: nowrap; } .ds-badge-ok { border-color: var(--green-line); background: var(--green-fill); color: var(--green-ink); } .ds-badge-warn { border-color: var(--amber-line); background: var(--amber-fill); color: var(--amber-ink); } .ds-badge-fail { border-color: var(--red-line); background: var(--red-fill); color: var(--red-ink); }"
+    },
+    {
+      "name": "Filter Chip",
+      "kind": "chip",
+      "refersTo": "filter-chip",
+      "description": "Único elemento plenamente redondeado del sistema. Su forma de píldora distingue el filtrado de cualquier botón de acción; en activo lleva acento porque cambia lo que se está mirando.",
+      "html": "<button class=\"ds-chip\">Visión</button> <button class=\"ds-chip ds-chip-active\">Tools</button>",
+      "css": ".ds-chip { border: 1px solid var(--border); background: var(--raised); color: var(--text-3); border-radius: 999px; padding: 5px 12px; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-size: 0.75rem; cursor: pointer; } .ds-chip:hover { border-color: var(--border-strong); } .ds-chip-active { border-color: var(--teal); background: var(--teal-fill); color: var(--teal-ink); } .ds-chip:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }"
+    },
+    {
+      "name": "Metric Card",
+      "kind": "card",
+      "refersTo": "metric-card",
+      "description": "Cifra con su procedencia. La línea inferior nunca es decorativa: lleva la ventana temporal, el denominador o la hora de comprobación.",
+      "html": "<article class=\"ds-metric\"><span class=\"ds-metric-label\">Latencia p95</span><strong>1.84 s</strong><small>p50 0.92 s · tareas terminadas</small></article>",
+      "css": ".ds-metric { min-height: 116px; padding: 17px 18px; border: 1px solid var(--border); background: var(--surface); border-radius: 5px; box-shadow: 0 8px 24px rgba(0,0,0,0.13); display: grid; align-content: center; gap: 7px; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; } .ds-metric-label { color: var(--text-4); font-size: 0.8125rem; } .ds-metric strong { color: var(--text); font-size: 1.5625rem; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; } .ds-metric small { color: var(--muted); font-size: 0.75rem; }"
+    },
+    {
+      "name": "Nav Item",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Navegación sin iconos: solo palabras. El borde izquierdo encendido en acento es el único uso del acento en la barra lateral, y su función es orientar.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item ds-nav-item-active\" href=\"#\">Resumen</a><a class=\"ds-nav-item\" href=\"#\">Tareas</a><a class=\"ds-nav-item\" href=\"#\">Probador</a></nav>",
+      "css": ".ds-nav { background: var(--sidebar); display: grid; gap: 4px; padding: 18px 0; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; } .ds-nav-item { min-height: 48px; display: flex; align-items: center; padding: 0 22px 0 26px; color: var(--text-4); text-decoration: none; border-left: 3px solid transparent; font-size: 0.8125rem; } .ds-nav-item:hover { color: var(--text); background: var(--elevated); } .ds-nav-item-active { color: var(--text); background: var(--raised); border-left-color: var(--teal); } .ds-nav-item:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }"
+    },
+    {
+      "name": "Timeline Lane",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Componente de firma. Desplazamiento y anchura son tiempo real medido, no proporción decorativa. Acento para proponentes, traza para el árbitro. El carril gris a lo ancho declara la ausencia de medida en vez de dibujar una duración plausible.",
+      "html": "<div class=\"ds-lane\"><div class=\"ds-lane-label\"><strong>Proponente 1</strong><small>qwen3-30b</small></div><div class=\"ds-lane-track\"><span class=\"ds-lane-bar\" style=\"left:4%;width:38%\"></span></div></div><div class=\"ds-lane\"><div class=\"ds-lane-label\"><strong>Árbitro</strong><small>deepseek-chat</small></div><div class=\"ds-lane-track\"><span class=\"ds-lane-bar ds-lane-bar-arbiter\" style=\"left:52%;width:31%\"></span></div></div><div class=\"ds-lane\"><div class=\"ds-lane-label\"><strong>Proponente 2</strong><small>sin marcas de tiempo</small></div><div class=\"ds-lane-track\"><span class=\"ds-lane-bar ds-lane-bar-untimed\"></span></div></div>",
+      "css": ".ds-lane { display: grid; grid-template-columns: minmax(170px, 0.28fr) minmax(260px, 1fr); gap: 12px; align-items: center; min-height: 54px; border-top: 1px solid var(--border-soft); font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; } .ds-lane:first-of-type { border-top: 0; } .ds-lane-label { display: grid; gap: 3px; } .ds-lane-label strong { color: var(--text-2); font-size: 0.8125rem; } .ds-lane-label small { color: var(--muted); font-size: 0.75rem; } .ds-lane-track { position: relative; height: 12px; border-radius: 8px; background: var(--track); overflow: hidden; } .ds-lane-bar { position: absolute; top: 0; bottom: 0; border-radius: 8px; background: var(--teal); } .ds-lane-bar-arbiter { background: var(--blue); } .ds-lane-bar-untimed { left: 0; width: 100%; background: var(--muted-line); }"
+    },
+    {
+      "name": "Indeterminate Progress",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Componente de firma. Único bucle infinito del panel. Los proveedores usan stream=false y no emiten porcentaje real, así que la barra no afirma cuánto queda: solo que se está trabajando. Va lenta a propósito porque vive en visión periférica, y con movimiento reducido desaparece en vez de congelarse.",
+      "html": "<div class=\"ds-phase\"><span></span></div>",
+      "css": ".ds-phase { height: 5px; margin: 16px 0; border-radius: 4px; overflow: hidden; background: var(--track); } .ds-phase span { display: block; height: 100%; width: 34%; background: var(--teal); animation: ds-phase-run 2.6s ease-in-out infinite alternate; } @keyframes ds-phase-run { from { transform: translateX(-70%); } to { transform: translateX(270%); } } @media (prefers-reduced-motion: reduce) { .ds-phase { display: none; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "La sala de control",
+    "overview": "Un panel de instrumentos en penumbra, vigilado de reojo desde un segundo monitor. El chasis desaparece; las señales mandan. Todo lo que no es dato — el fondo, los bordes, los contenedores — se retira a la penumbra hasta volverse invisible, y lo poco que se ilumina se ilumina porque algo está ocurriendo. Un operador que levanta la vista durante dos segundos debe saber si hay algo que atender antes de haber leído una sola palabra.\n\nDe ahí viene la economía cromática del sistema. Sobre un azul marino casi negro se escalonan tres superficies apenas distinguibles, y sobre ellas vive un único acento: el Verde Osciloscopio. No es un color de marca, es una lectura de instrumento — marca lo activo, lo que avanza, lo que está en curso. A su lado, tres colores de estado (verde, ámbar, rojo) y un azul de traza para lo navegable. Nada más. Un sistema con un solo acento no necesita jerarquía de acentos: necesita disciplina para no gastarlo.\n\nLa segunda ley del sistema es que toda cifra llega con su procedencia. No hay métricas simuladas, no hay barras de progreso estimadas, no hay porcentajes decorativos. Cuando un dato falta se escribe N/D con su motivo, y cuando existe llega con su ventana temporal, su denominador y su hora de comprobación. Esta no es una decisión estética, pero gobierna la estética: es la razón de que la numérica sea tabular, de que las tarjetas de métrica reserven una línea entera para el contexto bajo la cifra, y de que el sistema no tenga un solo gráfico decorativo.\n\nSe rechazan explícitamente tres vecindarios visuales: los dashboards de cripto/trading (neón saturado, cifras gritando, verde y rojo permanentes), la estética SaaS genérica (degradados violeta-azul, tarjetas flotantes, esquinas muy redondeadas, ilustraciones isométricas) y el terminal retro/hacker (todo monoespaciado, fósforo sobre negro puro, scanlines). El tercero es el más peligroso porque roza la metáfora: aquí el instrumental es función, nunca disfraz.",
+    "keyCharacteristics": [
+      "Fondo azul marino profundo, nunca negro puro; texto casi blanco, nunca blanco puro.",
+      "Un solo acento en todo el sistema, más tres colores de estado y un azul de traza.",
+      "Profundidad por escalonado tonal; la sombra solo susurra.",
+      "Sin degradados, sin brillos, sin iconografía decorativa, sin imágenes.",
+      "Numérica tabular en toda cifra comparable.",
+      "Tipografía del sistema operativo: cero recursos externos, cero CDN.",
+      "Densidad alta pero subordinada: cuando legibilidad y densidad compiten, gana la legibilidad."
+    ],
+    "rules": [
+      {
+        "name": "La Regla de la Voz Única",
+        "body": "El Verde Osciloscopio es el único acento del sistema y no admite compañía. Antes de introducir un color nuevo, la pregunta correcta no es «¿cuál pega?» sino «¿por qué esto no es estado, no es traza y no es acento?». Si no hay respuesta, no hay color nuevo.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla de Ningún Extremo",
+        "body": "Ni #000 ni #fff aparecen jamás en este sistema. El fondo más oscuro es el Abismo y el texto más claro es el Blanco de Instrumento. El contraste extremo sostenido fatiga en sesiones largas, y este panel está abierto todo el día.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla del Estado Ganado",
+        "body": "Verde, ámbar y rojo son vocabulario de estado, no paleta decorativa. Un elemento se pinta de rojo porque el sistema ha observado un fallo, nunca porque la acción «suene peligrosa». El color se gana con un hecho.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla de la Doble Señal",
+        "body": "Ningún estado se comunica solo por color. Todo punto de estado va acompañado de su etiqueta textual, y toda insignia lleva la palabra además del tono. Una captura en escala de grises dentro de una memoria impresa debe seguir siendo legible.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla del Suelo de 12px",
+        "body": "Ningún texto del sistema baja de 12px, en ninguna pantalla, en ningún tamaño de ventana. Test: si un valor de font-size es menor que 12px, es un error, no una decisión de densidad.",
+        "section": "typography"
+      },
+      {
+        "name": "La Regla de la Cifra Tabular",
+        "body": "Toda cifra que un ojo pueda querer comparar con otra — latencias, costes, contadores, posiciones de cola, porcentajes — se escribe con font-variant-numeric: tabular-nums. Las columnas de números deben alinearse por dígito o no son columnas.",
+        "section": "typography"
+      },
+      {
+        "name": "La Regla del Peso Fino",
+        "body": "La jerarquía se construye con incrementos de peso de la fuente variable (560 → 650 → 680 → 720), no con mayúsculas, no con letra espaciada y no con color. Si dos elementos necesitan distinguirse, la primera herramienta es el peso.",
+        "section": "typography"
+      },
+      {
+        "name": "La Regla del Texto Escalable",
+        "body": "Todo tamaño de texto se declara en rem, nunca en px. Un font-size en píxeles ignora el ajuste de tamaño de fuente del navegador, y ese ajuste es la única herramienta de accesibilidad que un usuario puede aplicar sin tocar el código. Los px siguen siendo correctos para el armazón, los bordes, los radios y las alturas de control: solo el texto necesita escalar. Test: si un valor de font-size está en px, es un error.",
+        "section": "typography"
+      },
+      {
+        "name": "La Regla de la Densidad Subordinada",
+        "body": "El cuerpo del panel es denso (13px) porque es un instrumento de datos, pero la densidad no gobierna donde se lee de verdad. La superficie de lectura larga sube a Read y se limita a 74 caracteres de medida. Cuando densidad y legibilidad compiten, gana la legibilidad.",
+        "section": "typography"
+      },
+      {
+        "name": "La Regla del Panel Sangrado",
+        "body": "Un panel es un contenedor sin relleno. Las tablas y las listas llegan hasta su borde y se separan entre sí con Filo Suave; el aire lo ponen las regiones internas. Un panel con padding en la raíz rompe la continuidad de la tabla que contiene.",
+        "section": "layout"
+      },
+      {
+        "name": "La Regla de las Dos Barras",
+        "body": "Barra lateral y barra superior miden 62px y no cambian de altura. Son el marco del instrumento: si el marco se mueve al navegar, el ojo periférico interpreta movimiento donde no hay noticia.",
+        "section": "layout"
+      },
+      {
+        "name": "La Regla de la Sombra Quieta",
+        "body": "Las sombras no responden al hover. Ninguna superficie se eleva al pasar el cursor: la respuesta al hover es tonal (fondo un escalón más claro), nunca de altura. Un panel que sube al pasar por encima es movimiento sin noticia, y este panel se vigila de reojo.",
+        "section": "elevation"
+      },
+      {
+        "name": "La Regla de los Cinco Radios",
+        "body": "El sistema tiene exactamente cinco radios y ninguna pantalla nueva introduce un sexto. Test: si un valor de border-radius no es 4px, 5px, 6px, 8px o 999px, está mal. Nota honesta: la convivencia de 4px, 5px y 6px es herencia de la implementación, no una decisión deliberada. Está congelada aquí para que la deriva pare, no porque tres escalones vecinos sean lo ideal.",
+        "section": "shapes"
+      },
+      {
+        "name": "La Regla del Cero Literal",
+        "body": "Fuera de :root no existe ni un valor de color escrito a mano. Ni un hex, ni un rgba. Test mecánico: grep de hex o rgba sobre dashboard.css no debe devolver nada por debajo del bloque de tokens. Un literal suelto no es un atajo, es el primer paso de una familia de seis rojos casi iguales.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla de la Tríada Completa",
+        "body": "Un estado se viste con sus tres piezas o con ninguna: -fill para el fondo, -line para el borde, -ink para el texto. Media tríada — un texto rojo sin su relleno y su borde — produce un elemento que grita sin decir qué es.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla del Suelo Cromático",
+        "body": "--muted es el texto más tenue que el sistema admite. Si un elemento parece necesitar algo más apagado, el problema es que sobra en la pantalla, no que le falte gris.",
+        "section": "colors"
+      },
+      {
+        "name": "La Regla del Movimiento Provocado",
+        "body": "El movimiento que provoca el usuario (acuse de una acción, foco, hover) puede ser inmediato y visible: está mirando. El movimiento que provoca el sistema por su cuenta (progreso, auto-refresco, llegada de datos) se mantiene al mínimo que declare el estado: no está mirando. Test: si un elemento se mueve sin que el operador haya hecho nada, pregunta qué información se perdería si estuviera quieto. Si la respuesta es «ninguna», que esté quieto.",
+        "section": "components"
+      },
+      {
+        "name": "La Regla del Refresco Invisible",
+        "body": "Los diez bloques que se auto-refrescan cada 3-30s cambian su contenido sin transición. Es deliberado: animar la llegada de datos convertiría el panel en un parpadeo permanente. Un dato nuevo aparece; no entra.",
+        "section": "components"
+      },
+      {
+        "name": "La Regla del Sustituto, no del Interruptor",
+        "body": "Con prefers-reduced-motion: reduce no se anula el movimiento con un animation: 0.01ms global — eso destruye señales útiles. Cada movimiento se sustituye por su equivalente inmediato: el toast conserva la opacidad y pierde el desplazamiento, el medidor salta al valor en vez de recorrerlo, y el desplazamiento suave pasa a instantáneo. La barra indeterminada es la única que desaparece del todo, y solo porque congelarla al 34% mentiría sobre un progreso que nadie ha medido.",
+        "section": "components"
+      },
+      {
+        "name": "La Regla del Anuncio por Cambio",
+        "body": "Los paneles que se auto-refrescan se reemplazan enteros, asi que un aria-live puesto sobre ellos se destruye en cada swap y no llega a anunciar nada. La region viva es unica, estable y visualmente oculta (#live-region en base.html), y dashboard.js escribe en ella solo cuando el resumen de un panel cambia — nunca en el primer render, nunca en un refresco que no trajo noticias. Un panel que se refresca cada 3s con un aria-live encima no es accesible: es un metronomo. Los paneles declaran su resumen en data-announce.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "Do acompañar toda cifra de su procedencia: ventana temporal, denominador y hora de comprobación. `Latencia p95` sin periodo declarado es un dato inválido en este sistema.",
+      "Do escribir `N/D` con su motivo cuando falte un dato, y dejar el hueco visible.",
+      "Do usar `font-variant-numeric: tabular-nums` en toda cifra comparable.",
+      "Do dar a cada estado su tríada completa (relleno, borde, tinta) y su etiqueta textual. El color nunca viaja solo.",
+      "Do mantener el acento por debajo del umbral de ruido: como mucho una superficie con Verde Osciloscopio por región visible.",
+      "Do hundir los campos de entrada hacia el Pozo y elevar las superficies de datos al Panel. La dirección de la profundidad tiene significado.",
+      "Do dejar que tablas y listas lleguen a sangre hasta el borde del panel.",
+      "Do responder al hover con tono, y al foco con el anillo de 2px en Azul de Traza.",
+      "Do declarar todo tamaño de texto con los tokens `--text-*` en `rem`, para que el ajuste de fuente del navegador surta efecto.",
+      "Do limitar a 74ch cualquier superficie donde se lean párrafos enteros, y darle el rol Read.",
+      "Do dar a `prefers-reduced-motion: reduce` un sustituto inmediato para cada movimiento, no un interruptor global que apague el feedback.",
+      "Do pausar cualquier bucle infinito cuando sale del viewport."
+    ],
+    "donts": [
+      "Don't usar `#000` ni `#fff` en ningún lugar del sistema.",
+      "Don't introducir un segundo acento. El sistema tiene uno y su escasez es el mecanismo.",
+      "Don't mostrar tokens, tokens/s ni porcentaje de generación en directo: los proveedores no los emiten hasta terminar. Durante una llamada individual la barra es indeterminada y así debe seguir.",
+      "Don't dibujar un valor plausible donde falta una medida. Si no hay marcas de tiempo, el carril va gris y a lo ancho.",
+      "Don't elevar superficies con la sombra al pasar el cursor. Las sombras de este sistema no reaccionan.",
+      "Don't bajar de 12px (`0.75rem`) ningún texto, ni siquiera en una nota al pie o en una vista estrecha.",
+      "Don't declarar un `font-size` en px. El armazón va en px; el texto, en `rem`.",
+      "Don't introducir un sexto radio ni un tercer grosor de línea.",
+      "Don't cargar una sola fuente, icono, hoja de estilos o script desde una red externa. La restricción la aplica la CSP, y es de privacidad: por este panel pasan prompts y documentos confidenciales.",
+      "Don't usar degradados, brillos, ilustraciones isométricas, tarjetas flotantes de esquina blanda ni iconografía decorativa — el vecindario SaaS genérico está expresamente rechazado.",
+      "Don't convertir el panel en un terminal: el monoespaciado se reserva a identificadores y a texto que viajó literalmente. El instrumental aquí es función, no disfraz.",
+      "Don't animar `width`, `height`, `padding` ni `margin`. Para movimiento continuo, `transform`; para revelar, `grid-template-rows`.",
+      "Don't animar la llegada de datos de un bloque que se auto-refresca. El contenido nuevo aparece; no entra.",
+      "Don't añadir un segundo bucle infinito. El panel tiene uno y ya es el elemento más caro de su presupuesto de atención."
+    ]
+  }
+}
