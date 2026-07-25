@@ -166,6 +166,40 @@
   <div class="config-subsection">
     <div class="subsection-heading">
       <div>
+        <h3>Idoneidad por tipo de tarea</h3>
+        <p>Los filtros de arriba responden a «¿puede este modelo atender la petición?»; estos, a «¿debería?». Un patrón por línea, estilo <code>*-coder*</code> (comodines, sin distinguir mayúsculas), contra el nombre del modelo y su identificador en models.dev. Es una preferencia, no un veto: si dejara la selección sin candidatos se ignora. Efecto sobre el catálogo actual en <a href="/dashboard/routing">Enrutamiento</a>.</p>
+      </div>
+      <span class="badge badge-neutral">task_affinity</span>
+    </div>
+    <div class="form-body config-grid">
+      {% set affinity = config.task_affinity %}
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="task_affinity_enabled" {% if affinity.enabled %}checked{% endif %}>
+          Aplicar el filtro de idoneidad
+        </label>
+      </div>
+      <label class="field config-field-wide">
+        <span>Apartar siempre (propósito único: guardarraíles, OCR, traducción, detectores)</span>
+        <textarea name="task_affinity_exclude_always" rows="5">{{ affinity.exclude_always|join('\n') }}</textarea>
+      </label>
+      <label class="field">
+        <span>Apartar en prosa</span>
+        <textarea name="task_affinity_exclude_prose" rows="4">{{ affinity.exclude_by_task_type.get('prose', [])|join('\n') }}</textarea>
+      </label>
+      <label class="field">
+        <span>Apartar en contexto largo</span>
+        <textarea name="task_affinity_exclude_long_context" rows="4">{{ affinity.exclude_by_task_type.get('long_context', [])|join('\n') }}</textarea>
+      </label>
+      <label class="field">
+        <span>Apartar en código</span>
+        <textarea name="task_affinity_exclude_code" rows="4">{{ affinity.exclude_by_task_type.get('code', [])|join('\n') }}</textarea>
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
         <h3>Compresión de prompts</h3>
         <p>Reduce tokens del prompt (cortesías, muletillas, relleno) antes de enviarlo a los LLMs. El código y las URLs se preservan intactos y el prompt original se conserva en la tarea.</p>
       </div>

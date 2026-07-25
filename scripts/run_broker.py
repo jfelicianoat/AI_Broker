@@ -33,7 +33,7 @@ def main() -> int:
     env_name = config.server.admin_token_env
     if env_name:
         token = os.environ.get(env_name)
-        origen = "definido externamente via %s" % env_name
+        origen = f"definido externamente via {env_name}"
         if not token:
             token = secrets.token_urlsafe(24)
             os.environ[env_name] = token
@@ -41,11 +41,11 @@ def main() -> int:
         print("=" * 58)
         print("  Panel:")
         print()
-        print("    http://%s:%s/dashboard" % (host, port))
+        print(f"    http://{host}:{port}/dashboard")
         print()
-        print("  Token de administracion (%s):" % origen)
+        print(f"  Token de administracion ({origen}):")
         print()
-        print("    %s" % token)
+        print(f"    {token}")
         print()
         print("  Usalo en el login del panel o en la cabecera")
         print("  X-Admin-Token de la API. Cambia en cada arranque.")

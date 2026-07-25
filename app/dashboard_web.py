@@ -24,8 +24,10 @@ from app.admin_auth import (
     verify_admin_access,
 )
 from app.config import (
+    TASK_AFFINITY_TYPES,
     BrokerConfig,
     OpenAICompatibleProviderConfig,
+    TaskAffinityConfig,
     save_config,
 )
 from app.coordinator import ConsensusCoordinator
@@ -50,6 +52,7 @@ from app.ingestion.service import AttachmentError, stream_upload_to_temp
 from app.model_stats import load_model_stats
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
+from app.providers.routing import task_affinity_excluded, task_affinity_patterns
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
@@ -271,6 +274,7 @@ def create_dashboard_router(
 
     @protected.get("/dashboard/routing", response_class=HTMLResponse)
     async def routing_dashboard(request: Request):
+        catalog, catalog_error = await models()
         return _template_response(
             request,
             "routing.html",
@@ -278,6 +282,8 @@ def create_dashboard_router(
                 "router": config.strategy_router,
                 "buckets": _routing_insights(repository, config),
                 "model_routing": _model_routing_insights(repository, config),
+                "affinity": _task_affinity_insights(catalog, config),
+                "catalog_error": catalog_error,
                 "nav_active": "enrutamiento",
             },
         )
@@ -1052,6 +1058,59 @@ def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) ->
         "stats_window_days": routing.stats_window_days,
         "groups": task_groups,
     }
+
+
+def _task_affinity_insights(
+    catalog: list[dict[str, Any]], config: BrokerConfig,
+) -> dict[str, Any]:
+    """Efecto real del filtro de idoneidad sobre el catálogo de hoy: qué
+    modelos aparta en cada tipo de tarea y cuántos quedan.
+
+    Los patrones sin efecto son la señal útil (un patrón mal escrito no falla,
+    simplemente no casa con nada), así que se listan aparte. Y como el filtro
+    es best-effort — si dejara la selección vacía se ignora — se marca ese caso
+    en vez de prometer una exclusión que no ocurriría."""
+    settings = config.task_affinity
+    groups = []
+    for task_type in TASK_AFFINITY_TYPES:
+        excluded = task_affinity_excluded(catalog, settings, task_type)
+        names = sorted(str(entry.get("name") or "") for entry in excluded)
+        groups.append({
+            "task_type": task_type,
+            "label": _TASK_TYPE_LABELS.get(task_type, task_type),
+            "excluded": len(excluded),
+            "remaining": len(catalog) - len(excluded),
+            "models": names,
+            # El filtro se ignora si no dejaría ningún candidato: mostrarlo
+            # como exclusión efectiva sería mentir sobre lo que hace.
+            "ignored": bool(catalog) and len(excluded) == len(catalog),
+        })
+    all_patterns = sorted({
+        pattern
+        for task_type in TASK_AFFINITY_TYPES
+        for pattern in task_affinity_patterns(settings, task_type)
+    })
+    unused = [
+        pattern for pattern in all_patterns
+        if not task_affinity_excluded(catalog, _one_pattern(pattern), "code")
+    ]
+    return {
+        "enabled": settings.enabled,
+        "groups": groups,
+        "catalog_size": len(catalog),
+        "unused_patterns": unused,
+    }
+
+
+def _one_pattern(pattern: str) -> TaskAffinityConfig:
+    """Config de idoneidad con un solo patrón, en `exclude_always` para que el
+    tipo de tarea no influya: sirve para saber si ese patrón casa con algo del
+    catálogo actual."""
+    return TaskAffinityConfig(
+        enabled=True,
+        exclude_always=[pattern],
+        exclude_by_task_type={key: [] for key in TASK_AFFINITY_TYPES},
+    )
 
 
 def _model_dashboard_stats(

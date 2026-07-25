@@ -8,7 +8,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from app.config import BrokerConfig, effective_max_parallel_invocations
+from app.config import BrokerConfig, TaskAffinityConfig, effective_max_parallel_invocations
 from app.model_enrichment import ModelEnrichment
 from app.model_stats import ModelKey, ModelStats
 from app.prompt_compressor import PromptCompressor
@@ -47,6 +47,27 @@ def _entry_key(entry: dict[str, Any], task_type: str) -> ModelKey:
         str(entry.get("name") or "").lower(),
         task_type,
     )
+
+
+def task_affinity_patterns(settings: TaskAffinityConfig, task_type: str) -> list[str]:
+    """Patrones que apartan modelos en ese tipo de tarea: los de propósito
+    único (siempre) más los vetados para ese tipo concreto."""
+    return [*settings.exclude_always, *settings.exclude_by_task_type.get(task_type, [])]
+
+
+def task_affinity_excluded(
+    catalog: list[dict[str, Any]], settings: TaskAffinityConfig, task_type: str,
+) -> list[dict[str, Any]]:
+    """Modelos del catálogo que el filtro de idoneidad apartaría en ese tipo de
+    tarea. Fuente única: la usan la selección (`_filter_by_task_affinity`) y el
+    panel de Enrutamiento, para que lo que se muestra no pueda divergir de lo
+    que se aplica."""
+    if not settings.enabled:
+        return []
+    patterns = task_affinity_patterns(settings, task_type)
+    if not patterns:
+        return []
+    return [entry for entry in catalog if _matches_any(entry, patterns)]
 
 
 def _matches_any(entry: dict[str, Any], patterns: list[str]) -> bool:
@@ -465,13 +486,11 @@ class RoutedModelProvider:
         if not settings.enabled or not catalog:
             return catalog
         task_type = classify_task_type(request)
-        patterns = [
-            *settings.exclude_always,
-            *settings.exclude_by_task_type.get(task_type, []),
-        ]
-        if not patterns:
+        excluded = task_affinity_excluded(catalog, settings, task_type)
+        if not excluded:
             return catalog
-        kept = [entry for entry in catalog if not _matches_any(entry, patterns)]
+        discarded = {id(entry) for entry in excluded}
+        kept = [entry for entry in catalog if id(entry) not in discarded]
         if not kept:
             logger.info(
                 "routing.affinity_ignored",

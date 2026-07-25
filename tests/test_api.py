@@ -607,6 +607,61 @@ def test_dashboard_configuration_updates_routing_live(tmp_path: Path) -> None:
     assert saved.routing.exploration_rate == 0.2
 
 
+def test_dashboard_configuration_updates_task_affinity(tmp_path: Path) -> None:
+    """Los patrones de idoneidad se consultan en vivo contra el BrokerConfig
+    compartido en cada selección: guardarlos debe cambiar memoria y disco.
+    Y un textarea vacío significa 'sin patrones', no 'deja los de antes'."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-config-affinity.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard/config")
+        assert "task_affinity_exclude_always" in page.text
+        response = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "3",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "task_affinity_enabled": "on",
+                "task_affinity_exclude_always": "*guard*\n  *-ocr*  \n\n",
+                "task_affinity_exclude_prose": "*-coder*",
+                "task_affinity_exclude_long_context": "",
+                "task_affinity_exclude_code": "",
+            },
+        )
+
+    saved = load_config(config_path)
+    assert response.status_code == 200
+    assert config.task_affinity.enabled is True
+    assert config.task_affinity.exclude_always == ["*guard*", "*-ocr*"]
+    assert config.task_affinity.exclude_by_task_type["prose"] == ["*-coder*"]
+    assert config.task_affinity.exclude_by_task_type["long_context"] == []
+    assert saved.task_affinity.exclude_always == ["*guard*", "*-ocr*"]
+
+
+def test_dashboard_routing_shows_task_affinity_effect(tmp_path: Path) -> None:
+    """El panel muestra a quién aparta el filtro en el catálogo de hoy: sin
+    esa vista, los patrones son una lista de texto sin efecto observable."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-routing-affinity.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        page = client.get("/dashboard/routing")
+
+    assert page.status_code == 200
+    assert "Idoneidad por tipo de tarea" in page.text
+
+
 def test_dashboard_configuration_rejects_concurrent_edit(tmp_path: Path) -> None:
     import re
 
