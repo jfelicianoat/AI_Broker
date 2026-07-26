@@ -15,9 +15,27 @@ from app.schemas import (
     QueueItem,
     QueueResponse,
     TaskCreateRequest,
+    TaskKind,
     TaskStateResponse,
     TaskStatus,
     is_local_deployment,
+)
+
+# Estados en los que una tarea ocupa el workflow activo. Fuente única: la usan
+# el reclamo del despachador (invariante de un solo workflow) y la
+# comprobación de máquina ociosa del sondeo en sombra.
+ACTIVE_TASK_STATUSES = (
+    "routing", "planning", "resource_planning", "chunking", "generating",
+    "proposing", "evaluating", "debating", "synthesizing", "verifying",
+    # Carril de ingesta: ocupa la máquina, pero no el workflow de inferencia.
+    "converting",
+)
+
+# Estados activos que consumen el workflow ÚNICO de inferencia. Deliberadamente
+# sin "converting": si una conversión bloqueara este invariante, subir un PDF
+# congelaría la cola de respuestas, que es justo lo que los carriles evitan.
+ACTIVE_INFERENCE_STATUSES = tuple(
+    status for status in ACTIVE_TASK_STATUSES if status != "converting"
 )
 
 
@@ -91,26 +109,45 @@ class TaskRepository:
         return self._row_to_task_state(row)
 
     def get_task_request(self, task_id: str) -> TaskCreateRequest:
-        row = self.db.query_one("SELECT request_json FROM tasks WHERE id = ?", (task_id,))
+        row = self.db.query_one("SELECT request_json, kind FROM tasks WHERE id = ?", (task_id,))
         if row is None:
             raise KeyError(task_id)
+        kind = TaskKind(row["kind"])
+        if kind != TaskKind.inference:
+            raise ValueError(
+                f"la tarea {task_id} es del carril {kind.value} y no lleva una petición de inferencia"
+            )
         return TaskCreateRequest.model_validate(loads_json(row["request_json"]))
 
-    def claim_next_queued_task_id(self) -> str | None:
-        """Reclama como máximo un workflow dentro de una transacción inmediata."""
-        active = (
-            "routing", "planning", "resource_planning", "chunking", "generating",
-            "proposing", "evaluating", "debating", "synthesizing", "verifying",
+    def has_active_task(self) -> bool:
+        """¿Está la máquina ocupada ahora mismo, en cualquiera de los carriles?
+
+        La consulta el sondeo en sombra para no meter trabajo local en una
+        máquina que ya trabaja. Cuenta las conversiones a propósito: son las
+        que más recursos consumen y, antes de los carriles, eran invisibles —
+        el broker creía la máquina libre con dos Doclings dentro. Es una foto
+        del instante: el despachador puede reclamar la siguiente justo después.
+        """
+        marks = ",".join("?" for _ in ACTIVE_TASK_STATUSES)
+        row = self.db.query_one(
+            f"SELECT 1 FROM tasks WHERE status IN ({marks}) LIMIT 1", ACTIVE_TASK_STATUSES,
         )
+        return row is not None
+
+    def claim_next_queued_task_id(self) -> str | None:
+        """Reclama como máximo un workflow de INFERENCIA en una transacción
+        inmediata. El carril de ingesta va por `claim_next_ingestion_task`."""
+        active = ACTIVE_INFERENCE_STATUSES
         marks = ",".join("?" for _ in active)
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             if connection.execute(
-                f"SELECT 1 FROM tasks WHERE status IN ({marks}) LIMIT 1", active
+                f"SELECT 1 FROM tasks WHERE kind = 'inference' AND status IN ({marks}) LIMIT 1",
+                active,
             ).fetchone():
                 return None
             row = connection.execute(
-                "SELECT id, progress_json FROM tasks WHERE status = 'queued' "
+                "SELECT id, progress_json FROM tasks WHERE status = 'queued' AND kind = 'inference' "
                 "ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1"
             ).fetchone()
             if row is None:
@@ -129,6 +166,118 @@ class TaskRepository:
                 (row["id"], "task.claimed", dumps_json({"status": "routing"}), now),
             )
             return str(row["id"])
+
+    def create_ingestion_task(self, file_id: str, filename: str, size_bytes: int) -> str:
+        """Fila de tarea para una conversión de fichero.
+
+        `request_json` no es un TaskCreateRequest: es un descriptor del trabajo.
+        Una conversión no tiene prompt, ni modelo, ni estrategia, y fabricarle
+        un contrato de inferencia sintético solo para que valide contaminaría
+        el contrato con un caso que no es una inferencia. Quien lea la petición
+        debe mirar antes el `kind` (ver `get_task_kind`).
+        """
+        task_id = f"task_{uuid4().hex}"
+        now = _utc_now_iso()
+        descriptor = {"file_id": file_id, "filename": filename, "size_bytes": size_bytes}
+        progress = {"phase": TaskStatus.queued.value, "filename": filename}
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(queue_position), 0) AS pos FROM tasks"
+            ).fetchone()
+            queue_position = int(row["pos"]) + 1 if row else 1
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    id, request_id, request_json, kind, status, priority, queue_position,
+                    progress_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id, f"ingestion-{file_id}", dumps_json(descriptor),
+                    TaskKind.ingestion.value, TaskStatus.queued.value, 100, queue_position,
+                    dumps_json(progress), now, now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.created", dumps_json({"kind": TaskKind.ingestion.value}), now),
+            )
+        return task_id
+
+    def get_task_kind(self, task_id: str) -> TaskKind:
+        row = self.db.query_one("SELECT kind FROM tasks WHERE id = ?", (task_id,))
+        if row is None:
+            raise KeyError(task_id)
+        return TaskKind(row["kind"])
+
+    def claim_next_ingestion_task(self, max_concurrent: int) -> tuple[str, str] | None:
+        """Reclama una conversión si el carril tiene sitio: (task_id, file_id).
+
+        A diferencia de la inferencia, aquí no hay invariante de uno: el límite
+        es configurable porque convertir dos ficheros a la vez es razonable y
+        convertir diez es asfixiar la máquina. Antes de los carriles no había
+        límite ninguno: cada subida arrancaba su propio hilo."""
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            active = connection.execute(
+                "SELECT COUNT(*) AS total FROM tasks WHERE kind = 'ingestion' AND status = ?",
+                (TaskStatus.converting.value,),
+            ).fetchone()
+            if int(active["total"]) >= max_concurrent:
+                return None
+            row = connection.execute(
+                "SELECT id, request_json, progress_json FROM tasks "
+                "WHERE kind = 'ingestion' AND status = 'queued' "
+                "ORDER BY queue_position ASC, created_at ASC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            progress = loads_json(row["progress_json"], {})
+            progress["phase"] = TaskStatus.converting.value
+            cursor = connection.execute(
+                "UPDATE tasks SET status = ?, queue_position = NULL, progress_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'queued'",
+                (TaskStatus.converting.value, dumps_json(progress), now, row["id"]),
+            )
+            if cursor.rowcount != 1:
+                return None
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (row["id"], "task.claimed", dumps_json({"status": TaskStatus.converting.value}), now),
+            )
+            descriptor = loads_json(row["request_json"], {}) or {}
+            return str(row["id"]), str(descriptor.get("file_id") or "")
+
+    def requeue_interrupted_ingestion_tasks(self) -> int:
+        """Devuelve a la cola las conversiones que quedaron a medias.
+
+        Su recuperación es más simple que la de inferencia: no hay invocaciones
+        ambiguas que resolver ni coste que se haya podido facturar. Convertir
+        otra vez es idempotente."""
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            rows = connection.execute(
+                "SELECT id FROM tasks WHERE kind = 'ingestion' AND status = ?",
+                (TaskStatus.converting.value,),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    "UPDATE tasks SET status = 'queued', updated_at = ? WHERE id = ?",
+                    (now, row["id"]),
+                )
+                connection.execute(
+                    "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                    (row["id"], "task.requeued", dumps_json({"reason": "interrupted"}), now),
+                )
+            return len(rows)
+
+    def ingestion_task_for_file(self, file_id: str) -> str | None:
+        row = self.db.query_one(
+            "SELECT id FROM tasks WHERE kind = 'ingestion' AND request_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (f"ingestion-{file_id}",),
+        )
+        return str(row["id"]) if row else None
 
     def update_task(
         self,
@@ -176,7 +325,13 @@ class TaskRepository:
         return str(row["id"]) if row else None
 
     def start_invocation(
-        self, task_id: str, run_id: str | None, role: str, model: ModelReference, task_type: str,
+        self,
+        task_id: str,
+        run_id: str | None,
+        role: str,
+        model: ModelReference,
+        task_type: str,
+        was_loaded: bool | None = None,
     ) -> str:
         """Checkpoint pre-vuelo: la fila existe ANTES de llamar al proveedor.
 
@@ -186,17 +341,24 @@ class TaskRepository:
         task_type (app.task_classifier) permite luego segmentar las métricas
         de enrutamiento por naturaleza de la tarea (código/prosa/contexto
         largo) en vez de agregarlas todas en un único score.
+
+        was_loaded registra si el modelo ya estaba en VRAM al arrancar: la
+        latencia de un modelo local en frío incluye la carga desde disco, y
+        mezclar ambas poblaciones en una media hace inservible la estimación
+        de tiempo. None = no se sabe (o no aplica, como en cloud).
         """
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             connection.execute(
                 "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
-                "task_type, tokens_input, tokens_output, cost_usd, started_at, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
+                "task_type, was_loaded, tokens_input, tokens_output, cost_usd, started_at, status, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
                 (
                     invocation_id, task_id, run_id, role,
                     model.provider, model.deployment, model.model, task_type,
+                    None if was_loaded is None else int(was_loaded),
                     now, now, now,
                 ),
             )
@@ -388,6 +550,7 @@ class TaskRepository:
             TaskStatus.debating,
             TaskStatus.synthesizing,
             TaskStatus.verifying,
+            TaskStatus.converting,
         }
         terminal_statuses = {TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled}
         for row in rows:
@@ -628,24 +791,17 @@ class TaskRepository:
         llamadas locales el reintento automático es seguro: cuesta cómputo,
         no dinero.
         """
-        active_statuses = (
-            "routing",
-            "planning",
-            "resource_planning",
-            "chunking",
-            "generating",
-            "proposing",
-            "evaluating",
-            "debating",
-            "synthesizing",
-            "verifying",
-        )
+        # Solo inferencia: las conversiones interrumpidas las recupera
+        # `requeue_interrupted_ingestion_tasks`, que no tiene que razonar sobre
+        # invocaciones ambiguas ni sobre coste ya facturado.
+        active_statuses = ACTIVE_INFERENCE_STATUSES
         placeholders = ",".join("?" for _ in active_statuses)
         now = _utc_now_iso()
         recovered = 0
         with self.db.transaction() as connection:
             rows = connection.execute(
-                f"SELECT id, attempt, progress_json FROM tasks WHERE status IN ({placeholders})",
+                "SELECT id, attempt, progress_json FROM tasks "
+                f"WHERE kind = 'inference' AND status IN ({placeholders})",
                 active_statuses,
             ).fetchall()
             position = 0
@@ -770,16 +926,25 @@ class TaskRepository:
         return recovered
 
     def _row_to_task_state(self, row: Any) -> TaskStateResponse:
-        request = TaskCreateRequest.model_validate(loads_json(row["request_json"]))
+        kind = TaskKind(row["kind"] if "kind" in row.keys() else TaskKind.inference.value)
+        # El request_json del carril de ingesta es un descriptor de conversión,
+        # no un TaskCreateRequest: validarlo como tal reventaría. Es la razón
+        # de que haya que mirar el kind ANTES de interpretar la petición.
+        request = (
+            TaskCreateRequest.model_validate(loads_json(row["request_json"]))
+            if kind == TaskKind.inference
+            else None
+        )
         return TaskStateResponse(
             task_id=row["id"],
+            kind=kind,
             status=TaskStatus(row["status"]),
             request_id=row["request_id"],
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
-            execution_strategy=request.execution.strategy,
-            execution_preset=request.execution.preset,
-            selection_mode=request.execution.selection.mode,
+            execution_strategy=request.execution.strategy if request else None,
+            execution_preset=request.execution.preset if request else None,
+            selection_mode=request.execution.selection.mode if request else None,
             progress=loads_json(row["progress_json"], {}),
             result=loads_json(row["result_json"], None),
             error=loads_json(row["error_json"], None),
@@ -788,6 +953,7 @@ class TaskRepository:
     def _row_to_queue_item(self, row: Any) -> QueueItem:
         return QueueItem(
             task_id=row["id"],
+            kind=TaskKind(row["kind"] if "kind" in row.keys() else TaskKind.inference.value),
             status=TaskStatus(row["status"]),
             request_id=row["request_id"],
             priority=row["priority"],

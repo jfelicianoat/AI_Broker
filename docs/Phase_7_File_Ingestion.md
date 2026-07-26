@@ -177,7 +177,7 @@ de conversión, ambos ampliados para la máquina del usuario (64 GB RAM):
 ## Map-reduce de contexto largo (2026-07-19)
 
 Resuelto el límite práctico posterior: con `execution.long_context:
-"map_reduce"` (opt-in por tarea, contrato 2.5 — el default sigue fallando
+"map_reduce"` (opt-in por tarea, contrato 2.5+ — el default sigue fallando
 explícito, el broker jamás trocea en silencio), si los documentos exceden el
 contexto de todos los modelos elegibles, el coordinador divide la sección de
 documentos del prompt expandido (split por el centinela compartido

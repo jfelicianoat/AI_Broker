@@ -226,19 +226,21 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected[0].model, "preferido")
         await router.close()
 
-    async def test_cost_weight_prefers_cheaper_model_when_rest_is_equal(self) -> None:
-        caro = {**_local_entry("caro"), "provider": "nvidia", "deployment": "api"}
-        barato = {**_local_entry("barato"), "provider": "nvidia", "deployment": "api"}
+    async def test_cost_no_longer_decides_the_ranking(self) -> None:
+        """El coste salió del ranking: un modelo caro pero rápido gana a uno
+        gratis y lento. Antes perdía, porque el local registra cost_usd = 0.0
+        y se llevaba siempre la puntuación máxima del componente coste."""
+        caro_rapido = {**_local_entry("caro-rapido"), "provider": "nvidia", "deployment": "api"}
+        gratis_lento = {**_local_entry("gratis-lento"), "provider": "nvidia", "deployment": "api"}
         stats = {
-            ("nvidia", "api", "caro", "prose"): ModelStats(10, 10, 1000.0, 0.05),
-            ("nvidia", "api", "barato", "prose"): ModelStats(10, 10, 1000.0, 0.001),
+            ("nvidia", "api", "caro-rapido", "prose"): ModelStats(10, 10, 1000.0, 0.05),
+            ("nvidia", "api", "gratis-lento", "prose"): ModelStats(10, 10, 30000.0, 0.0),
         }
-        config = BrokerConfig()
         router = RoutedModelProvider(
-            config,
+            BrokerConfig(),
             ollama=_CatalogStub([]),
             deepseek=_CatalogStub([]),
-            custom={"nvidia": _CatalogStub([caro, barato])},
+            custom={"nvidia": _CatalogStub([gratis_lento, caro_rapido])},
             stats_loader=lambda: stats,
         )
         request = TaskCreateRequest(
@@ -247,7 +249,88 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
             model_requirements={"allowed_providers": ["nvidia"], "cloud_allowed": True},
         )
         selected = await router.select(request, 1, ["single"])
-        self.assertEqual(selected[0].model, "barato")
+        self.assertEqual(selected[0].model, "caro-rapido")
+        await router.close()
+
+    async def test_ranking_prefers_the_shortest_expected_time(self) -> None:
+        """Un modelo algo más lento pero fiable gana a uno rápido que falla la
+        mitad de las veces: el tiempo esperado incluye los reintentos."""
+        rapido_fragil = {**_local_entry("rapido-fragil"), "provider": "nvidia", "deployment": "api"}
+        lento_solido = {**_local_entry("lento-solido"), "provider": "nvidia", "deployment": "api"}
+        stats = {
+            # 2 s pero solo la mitad acaba bien -> ~3.6 s esperados.
+            ("nvidia", "api", "rapido-fragil", "prose"): ModelStats(10, 5, 2000.0, 0.0),
+            # 3 s y nunca falla -> ~3.3 s esperados.
+            ("nvidia", "api", "lento-solido", "prose"): ModelStats(10, 10, 3000.0, 0.0),
+        }
+        router = RoutedModelProvider(
+            BrokerConfig(),
+            ollama=_CatalogStub([]),
+            deepseek=_CatalogStub([]),
+            custom={"nvidia": _CatalogStub([rapido_fragil, lento_solido])},
+            stats_loader=lambda: stats,
+        )
+        request = TaskCreateRequest(
+            idempotency_key=f"adaptive:{uuid4().hex}",
+            content={"prompt": "hola"},
+            model_requirements={"allowed_providers": ["nvidia"], "cloud_allowed": True},
+        )
+        selected = await router.select(request, 1, ["single"])
+        self.assertEqual(selected[0].model, "lento-solido")
+        await router.close()
+
+    async def test_the_request_size_changes_who_wins(self) -> None:
+        """Los dos modelos tardaron lo mismo de media, pero uno se midió con
+        peticiones mucho mayores: es más rápido por token. Con un prompt largo
+        debe ganar él, y sin el ajuste por carga la elección sería un empate
+        deshecho por el desempate de evidencia."""
+        pequeno = {**_local_entry("medido-en-corto"), "provider": "nvidia", "deployment": "api"}
+        grande = {**_local_entry("medido-en-largo"), "provider": "nvidia", "deployment": "api"}
+        stats = {
+            ("nvidia", "api", "medido-en-corto", "long_context"): ModelStats(
+                10, 10, 2000.0, 0.0, avg_tokens_input=100.0, avg_tokens_output=100.0,
+            ),
+            ("nvidia", "api", "medido-en-largo", "long_context"): ModelStats(
+                10, 10, 2000.0, 0.0, avg_tokens_input=8000.0, avg_tokens_output=100.0,
+            ),
+        }
+        router = RoutedModelProvider(
+            BrokerConfig(),
+            ollama=_CatalogStub([]),
+            deepseek=_CatalogStub([]),
+            custom={"nvidia": _CatalogStub([pequeno, grande])},
+            stats_loader=lambda: stats,
+        )
+        request = TaskCreateRequest(
+            idempotency_key=f"adaptive:{uuid4().hex}",
+            content={"prompt": "palabra " * 20000},
+            model_requirements={"allowed_providers": ["nvidia"], "cloud_allowed": True},
+        )
+        selected = await router.select(request, 1, ["single"])
+        self.assertEqual(selected[0].model, "medido-en-largo")
+        await router.close()
+
+    async def test_measured_models_outrank_unmeasured_ones(self) -> None:
+        """A lo no medido no se le inventa un tiempo, así que no compite con lo
+        medido. Sale de ahí por exploración o por sondeo en sombra, no
+        colándose por delante con una puntuación neutra inventada."""
+        medido = {**_local_entry("medido"), "provider": "nvidia", "deployment": "api"}
+        sin_medir = {**_local_entry("sin-medir"), "provider": "nvidia", "deployment": "api"}
+        stats = {("nvidia", "api", "medido", "prose"): ModelStats(10, 10, 9000.0, 0.0)}
+        router = RoutedModelProvider(
+            BrokerConfig(),
+            ollama=_CatalogStub([]),
+            deepseek=_CatalogStub([]),
+            custom={"nvidia": _CatalogStub([sin_medir, medido])},
+            stats_loader=lambda: stats,
+        )
+        request = TaskCreateRequest(
+            idempotency_key=f"adaptive:{uuid4().hex}",
+            content={"prompt": "hola"},
+            model_requirements={"allowed_providers": ["nvidia"], "cloud_allowed": True},
+        )
+        selected = await router.select(request, 1, ["single"])
+        self.assertEqual(selected[0].model, "medido")
         await router.close()
 
 

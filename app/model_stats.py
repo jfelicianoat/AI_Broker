@@ -26,6 +26,19 @@ class ModelStats:
     successes: int
     avg_latency_ms: float | None
     avg_cost_usd: float | None
+    # Latencia media segmentada por si el modelo estaba ya cargado en VRAM.
+    # Un modelo local en frío paga la carga desde disco dentro de su propia
+    # latencia: mezclar ambos casos en una sola media da un número que no
+    # describe ninguna de las dos situaciones. None = sin muestras de ese tipo
+    # (lo normal en cloud, que nunca carga nada, y en filas antiguas).
+    warm_latency_ms: float | None = None
+    cold_latency_ms: float | None = None
+    # Tamaño medio de las peticiones que produjeron esas latencias. Sin este
+    # dato la latencia media es un número sin escala: un modelo medido con
+    # preguntas de dos líneas parecería igual de rápido con un documento de
+    # 40.000 tokens. Permite estimar en tokens/segundo (app.model_timing).
+    avg_tokens_input: float | None = None
+    avg_tokens_output: float | None = None
 
     @property
     def success_rate(self) -> float:
@@ -40,6 +53,10 @@ class _Accumulator:
     successes: int = 0
     latencies: list[float] = field(default_factory=list)
     costs: list[float] = field(default_factory=list)
+    warm_latencies: list[float] = field(default_factory=list)
+    cold_latencies: list[float] = field(default_factory=list)
+    tokens_input: list[float] = field(default_factory=list)
+    tokens_output: list[float] = field(default_factory=list)
 
 
 def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelStats]:
@@ -49,7 +66,8 @@ def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelS
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
     rows = db.query_all(
         """
-        SELECT provider, deployment, model, task_type, status, latency_ms, cost_usd
+        SELECT provider, deployment, model, task_type, status, latency_ms, cost_usd, was_loaded,
+               tokens_input, tokens_output
         FROM model_invocations
         WHERE created_at >= ? AND status IN ('completed', 'failed') AND task_type IS NOT NULL
         """,
@@ -68,15 +86,35 @@ def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelS
         if row["status"] == "completed":
             bucket.successes += 1
             if row["latency_ms"] is not None:
-                bucket.latencies.append(float(row["latency_ms"]))
+                latency = float(row["latency_ms"])
+                bucket.latencies.append(latency)
+                # was_loaded NULL (filas previas a la columna, o proveedores
+                # que no cargan modelos) solo cuenta en la media global.
+                if row["was_loaded"] is not None:
+                    target = bucket.warm_latencies if row["was_loaded"] else bucket.cold_latencies
+                    target.append(latency)
             if row["cost_usd"] is not None:
                 bucket.costs.append(float(row["cost_usd"]))
+            # Solo cuentan los tamaños de las invocaciones cuya latencia se ha
+            # medido: si no fueran las mismas filas, los tokens/segundo
+            # saldrían de dividir dos poblaciones distintas.
+            if row["latency_ms"] is not None:
+                bucket.tokens_input.append(float(row["tokens_input"] or 0))
+                bucket.tokens_output.append(float(row["tokens_output"] or 0))
+
+    def mean(values: list[float]) -> float | None:
+        return sum(values) / len(values) if values else None
+
     return {
         key: ModelStats(
             attempts=bucket.attempts,
             successes=bucket.successes,
-            avg_latency_ms=sum(bucket.latencies) / len(bucket.latencies) if bucket.latencies else None,
-            avg_cost_usd=sum(bucket.costs) / len(bucket.costs) if bucket.costs else None,
+            avg_latency_ms=mean(bucket.latencies),
+            avg_cost_usd=mean(bucket.costs),
+            warm_latency_ms=mean(bucket.warm_latencies),
+            cold_latency_ms=mean(bucket.cold_latencies),
+            avg_tokens_input=mean(bucket.tokens_input),
+            avg_tokens_output=mean(bucket.tokens_output),
         )
         for key, bucket in accumulator.items()
     }

@@ -32,7 +32,7 @@ def make_client(tmp_path: Path) -> TestClient:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
         processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
-        ingestion=IngestionConfig(storage_dir=str(tmp_path / "files")),
+        ingestion=IngestionConfig(storage_dir=str(tmp_path / "files"), isolate_conversions=False),
     )
     return TestClient(create_app(config))
 
@@ -40,8 +40,12 @@ def make_client(tmp_path: Path) -> TestClient:
 def convert_fixture(client: TestClient, name: str, timeout: float) -> str:
     with (CORPUS / name).open("rb") as handle:
         body = client.post("/api/v1/files", files={"file": (name, handle)}).json()
+    # La conversión es una tarea del carril de ingesta; con auto_dispatch
+    # desactivado hay que avanzarla a mano, igual que la inferencia.
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    state = client.get(f"/api/v1/files/{body['file_id']}").json()
+    while time.monotonic() < deadline and state["status"] not in {"ready", "failed"}:
+        client.post("/api/v1/dispatcher/ingestion/tick")
         state = client.get(f"/api/v1/files/{body['file_id']}").json()
         if state["status"] in {"ready", "failed"}:
             break

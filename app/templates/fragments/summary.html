@@ -2,7 +2,18 @@
   <article class="metric-card">
     <span class="metric-label">Tareas en cola</span>
     <strong>{{ summary.queued }}</strong>
-    <small>{{ summary.active }} activa - 1 workflow real</small>
+    <small>{{ summary.active }} en curso en los dos carriles</small>
+  </article>
+  {# Carga real de la máquina. Antes solo se contaba la inferencia, así que el
+     panel podía decir "sin tarea activa" con dos conversiones dentro. #}
+  <article class="metric-card">
+    <span class="metric-label">Carga de la máquina</span>
+    <strong>{{ summary.lanes|sum(attribute='active') }} / {{ summary.lanes|sum(attribute='capacity') }}</strong>
+    <small>
+      {% for lane in summary.lanes %}
+        {{ lane.kind|lane_label }} {{ lane.active }}/{{ lane.capacity }}{% if lane.queued %} (+{{ lane.queued }} en cola){% endif %}{% if not loop.last %} · {% endif %}
+      {% endfor %}
+    </small>
   </article>
   <article class="metric-card">
     <span class="metric-label">Latencia p95</span>

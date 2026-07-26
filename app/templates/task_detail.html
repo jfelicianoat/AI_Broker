@@ -6,7 +6,7 @@
   <span class="status-dot status-{{ 'healthy' if detail.task.status.value == 'completed' else 'unavailable' if detail.task.status.value == 'failed' else 'degraded' }}"></span>
   <div>
     <strong>{{ detail.task.task_id }}</strong>
-    <small>{{ detail.task.execution_strategy.value }}/{{ detail.task.execution_preset.value }} · {{ detail.task.status|status_label }}</small>
+    <small>{% if detail.task.kind.value == 'ingestion' %}{{ detail.task.kind|lane_label }}{% else %}{{ detail.task.execution_strategy.value }}/{{ detail.task.execution_preset.value }}{% endif %} · {{ detail.task.status|status_label }}</small>
   </div>
 {% endblock %}
 

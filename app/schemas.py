@@ -23,6 +23,10 @@ class TaskStatus(str, Enum):
     debating = "debating"
     synthesizing = "synthesizing"
     verifying = "verifying"
+    # Estado propio del carril de ingesta: la conversión de un fichero a
+    # Markdown está en marcha. Ocupa la máquina, así que cuenta como trabajo
+    # activo, pero no consume el workflow único de la inferencia.
+    converting = "converting"
     waiting_for_tools = "waiting_for_tools"
     completed = "completed"
     failed = "failed"
@@ -30,6 +34,20 @@ class TaskStatus(str, Enum):
 
 
 TERMINAL_STATUSES = {TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled}
+
+
+class TaskKind(str, Enum):
+    """Carril al que pertenece una unidad de trabajo.
+
+    Los dos comparten cola, historial y panel —era el objetivo: ver la carga
+    real de la máquina en un solo sitio— pero NO comparten capacidad. La
+    inferencia mantiene su invariante de un único workflow activo; la ingesta
+    tiene su propia concurrencia. Sin esta separación, subir un PDF congelaría
+    la cola de inferencia.
+    """
+
+    inference = "inference"
+    ingestion = "ingestion"
 
 # Política de privacidad fail-closed: solo lo que se ejecuta en esta máquina
 # cuenta como local ("bootstrap" es el proveedor fake in-process). Cualquier
@@ -97,6 +115,24 @@ class DataClassification(str, Enum):
     internal = "internal"
     confidential = "confidential"
     local_only = "local_only"
+
+
+# Clasificaciones que obligan a quedarse en esta máquina. `confidential` entra
+# aquí desde 2026-07-26: hasta entonces el nombre prometía una frontera que no
+# cumplía (solo marcaba high_stakes para el meta-router de estrategia, y la
+# tarea podía salir a cloud igual que una `internal`).
+LOCAL_ONLY_CLASSIFICATIONS = frozenset(
+    {DataClassification.confidential, DataClassification.local_only}
+)
+
+
+def classification_allows_cloud(classification: DataClassification) -> bool:
+    """Única fuente de verdad de la frontera de datos.
+
+    `data_classification` es el mando de privacidad del contrato: lo declara la
+    app cliente y de él se derivan los demás cerrojos (cloud_allowed y
+    allowed_providers) cuando el cliente no se pronuncia sobre ellos."""
+    return classification not in LOCAL_ONLY_CLASSIFICATIONS
 
 
 # Adjuntos de fichero ingeridos por el broker (POST /api/v1/files). El único
@@ -171,27 +207,45 @@ class ModelRequirements(StrictBaseModel):
     preferred_model: str | None = Field(default=None, max_length=128)
     target_model: ModelReference | None = None
     fallback_allowed: bool = True
-    cloud_allowed: bool = False
-    allowed_providers: list[str] = Field(default_factory=lambda: ["ollama"])
+    # Tri-estado deliberado. None = "no me pronuncio": lo deriva el broker de
+    # risk.data_classification (ver TaskCreateRequest.enforce_data_boundary).
+    # True/False son declaraciones explícitas del cliente y siguen mandando,
+    # salvo que la clasificación imponga frontera local, que no se puede ceder.
+    cloud_allowed: bool | None = None
+    # None = sin restricción por proveedor. El default anterior era ["ollama"],
+    # que dejaba fuera a todo proveedor cloud aunque cloud_allowed fuese true:
+    # era un segundo cerrojo silencioso que la app cliente tenía que acertar.
+    allowed_providers: list[str] | None = None
     max_cost_usd: float | None = Field(default=None, ge=0)
 
     @field_validator("allowed_providers")
     @classmethod
-    def providers_must_be_non_empty(cls, value: list[str]) -> list[str]:
-        if not value:
+    def providers_must_be_non_empty(cls, value: list[str] | None) -> list[str] | None:
+        # None es "sin restricción"; la lista vacía sigue siendo un error,
+        # porque significa "ningún proveedor" y deja la petición inatendible.
+        if value is not None and not value:
             raise ValueError("allowed_providers must not be empty")
         return value
 
     @model_validator(mode="after")
     def enforce_cloud_policy(self) -> ModelRequirements:
-        allowed = {provider.lower() for provider in self.allowed_providers}
-        if not self.cloud_allowed:
+        # Solo se comprueba la negativa EXPLÍCITA del cliente: con None la
+        # decisión aún no se ha tomado (la toma enforce_data_boundary con la
+        # clasificación delante), y prohibir aquí sería negar lo que ese
+        # validador está a punto de conceder.
+        explicit_local = self.cloud_allowed is False
+        allowed = (
+            {provider.lower() for provider in self.allowed_providers}
+            if self.allowed_providers is not None
+            else None
+        )
+        if explicit_local and allowed is not None:
             cloudish = {"deepseek", "ollama_cloud", "openai", "anthropic", "google"}
             if cloudish.intersection(allowed):
                 raise ValueError("cloud providers are not allowed when cloud_allowed is false")
         if self.target_model is not None:
             target_provider = self.target_model.provider.lower()
-            if target_provider not in allowed:
+            if allowed is not None and target_provider not in allowed:
                 raise ValueError("target_model.provider must be included in allowed_providers")
             if self.preferred_model is not None and self.preferred_model != self.target_model.model:
                 raise ValueError("preferred_model and target_model.model must match when both are provided")
@@ -199,7 +253,7 @@ class ModelRequirements(StrictBaseModel):
                 not is_local_deployment(self.target_model.deployment)
                 or target_provider in {"deepseek", "ollama_cloud", "openai", "anthropic", "google"}
             )
-            if target_is_cloud and not self.cloud_allowed:
+            if target_is_cloud and explicit_local:
                 raise ValueError("target_model requires cloud_allowed=true")
         return self
 
@@ -365,20 +419,37 @@ class TaskCreateRequest(StrictBaseModel):
 
     @model_validator(mode="after")
     def enforce_data_boundary(self) -> TaskCreateRequest:
-        if self.risk.data_classification == DataClassification.local_only:
+        # La clasificación de datos es el mando único: de ella se derivan los
+        # cerrojos que el cliente no haya declarado. Derivar en un solo sitio
+        # evita el fallo de antes, donde una app tenía que acertar tres campos
+        # a la vez para que un modelo cloud fuese siquiera candidato.
+        requirements = self.model_requirements
+        classification = self.risk.data_classification
+        if classification_allows_cloud(classification):
+            if requirements.cloud_allowed is None:
+                # Sin frontera declarada, el silencio se resuelve a favor de la
+                # velocidad: el catálogo cloud entra en la selección.
+                requirements.cloud_allowed = True
+        else:
             local_provider_names = {"ollama", "lmstudio"}
-            target = self.model_requirements.target_model
+            target = requirements.target_model
             if target is not None and (
                 target.provider.lower() not in local_provider_names
                 or target.deployment.lower() == "cloud"
             ):
-                raise ValueError("local_only target_model must be a local deployment")
-            self.model_requirements.cloud_allowed = False
-            self.model_requirements.allowed_providers = [
-                provider
-                for provider in self.model_requirements.allowed_providers
-                if provider.lower() in local_provider_names
-            ] or ["ollama"]
+                raise ValueError(
+                    f"{classification.value} target_model must be a local deployment"
+                )
+            # La frontera gana a un cloud_allowed=true explícito: pedir ambas
+            # cosas es contradictorio, y de las dos la que no se puede ceder es
+            # la privacidad. Se degrada en silencio, como se venía haciendo.
+            requirements.cloud_allowed = False
+            if requirements.allowed_providers is not None:
+                requirements.allowed_providers = [
+                    provider
+                    for provider in requirements.allowed_providers
+                    if provider.lower() in local_provider_names
+                ] or ["ollama"]
         for attachment in self.content.attachments:
             # Solo adjuntos ya ingeridos por el broker: el mapeo es sin pérdida
             # porque el fichero llega al modelo como Markdown dentro del prompt.
@@ -407,13 +478,17 @@ class TaskAcceptedResponse(StrictBaseModel):
 
 class TaskStateResponse(StrictBaseModel):
     task_id: str
+    kind: TaskKind = TaskKind.inference
     status: TaskStatus
     request_id: str | None
     created_at: datetime
     updated_at: datetime
-    execution_strategy: ExecutionStrategy
-    execution_preset: ExecutionPreset
-    selection_mode: SelectionMode
+    # None en el carril de ingesta: una conversión de fichero no tiene
+    # estrategia, ni preset, ni modo de selección. Rellenarlas con "single" para
+    # que el modelo validara sería inventarle una ejecución que no existe.
+    execution_strategy: ExecutionStrategy | None = None
+    execution_preset: ExecutionPreset | None = None
+    selection_mode: SelectionMode | None = None
     progress: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
@@ -421,6 +496,9 @@ class TaskStateResponse(StrictBaseModel):
 
 class QueueItem(StrictBaseModel):
     task_id: str
+    # Default por compatibilidad: todo lo que existía antes de los carriles es
+    # inferencia, y las filas antiguas no llevan la columna.
+    kind: TaskKind = TaskKind.inference
     status: TaskStatus
     request_id: str | None
     priority: int
@@ -523,6 +601,16 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     long_context_map_reduce: bool = False
     # Extensiones admitidas por la ingesta, agrupadas por tipo.
     ingestion_formats: dict[str, list[str]] = Field(default_factory=dict)
+    # Contrato 2.6. La frontera de datos se declara en UN solo campo,
+    # risk.data_classification, y de él se derivan cloud_allowed y
+    # allowed_providers cuando el cliente no se pronuncia. Un cliente que vea
+    # esta capacidad puede omitir los dos campos derivados y confiar en su
+    # clasificación; sin ella, tiene que seguir enviando los tres a la vez.
+    derived_data_boundary: bool = False
+    # Carriles de trabajo: las conversiones de fichero son tareas visibles
+    # (kind=ingestion) con su propia concurrencia, y se consultan por las
+    # mismas vías que la inferencia.
+    work_lanes: list[TaskKind] = Field(default_factory=list)
 
 
 class FileAcceptedResponse(StrictBaseModel):
@@ -552,6 +640,19 @@ class FileStateResponse(StrictBaseModel):
     markdown_url: str | None = None
 
 
+class LaneOccupancy(StrictBaseModel):
+    """Ocupación de un carril de trabajo: la carga real de la máquina.
+
+    Existe porque antes solo se veía la inferencia. Las conversiones corrían al
+    margen de toda proyección, así que el panel podía decir «sin tarea activa»
+    con dos Doclings comiéndose la CPU."""
+
+    kind: TaskKind
+    active: int
+    queued: int
+    capacity: int
+
+
 class DashboardSummaryResponse(StrictBaseModel):
     checked_at: datetime
     window_hours: int
@@ -568,17 +669,24 @@ class DashboardSummaryResponse(StrictBaseModel):
     tokens_output: int
     cost_actual_usd: float
     oldest_queued_seconds: float | None
+    lanes: list[LaneOccupancy] = Field(default_factory=list)
 
 
 class DashboardTaskItem(StrictBaseModel):
     task_id: str
+    kind: TaskKind = TaskKind.inference
+    # Nombre legible del trabajo cuando no es una inferencia: el fichero que se
+    # está convirtiendo. Una conversión no tiene prompt que enseñar.
+    label: str | None = None
     request_id: str | None
     status: TaskStatus
     priority: int
     queue_position: int | None
     origin: str | None
-    execution_strategy: ExecutionStrategy
-    execution_preset: ExecutionPreset
+    # None en el carril de ingesta, como en TaskStateResponse: una conversión
+    # no tiene estrategia ni preset.
+    execution_strategy: ExecutionStrategy | None = None
+    execution_preset: ExecutionPreset | None = None
     requested_model: ModelReference | None
     effective_model: ModelReference | None
     fallback_used: bool | None

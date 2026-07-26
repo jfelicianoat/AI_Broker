@@ -193,7 +193,15 @@ def estimate_tokens_upper_bound(text: str) -> int:
     return max(1, -(-encoded_length // MIN_BYTES_PER_TOKEN))
 
 
-def estimate_required_context(request: TaskCreateRequest, prompt: str | None = None) -> int:
+def estimate_input_tokens(request: TaskCreateRequest, prompt: str | None = None) -> int:
+    """Tokens que entran al modelo: prompt (más el esquema JSON si viaja).
+
+    Separado de `estimate_required_context` porque son dos preguntas distintas:
+    aquí se estima el trabajo REAL de la petición, mientras que allí se suma
+    además la reserva de salida, que es espacio apartado por si acaso y no
+    trabajo que vaya a hacerse. La estimación de tiempo (app.model_timing)
+    necesita lo primero: reservar 4.000 tokens de salida no hace más lenta una
+    pregunta de dos líneas."""
     value = request.content.prompt if prompt is None else prompt
     input_upper_bound = estimate_tokens_upper_bound(value)
     if request.inference_kind == InferenceKind.chat and request.output.format == OutputFormat.json \
@@ -201,8 +209,12 @@ def estimate_required_context(request: TaskCreateRequest, prompt: str | None = N
         input_upper_bound += estimate_tokens_upper_bound(json.dumps(
             request.output.json_schema, ensure_ascii=False, separators=(",", ":"),
         ))
+    return input_upper_bound
+
+
+def estimate_required_context(request: TaskCreateRequest, prompt: str | None = None) -> int:
     output_reserve = request.generation.max_output_tokens + 512 if request.inference_kind == InferenceKind.chat else 0
-    return input_upper_bound + output_reserve
+    return estimate_input_tokens(request, prompt) + output_reserve
 
 
 def enforce_context_limit(request: TaskCreateRequest, context_window: int | None, prompt: str | None = None) -> None:

@@ -30,8 +30,10 @@ from app.schemas import (
     SelectionMode,
     TaskCreateRequest,
     TaskStatus,
+    is_local_deployment,
     run_code_available,
 )
+from app.shadow_probe import ShadowProbe
 from app.skills import run_skill, skill_definitions
 from app.strategy_router import (
     RoutingDecision,
@@ -82,6 +84,9 @@ class ConsensusCoordinator:
         self.ingestion = ingestion
         # SandboxExecutor opcional: habilita la skill run_code del agente.
         self.sandbox = sandbox
+        # Sondeo en sombra: mide aspirantes en segundo plano cuando la tarea ya
+        # ha terminado. Gobernado por config.shadow_probe (off por defecto).
+        self.shadow_probe = ShadowProbe(self.provider, scheduler.config)
 
     def initialize_run(self, task_id: str, request: TaskCreateRequest) -> str | None:
         if request.execution.strategy == ExecutionStrategy.single:
@@ -223,6 +228,15 @@ class ConsensusCoordinator:
                 self._maybe_record_routing_case(repository, task_id, request)
             except Exception:
                 logger.warning("routing_case.record_failed", extra={"task_id": task_id})
+            # Sondeo en sombra: se encola aquí, con la tarea ya terminada, para
+            # que la medida de un aspirante no se interponga jamás entre el
+            # usuario y su respuesta. Solo tras un éxito: con un prompt que
+            # acaba de fallar, el aspirante fallaría por un defecto ajeno.
+            try:
+                if repository.get_task(task_id).status == TaskStatus.completed:
+                    self.shadow_probe.schedule(repository, task_id, request)
+            except Exception:
+                logger.warning("shadow_probe.schedule_failed", extra={"task_id": task_id})
 
     def _maybe_record_routing_case(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         """Guarda un caso (bucket → decisión → resultado) al terminar una tarea
@@ -436,7 +450,10 @@ class ConsensusCoordinator:
             # Checkpoint pre-vuelo: cada intento tiene su propia fila de
             # invocación; si el proceso muere con la llamada en el aire, la
             # recuperación la encontrará en 'started' y la tratará como ambigua.
-            invocation_id = repository.start_invocation(task_id, None, role, model, classify_task_type(request))
+            invocation_id = repository.start_invocation(
+                task_id, None, role, model, classify_task_type(request),
+                await self._model_loaded_state(model),
+            )
             try:
                 output = await self._run_cancellable(
                     repository,
@@ -690,7 +707,10 @@ class ConsensusCoordinator:
             "prompt_compression": "off",
             "execution": request.execution.model_copy(update={"long_context": "fail"}),
         })
-        invocation_id = repository.start_invocation(task_id, None, role, model, classify_task_type(request))
+        invocation_id = repository.start_invocation(
+            task_id, None, role, model, classify_task_type(request),
+            await self._model_loaded_state(model),
+        )
         try:
             output = await self._run_cancellable(
                 repository, task_id, self.provider.propose(sub_request, model, ordinal),
@@ -876,6 +896,7 @@ class ConsensusCoordinator:
             return 1.0, None
         invocation_id = repository.start_invocation(
             task_id, None, "confidence_judge", model, classify_task_type(request),
+            await self._model_loaded_state(model),
         )
         try:
             output = await self._run_cancellable(
@@ -984,7 +1005,10 @@ class ConsensusCoordinator:
             iteration = iteration_offset + step
             if repository.is_cancel_requested(task_id):
                 return AgentLoopResult(None, outputs, "cancelled", tool_calls, last_invocation_id)
-            invocation_id = repository.start_invocation(task_id, run_id, role, model, classify_task_type(request))
+            invocation_id = repository.start_invocation(
+                task_id, run_id, role, model, classify_task_type(request),
+                await self._model_loaded_state(model),
+            )
             last_invocation_id = invocation_id
             try:
                 turn = await self._run_cancellable_turn(
@@ -1355,6 +1379,7 @@ class ConsensusCoordinator:
         synthesis_request = self._with_remaining_budget(request, [output for _, output in proposals])
         synthesis_invocation_id = repository.start_invocation(
             task_id, run_id, "arbiter", arbiter, classify_task_type(request),
+            await self._model_loaded_state(arbiter),
         )
         try:
             synthesis = await self._run_cancellable(
@@ -1481,7 +1506,10 @@ class ConsensusCoordinator:
             # Checkpoint pre-vuelo (véase start_invocation): la respuesta se
             # persiste aquí mismo al llegar, no al final de la ola, para que
             # un crash a mitad de ola no pierda las propuestas ya cobradas.
-            invocation_id = repository.start_invocation(task_id, run_id, role, model, classify_task_type(request))
+            invocation_id = repository.start_invocation(
+                task_id, run_id, role, model, classify_task_type(request),
+                await self._model_loaded_state(model),
+            )
             try:
                 output = await self._run_cancellable(
                     repository,
@@ -1741,6 +1769,26 @@ class ConsensusCoordinator:
 
     def _safe_name(self, value: str) -> str:
         return "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in value).strip("-") or "item"
+
+    async def _model_loaded_state(self, model: ModelReference) -> bool | None:
+        """¿Estaba el modelo en VRAM justo antes de invocarlo?
+
+        Se registra en la invocación para poder separar después la latencia en
+        caliente de la latencia en frío (app.model_timing): un modelo local que
+        hay que cargar desde disco paga esa carga dentro de su propia latencia,
+        y mezclar ambos casos en una media da un número que no describe
+        ninguna de las dos situaciones. None = no aplica (cloud no carga nada)
+        o no se pudo consultar; nunca se inventa el dato."""
+        if not is_local_deployment(model.deployment):
+            return None
+        loaded_models = getattr(self.provider, "loaded_local_models", None)
+        if loaded_models is None:
+            return None
+        try:
+            loaded = await loaded_models()
+        except Exception:
+            return None
+        return None if loaded is None else model.model in loaded
 
     def _attach_error_context(
         self,

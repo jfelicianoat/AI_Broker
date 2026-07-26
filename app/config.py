@@ -122,6 +122,17 @@ class IngestionConfig(BaseModel):
     # La conversión corre en un hilo; al agotarse el plazo la tarea de ingesta
     # se marca failed aunque el hilo siga drenando en segundo plano.
     conversion_timeout_seconds: int = Field(default=900, ge=10, le=43200)
+    # Conversiones simultáneas del carril de ingesta. Antes de los carriles no
+    # había límite: cada subida arrancaba su propia tarea. Dos es el
+    # compromiso — una sola desaprovecha la máquina en ficheros pequeños y
+    # tres Doclings con OCR compiten de verdad con la inferencia.
+    max_concurrent: int = Field(default=2, ge=1, le=16)
+    # Ejecutar la fase pesada (Docling/MarkItDown/ffmpeg/Whisper) en un proceso
+    # hijo. Es lo que hace que cancelar una conversión la pare de verdad: un
+    # hilo de Python no se puede matar, un proceso sí. De paso, un OOM de torch
+    # mata al hijo y no al broker. Se desactiva en los tests, donde las
+    # librerías pesadas se sustituyen por dobles dentro del propio proceso.
+    isolate_conversions: bool = True
     images: IngestionImagesConfig = Field(default_factory=IngestionImagesConfig)
     transcription: IngestionTranscriptionConfig = Field(default_factory=IngestionTranscriptionConfig)
 
@@ -222,13 +233,13 @@ class RoutingConfig(BaseModel):
     # Por debajo de este número de invocaciones el modelo puntúa neutro
     # (arranque en frío): un modelo recién añadido nunca queda castigado.
     min_invocations: int = Field(default=3, ge=1)
-    # Pesos del score multiobjetivo; se normalizan entre sí, así que solo
-    # importa su proporción. success = fiabilidad (tasa de éxito suavizada),
-    # latency y cost se normalizan min-max entre los candidatos de cada
-    # selección.
-    success_weight: float = Field(default=0.5, ge=0)
-    latency_weight: float = Field(default=0.3, ge=0)
-    cost_weight: float = Field(default=0.2, ge=0)
+    # Los pesos success_weight / latency_weight / cost_weight desaparecieron el
+    # 2026-07-26 con el score multiobjetivo. El ranking ya no combina
+    # componentes sin unidades: estima el TIEMPO ESPERADO hasta una respuesta
+    # correcta (app.model_timing), donde la fiabilidad entra como número
+    # esperado de intentos y el coste no entra en absoluto —lo acota
+    # model_requirements.max_cost_usd, que es un presupuesto duro—. Un YAML
+    # antiguo con esas claves sigue cargando: se ignoran.
     # Probabilidad de ignorar el score y ascender otro candidato a la primera
     # posición. Sin esto, un modelo que gana la comparación en cuanto supera
     # min_invocations se autorrefuerza indefinidamente: solo él sigue
@@ -239,11 +250,22 @@ class RoutingConfig(BaseModel):
     # (comportamiento clásico, determinista).
     exploration_rate: float = Field(default=0.0, ge=0, le=1)
 
-    @model_validator(mode="after")
-    def validate_weights(self) -> RoutingConfig:
-        if self.success_weight + self.latency_weight + self.cost_weight <= 0:
-            raise ValueError("routing: al menos un peso debe ser mayor que cero")
-        return self
+
+class ShadowProbeConfig(BaseModel):
+    """Sondeo en sombra: medir modelos sin evidencia sin hacer esperar a nadie
+    (ver app.shadow_probe)."""
+
+    # Off por defecto para que la batería de tests sea hermética y para que un
+    # despliegue nuevo no empiece a invocar modelos por su cuenta sin que su
+    # dueño lo haya decidido. El YAML que se distribuye lo activa.
+    enabled: bool = False
+    # Los modelos locales compiten por la VRAM con las respuestas de verdad, así
+    # que solo se les sondea con la máquina ociosa. Los cloud no consumen nada
+    # local y se sondean siempre que la clasificación de datos lo permita.
+    probe_local_models: bool = True
+    # Por encima de este tamaño no se sondea: un prompt enorme convierte cada
+    # medida en un trabajo caro y largo.
+    max_prompt_chars: int = Field(default=8000, ge=1)
 
 
 # Tipos de tarea admitidos en task_affinity. Duplica a propósito
@@ -448,6 +470,7 @@ class BrokerConfig(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    shadow_probe: ShadowProbeConfig = Field(default_factory=ShadowProbeConfig)
     task_affinity: TaskAffinityConfig = Field(default_factory=TaskAffinityConfig)
     strategy_router: StrategyRouterConfig = Field(default_factory=StrategyRouterConfig)
     model_enrichment: ModelEnrichmentConfig = Field(default_factory=ModelEnrichmentConfig)

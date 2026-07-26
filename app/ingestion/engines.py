@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import io
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -224,12 +225,30 @@ _DESCRIBE_PROMPT = (
 )
 
 
+@dataclass(frozen=True)
+class ImageDescription:
+    """Descripción de una figura, con lo necesario para contabilizarla.
+
+    La descripción de figuras es una invocación a un modelo como cualquier
+    otra, y desde 2026-07-26 se registra como tal: sin estos números, el modelo
+    de visión trabajaba sin acumular historial y su consumo de GPU era
+    invisible para el broker. tokens_input/output valen 0 cuando el endpoint no
+    los reporta — 0 significa "no medido" y así el ritmo en tokens/segundo
+    simplemente no se calcula, en vez de salir falseado.
+    """
+
+    content: str
+    tokens_input: int = 0
+    tokens_output: int = 0
+    latency_ms: float = 0.0
+
+
 def describe_image(
     target: Any,
     png_bytes: bytes,
     context_text: str,
     timeout_seconds: float,
-) -> str:
+) -> ImageDescription:
     """Describe una figura con el modelo de visión que el broker haya elegido.
 
     `target` es un `app.ingestion.vision.VisionTarget`. Cada proveedor recibe
@@ -243,6 +262,7 @@ def describe_image(
 
     encoded = base64.b64encode(png_bytes).decode("ascii")
     prompt = _DESCRIBE_PROMPT + context_text[:1200]
+    started = time.monotonic()
 
     if getattr(target, "dialect", "openai") == "ollama":
         response = httpx.post(
@@ -256,8 +276,15 @@ def describe_image(
             timeout=timeout_seconds,
         )
         response.raise_for_status()
-        content = (response.json().get("message") or {}).get("content")
-        return str(content or "").strip()
+        body = response.json()
+        content = (body.get("message") or {}).get("content")
+        # Ollama publica los contadores en la raíz de la respuesta.
+        return ImageDescription(
+            content=str(content or "").strip(),
+            tokens_input=int(body.get("prompt_eval_count") or 0),
+            tokens_output=int(body.get("eval_count") or 0),
+            latency_ms=(time.monotonic() - started) * 1000,
+        )
 
     headers = {"Content-Type": "application/json"}
     if target.api_key:
@@ -287,4 +314,10 @@ def describe_image(
     response.raise_for_status()
     body = response.json()
     content = body["choices"][0]["message"]["content"]
-    return str(content or "").strip()
+    usage = body.get("usage") or {}
+    return ImageDescription(
+        content=str(content or "").strip(),
+        tokens_input=int(usage.get("prompt_tokens") or 0),
+        tokens_output=int(usage.get("completion_tokens") or 0),
+        latency_ms=(time.monotonic() - started) * 1000,
+    )

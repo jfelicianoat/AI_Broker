@@ -19,7 +19,9 @@
           <span class="queue-preview-id">
             <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
             <small>
-              {% if task.requested_model %}
+              {% if task.kind.value == 'ingestion' %}
+                {{ task.label or 'Conversión de fichero' }}
+              {% elif task.requested_model %}
                 {{ task.requested_model.model }}
               {% else %}
                 {{ task.execution_strategy.value }}/{{ task.execution_preset.value }}

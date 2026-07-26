@@ -1739,9 +1739,33 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
         router = RoutedModelProvider(BrokerConfig(), ollama=StubProvider(), deepseek=StubProvider())
-        request = TaskCreateRequest(idempotency_key="route:local", content={"prompt": "hola"})
+        request = TaskCreateRequest(
+            idempotency_key="route:local",
+            content={"prompt": "hola"},
+            model_requirements={"cloud_allowed": False},
+        )
         selected = await router.select(request, 1, ["single"])
         self.assertEqual(selected[0].model, "local")
+        await router.close()
+
+    async def test_cloud_tags_are_eligible_when_the_classification_allows_it(self) -> None:
+        """Contrapartida del test anterior: sin frontera declarada el catálogo
+        cloud entra en la selección. Antes quedaba fuera en la elegibilidad,
+        antes incluso de que el ranking pudiera puntuarlo."""
+        class StubProvider:
+            async def models(self):
+                return [
+                    {"name": "remote:cloud", "provider": "ollama", "deployment": "cloud", "context_window": 100000},
+                    {"name": "local", "provider": "ollama", "deployment": "local", "context_window": 100000},
+                ]
+
+            async def close(self):
+                return None
+
+        router = RoutedModelProvider(BrokerConfig(), ollama=StubProvider(), deepseek=StubProvider())
+        request = TaskCreateRequest(idempotency_key="route:cloud-ok", content={"prompt": "hola"})
+        selected = await router.select(request, 2, ["a", "b"])
+        self.assertIn("remote:cloud", {item.model for item in selected})
         await router.close()
 
     async def test_routes_custom_openai_compatible_provider(self) -> None:

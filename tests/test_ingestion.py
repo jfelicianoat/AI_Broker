@@ -16,6 +16,7 @@ from app.config import (
     ProvidersConfig,
     SandboxConfig,
 )
+from app.db import Database
 from app.ingestion.detection import UnsupportedFormat, detect
 from app.ingestion.service import IngestionService, neutralize_document_delimiters
 from app.ingestion.vision import VisionTarget, select_vision_target
@@ -36,15 +37,35 @@ def make_client(tmp_path: Path, **ingestion_overrides) -> TestClient:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
         processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
-        ingestion=IngestionConfig(storage_dir=str(tmp_path / "files"), **ingestion_overrides),
+        ingestion=IngestionConfig(
+            storage_dir=str(tmp_path / "files"),
+            # Los tests sustituyen los motores por dobles DENTRO de este
+            # proceso: un hijo real no vería esos monkeypatch. El camino con
+            # subproceso lo cubre tests/test_conversion_worker.py.
+            isolate_conversions=False,
+            **ingestion_overrides,
+        ),
     )
     return TestClient(create_app(config))
 
 
-def wait_for_file(client: TestClient, file_id: str, timeout: float = 10.0) -> dict:
+def wait_for_file(
+    client: TestClient, file_id: str, timeout: float = 10.0, headers: dict | None = None,
+) -> dict:
+    """Espera a que la conversión termine, empujando el carril de ingesta.
+
+    Desde que las conversiones son tareas de su propio carril, subir un fichero
+    lo deja ENCOLADO: quien lo convierte es el despachador de ingesta. Estos
+    tests corren con auto_dispatch desactivado, así que hay que avanzarlo a
+    mano, igual que se hace con /dispatcher/tick para la inferencia."""
     deadline = time.monotonic() + timeout
+    extra = headers or {}
+    state = client.get(f"/api/v1/files/{file_id}", headers=extra).json()
     while time.monotonic() < deadline:
-        state = client.get(f"/api/v1/files/{file_id}").json()
+        if state["status"] in {"ready", "failed"}:
+            return state
+        client.post("/api/v1/dispatcher/ingestion/tick", headers=extra)
+        state = client.get(f"/api/v1/files/{file_id}", headers=extra).json()
         if state["status"] in {"ready", "failed"}:
             return state
         time.sleep(0.05)
@@ -191,7 +212,8 @@ def test_pdf_picture_description_failure_is_non_fatal(tmp_path, monkeypatch):
     # se fija un destino para poder ejercitar el fallo de la llamada, que es lo
     # que este test cubre.
     target = VisionTarget(
-        provider="lmstudio", model="vision-test", base_url="http://127.0.0.1:1234/v1",
+        provider="lmstudio", model="vision-test", deployment="local",
+        base_url="http://127.0.0.1:1234/v1",
         api_key=None, dialect="openai", evidence="probe",
     )
 
@@ -214,6 +236,76 @@ def test_pdf_picture_description_failure_is_non_fatal(tmp_path, monkeypatch):
         assert state["meta"]["pictures_describe_errors"] == 1
         markdown = client.get(state["markdown_url"]).text
         assert "[Figura 1: imagen no descrita]" in markdown
+
+
+def test_picture_descriptions_are_recorded_as_model_invocations(tmp_path, monkeypatch):
+    """Describir una figura es invocar a un modelo, y como tal se contabiliza.
+
+    Antes no se registraba en ningún sitio: el modelo de visión podía atender
+    cientos de figuras sin acumular una línea de historial, y su consumo de GPU
+    era invisible para el broker. Se guardan bajo el tipo de tarea "vision", que
+    `classify_task_type` nunca devuelve, para que cuenten como evidencia sin
+    contaminar los buckets de prosa, código o contexto largo.
+    """
+    monkeypatch.setattr(
+        engines,
+        "convert_pdf_docling",
+        lambda *args, **kwargs: engines.DoclingResult(
+            markdown=f"Antes\n\n{engines.IMAGE_PLACEHOLDER}\n\nDespués",
+            pages=1,
+            ocr_enabled=True,
+            pictures=[b"fake-png"],
+        ),
+    )
+    monkeypatch.setattr(
+        engines,
+        "describe_image",
+        lambda *args, **kwargs: engines.ImageDescription(
+            content="un diagrama de bloques", tokens_input=812, tokens_output=64, latency_ms=1500.0,
+        ),
+    )
+    target = VisionTarget(
+        provider="lmstudio", model="vision-test", deployment="local",
+        base_url="http://127.0.0.1:1234/v1",
+        api_key=None, dialect="openai", evidence="probe",
+    )
+
+    async def _fixed_target(self):
+        return target
+
+    monkeypatch.setattr(IngestionService, "_resolve_vision_target", _fixed_target)
+
+    with make_client(tmp_path, images=IngestionImagesConfig(enabled=True, max_images=5)) as client:
+        body = client.post(
+            "/api/v1/files",
+            files={"file": ("informe.pdf", b"%PDF-1.7 fake", "application/pdf")},
+        ).json()
+        state = wait_for_file(client, body["file_id"])
+        assert state["status"] == "ready"
+        assert state["meta"]["pictures_described"] == 1
+
+        # La invocación existe y se le puede pedir cuentas por proveedor.
+        usage = client.get("/api/v1/usage").json()
+        assert usage["providers"]["lmstudio"]["invocations"] == 1.0
+
+    # Y está en el bucket propio, no en el de prosa: la evidencia de visión no
+    # debe alterar el tiempo estimado con el que se elige modelo para texto.
+    db = Database(tmp_path / "broker.db")
+    try:
+        rows = db.query_all(
+            "SELECT role, task_type, model, tokens_input, tokens_output, latency_ms, status "
+            "FROM model_invocations",
+        )
+    finally:
+        db.close()
+    assert len(rows) == 1
+    assert rows[0]["role"] == "vision"
+    assert rows[0]["task_type"] == "vision"
+    assert rows[0]["model"] == "vision-test"
+    assert rows[0]["status"] == "completed"
+    # Los tokens son los que reportó el endpoint, no ceros de relleno.
+    assert (rows[0]["tokens_input"], rows[0]["tokens_output"]) == (812, 64)
+    assert rows[0]["latency_ms"] == 1500.0
 
 
 def test_video_pipeline_extracts_audio_then_transcribes(tmp_path, monkeypatch):
@@ -326,7 +418,7 @@ def _make_client_with_sandbox(tmp_path: Path) -> TestClient:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
         processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
-        ingestion=IngestionConfig(storage_dir=str(tmp_path / "files")),
+        ingestion=IngestionConfig(storage_dir=str(tmp_path / "files"), isolate_conversions=False),
         sandbox=SandboxConfig(enabled=True),
     )
     return TestClient(create_app(config))
@@ -568,7 +660,11 @@ def test_prompt_tester_rejects_pending_attachment(tmp_path, monkeypatch):
         release.set()
         assert response.status_code == 200
         assert "ATTACHED_FILE_NOT_READY" in response.text
-        assert client.get("/api/v1/queue").json()["pending"] == []
+        # La cola sí tiene trabajo pendiente: la conversión del fichero, que
+        # desde los carriles es una tarea visible. Lo que NO debe haberse
+        # encolado es la inferencia que dependía de un adjunto no listo.
+        pending = client.get("/api/v1/queue").json()["pending"]
+        assert [item["kind"] for item in pending] == ["ingestion"]
 
 
 # ------------------------------------------------------------------ seguridad
@@ -714,12 +810,7 @@ def test_dashboard_markdown_uses_authenticated_dashboard_session(tmp_path, monke
             headers=admin,
         ).json()
         file_id = body["file_id"]
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            state = client.get(f"/api/v1/files/{file_id}", headers=admin).json()
-            if state["status"] in {"ready", "failed"}:
-                break
-            time.sleep(0.05)
+        state = wait_for_file(client, file_id, headers=admin)
         assert state["status"] == "ready"
 
         anonymous = client.get(

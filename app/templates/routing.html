@@ -105,7 +105,12 @@
           <table>
             <thead>
               <tr>
+                {# La primera columna de medida es el tiempo estimado porque es
+                   el criterio con el que se elige; latencia y éxito quedan
+                   detrás como las piezas de las que sale. #}
                 <th scope="col">Modelo</th>
+                <th scope="col">Tiempo estimado</th>
+                <th scope="col">Ritmo</th>
                 <th scope="col">Invocaciones</th>
                 <th scope="col">Éxito</th>
                 <th scope="col">Latencia media</th>
@@ -117,6 +122,10 @@
               {% for row in group.rows %}
                 <tr>
                   <td><strong>{{ row.provider }}/{{ row.model }}</strong> <small>({{ row.deployment }})</small></td>
+                  <td{% if row.estimate_detail %} title="{{ row.estimate_detail }}"{% endif %}>
+                    {{ ('%.1f s'|format(row.estimated_seconds)) if row.estimated_seconds is not none else 'sin medir' }}
+                  </td>
+                  <td>{{ (row.tokens_per_second ~ ' tok/s') if row.tokens_per_second is not none else '—' }}</td>
                   <td>{{ row.attempts }}</td>
                   <td>{{ row.success_rate }}%</td>
                   <td>{{ (row.avg_latency_ms ~ ' ms') if row.avg_latency_ms is not none else '—' }}</td>

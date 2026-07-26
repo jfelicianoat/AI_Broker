@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 from app.config import BrokerConfig, TaskAffinityConfig, effective_max_parallel_invocations
 from app.model_enrichment import ModelEnrichment
 from app.model_stats import ModelKey, ModelStats
+from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
 from app.providers.base import (
     ROLE_SYSTEM_PROMPTS,
@@ -18,6 +20,7 @@ from app.providers.base import (
     ModelOutput,
     ProviderError,
     context_fits_with_capped_output,
+    estimate_input_tokens,
     estimate_required_context,
     neutralize_consensus_delimiters,
     role_system_prompt,
@@ -37,6 +40,11 @@ from app.schemas import (
 from app.task_classifier import classify_task_type
 
 logger = logging.getLogger("ai_broker.routing")
+
+# El conjunto de modelos en VRAM se consulta al runtime y cambia al cargar o
+# descargar uno. Con caché corta se evita una consulta por candidato sin que el
+# dato llegue a envejecer dentro de una misma decisión.
+_LOADED_MODELS_TTL_SECONDS = 2.0
 
 
 def _entry_key(entry: dict[str, Any], task_type: str) -> ModelKey:
@@ -101,6 +109,10 @@ class RoutedModelProvider:
         self._parallel_limit = effective_max_parallel_invocations(config)
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(self._parallel_limit)
+        # Carril propio de las medidas en segundo plano (sondeo en sombra):
+        # nunca compite por los slots que sirven respuestas, y de uno en uno
+        # porque solo se mide a un aspirante a la vez.
+        self._background_inference_slot = asyncio.Semaphore(1)
         self.prompt_compressor = self._build_prompt_compressor(config)
         self.model_enrichment = ModelEnrichment(
             config.model_enrichment,
@@ -108,6 +120,9 @@ class RoutedModelProvider:
         )
         # Caché de sondas de salud: provider_id -> (expira_en_monotonic, resultado).
         self._health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        # Modelos en VRAM: (expira_en_monotonic, nombres) o None si no se pudo
+        # consultar. Alimenta la estimación de tiempo (caliente vs frío).
+        self._loaded_models_cache: tuple[float, frozenset[str] | None] | None = None
 
     @staticmethod
     def _build_prompt_compressor(config: BrokerConfig) -> PromptCompressor:
@@ -168,6 +183,7 @@ class RoutedModelProvider:
         # El conjunto de proveedores puede haber cambiado: las sondas cacheadas
         # dejan de ser representativas.
         self._health_cache.clear()
+        self._loaded_models_cache = None
 
         # Con lo nuevo ya en su sitio, cerrar los clientes reemplazados.
         for provider in old_custom.values():
@@ -291,6 +307,11 @@ class RoutedModelProvider:
                 "latency_ms": (asyncio.get_running_loop().time() - started) * 1000,
             }
 
+    def model_stats_snapshot(self) -> dict[ModelKey, ModelStats]:
+        """Evidencia operativa actual. La usa el sondeo en sombra para saber a
+        quién le falta medida; la selección la consume por la vía interna."""
+        return self._load_stats()
+
     def _load_stats(self) -> dict[ModelKey, ModelStats]:
         """Evidencia operativa, o vacío si no hay loader o falla la lectura.
         La selección nunca debe caerse por un problema leyendo métricas."""
@@ -313,22 +334,31 @@ class RoutedModelProvider:
         return stat.attempts if stat is not None else 0
 
     def _rank_candidates(
-        self, catalog: list[dict[str, Any]], request: TaskCreateRequest,
+        self,
+        catalog: list[dict[str, Any]],
+        request: TaskCreateRequest,
+        loaded_models: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Ordena los candidatos por score multiobjetivo (config.routing).
+        """Ordena los candidatos por TIEMPO ESPERADO hasta una respuesta buena.
 
-        Componentes en [0, 1]: fiabilidad (tasa de éxito con suavizado de
-        Laplace), latencia y coste (normalizados min-max entre los candidatos
-        de esta selección; menor es mejor). Un modelo sin historial suficiente
-        puntúa neutro (0.5) en todo: el arranque en frío no castiga.
+        Sustituye al score multiobjetivo sin unidades que había antes. El
+        criterio es el del usuario final: cuanto menos espera, mejor. La
+        estimación (app.model_timing) parte de la latencia medida, elige la
+        media en caliente o en frío según el estado actual de la VRAM, y la
+        divide por la tasa de éxito, porque un modelo que falla obliga a
+        reintentar y ese reintento también es espera.
 
-        A igualdad de score NO se conserva el orden del catálogo: eso ataba la
-        elección al primer modelo que devolviera el proveedor (en Ollama, el
-        último que se descargó) y, como con todo neutro empatan todos, ese
-        modelo se llevaba cada petición para siempre. El desempate lo decide
-        _evidence_rank: primero se termina de puntuar al que ya está a medias,
-        luego los no probados, y por último los que ya tienen evidencia
-        (el menos usado primero).
+        Los modelos SIN evidencia suficiente no se puntúan: no se les inventa
+        un tiempo, así que van detrás de todos los medidos. No quedan
+        condenados, porque la exploración y el sondeo en sombra son los que
+        les consiguen las medidas sin hacer esperar a nadie. Entre ellos, el
+        desempate lo decide _evidence_rank: primero el que ya está a medias,
+        luego los no probados, después los medidos por debajo del umbral.
+
+        En arranque en frío absoluto (nadie tiene historial) todos empatan sin
+        estimación y el orden lo pone _evidence_rank, no el catálogo: atarlo al
+        orden del proveedor daba siempre la petición al último modelo que se
+        hubiera descargado en Ollama.
 
         Las métricas se filtran por el tipo de tarea de `request`
         (app.task_classifier): un modelo bueno en prosa no hereda ese
@@ -344,62 +374,84 @@ class RoutedModelProvider:
         # necesita para dejar de serlo.
         stats = self._load_stats()
         task_type = classify_task_type(request)
-
-        def usable(entry: dict[str, Any]) -> ModelStats | None:
-            stat = stats.get(_entry_key(entry, task_type))
-            if stat is None or stat.attempts < routing.min_invocations:
-                return None
-            return stat
-
-        def min_max_score(value: float | None, values: list[float]) -> float:
-            if value is None or not values:
-                return 0.5
-            low, high = min(values), max(values)
-            if high <= low:
-                return 0.5
-            # Invertido: menor latencia/coste puntúa más alto.
-            return 1.0 - (value - low) / (high - low)
-
-        latencies = [s.avg_latency_ms for e in catalog if (s := usable(e)) and s.avg_latency_ms is not None]
-        costs = [s.avg_cost_usd for e in catalog if (s := usable(e)) and s.avg_cost_usd is not None]
-        total_weight = routing.success_weight + routing.latency_weight + routing.cost_weight
-
-        def score(entry: dict[str, Any]) -> float:
-            stat = usable(entry)
-            if stat is None:
-                success_component = latency_component = cost_component = 0.5
-            else:
-                success_component = stat.success_rate
-                latency_component = min_max_score(stat.avg_latency_ms, latencies)
-                cost_component = min_max_score(stat.avg_cost_usd, costs)
-            return (
-                routing.success_weight * success_component
-                + routing.latency_weight * latency_component
-                + routing.cost_weight * cost_component
-            ) / total_weight
+        # Nivel 0: la carga real de esta petición, calculada sin coste (es el
+        # mismo recuento determinista que decide si cabe en el contexto). Sin
+        # esto, el ranking compararía modelos por lo que tardaron con la
+        # petición media, no con la que hay delante.
+        request_tokens = estimate_input_tokens(request)
+        estimates = {
+            id(entry): estimate_seconds(
+                stats.get(_entry_key(entry, task_type)),
+                loaded=self._loaded_state(entry, loaded_models),
+                min_invocations=routing.min_invocations,
+                request_tokens=request_tokens,
+            )
+            for entry in catalog
+        }
 
         def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple:
             index, entry = indexed
+            estimate = estimates[id(entry)]
             attempts = self._attempts(stats, entry, task_type)
-            # El score manda; el redondeo evita que el ruido del float deshaga
-            # empates que conceptualmente lo son (todo neutro = 0.5).
-            return (
-                -round(score(entry), 6),
-                *self._evidence_rank(attempts, routing.min_invocations),
-                index,
-            )
+            if estimate is not None:
+                # Bucket 0: hay medida. Ordena por segundos, de menos a más.
+                return (0, round(estimate.seconds, 3), 0, 0, index)
+            return (1, 0.0, *self._evidence_rank(attempts, routing.min_invocations), index)
+
+        def describe(entry: dict[str, Any]) -> str:
+            estimate = estimates[id(entry)]
+            seconds = "sin medir" if estimate is None else f"{estimate.seconds:.1f}s"
+            return f"{entry['provider']}/{entry['name']}: {seconds}"
 
         ranked = [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
         if ranked != catalog:
             logger.debug(
-                "routing.adaptive_ranking",
+                "routing.time_ranking",
                 extra={
-                    "event": "routing.adaptive_ranking",
+                    "event": "routing.time_ranking",
                     "task_type": task_type,
-                    "ranking": [f"{e['provider']}/{e['name']}:{score(e):.3f}" for e in ranked[:5]],
+                    "ranking": [describe(entry) for entry in ranked[:5]],
                 },
             )
         return self._apply_exploration(ranked, routing, stats, task_type)
+
+    @staticmethod
+    def _loaded_state(
+        entry: dict[str, Any], loaded_models: frozenset[str] | None,
+    ) -> bool | None:
+        """¿Está este modelo cargado ahora mismo? None cuando la pregunta no
+        aplica (cloud no carga nada) o no se pudo responder."""
+        if loaded_models is None or not is_local_deployment(entry.get("deployment")):
+            return None
+        return str(entry.get("name") or "") in loaded_models
+
+    async def loaded_local_models(self) -> frozenset[str] | None:
+        """Modelos actualmente en VRAM, con caché corta.
+
+        Es estado real del sistema consultado en el instante de decidir, no un
+        prior: un modelo local ya cargado responde en segundos y el mismo
+        modelo en frío paga primero la carga desde disco. La caché evita una
+        consulta al runtime por cada candidato de cada selección; el TTL es
+        corto porque el dato caduca en cuanto entra o sale un modelo."""
+        now = time.monotonic()
+        cached = self._loaded_models_cache
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        try:
+            snapshot = await self.resource_snapshot()
+        except Exception:
+            # La selección no puede caerse porque el runtime no conteste: sin
+            # el dato se estima con la media global, que sigue siendo medida.
+            logger.debug("routing.loaded_models_unavailable", exc_info=True)
+            self._loaded_models_cache = (now + _LOADED_MODELS_TTL_SECONDS, None)
+            return None
+        names = frozenset(
+            str(item.get("model"))
+            for item in snapshot.get("loaded_models") or []
+            if item.get("model")
+        )
+        self._loaded_models_cache = (now + _LOADED_MODELS_TTL_SECONDS, names)
+        return names
 
     @staticmethod
     def _evidence_rank(attempts: int, min_invocations: int) -> tuple[int, int]:
@@ -513,9 +565,24 @@ class RoutedModelProvider:
             )
         return kept
 
-    async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
-        allowed = {item.lower() for item in request.model_requirements.allowed_providers}
-        catalog = [item for item in await self.models() if item["provider"].lower() in allowed]
+    async def eligible_catalog(
+        self, request: TaskCreateRequest,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Los tres conjuntos de elegibilidad de una petición, en orden de
+        restricción creciente: (permitido, capaz, cabe en contexto).
+
+        Extraído de `select` para que el sondeo en sombra (app.shadow_probe)
+        elija aspirantes con EXACTAMENTE los mismos filtros —sobre todo la
+        frontera de datos—. Duplicar esta cadena en otro sitio sería la forma
+        más fácil de abrir un agujero de privacidad sin darse cuenta.
+        """
+        declared_providers = request.model_requirements.allowed_providers
+        catalog = list(await self.models())
+        if declared_providers is not None:
+            # None = sin restricción: entra todo el catálogo configurado y la
+            # frontera la pone la clasificación de datos, no una lista fija.
+            allowed = {item.lower() for item in declared_providers}
+            catalog = [item for item in catalog if item["provider"].lower() in allowed]
         if not request.model_requirements.cloud_allowed:
             # Fail-closed: sin cloud_allowed solo entran deployments locales;
             # "api" o valores desconocidos se tratan como externos.
@@ -526,18 +593,25 @@ class RoutedModelProvider:
             item for item in catalog
             if required_capability in set(item.get("capabilities") or (["completion"] if required_capability == "completion" else []))
         ]
-        required_context = estimate_required_context(request)
         context_catalog = [
             item for item in capability_catalog
             if context_fits_with_capped_output(request, item.get("context_window"))
         ]
+        return catalog, capability_catalog, context_catalog
+
+    async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
+        catalog, capability_catalog, context_catalog = await self.eligible_catalog(request)
+        required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
+        required_context = estimate_required_context(request)
         # Idoneidad + selección adaptativa. `context_catalog` sigue siendo el
         # conjunto ELEGIBLE (lo que el broker puede atender) y decide los
         # errores de más abajo; `ranked_catalog` es el conjunto PREFERIBLE ya
         # ordenado, del que sale la elección por defecto. target_model y
         # preferred_model tienen prioridad absoluta sobre ambos.
         ranked_catalog = self._rank_candidates(
-            self._filter_by_task_affinity(context_catalog, request), request,
+            self._filter_by_task_affinity(context_catalog, request),
+            request,
+            await self.loaded_local_models(),
         )
         target = request.model_requirements.target_model
         if target is not None:
@@ -627,6 +701,14 @@ class RoutedModelProvider:
         if request.execution.strategy == ExecutionStrategy.mixture_of_agents:
             system = role_system_prompt(model.role) or ROLE_SYSTEM_PROMPTS["proposer"]
         return await self._generate(request, model, self.user_prompt(request), system=system)
+
+    async def measure(self, request: TaskCreateRequest, model: ModelReference) -> ModelOutput:
+        """Invocación cuyo único producto es la medida: nadie espera su salida.
+
+        La usa el sondeo en sombra (app.shadow_probe) para dar evidencia a un
+        modelo que aún no la tiene, sin que ningún usuario pague la espera. Se
+        ejecuta por un carril aparte del que sirve respuestas."""
+        return await self._generate(request, model, self.user_prompt(request), background=True)
 
     def _resolve_agent_provider(self, model: ModelReference) -> Any:
         """Proveedor con soporte de chat+tools para el modelo agéntico."""
@@ -738,17 +820,28 @@ class RoutedModelProvider:
         model: ModelReference,
         prompt: str,
         system: str | None = None,
+        *,
+        background: bool = False,
     ) -> ModelOutput:
         allow_parallel = (
             request.execution.strategy == ExecutionStrategy.mixture_of_agents
             and request.execution.preset == ExecutionPreset.slow
         )
-        inference_slot = self._parallel_inference_slot if allow_parallel else self._serial_inference_slot
+        if background:
+            # Una medida en segundo plano NO puede ocupar el slot que sirve
+            # respuestas: si lo hiciera, la siguiente tarea de la cola
+            # esperaría a que terminase el sondeo, que es justo la espera que
+            # todo este trabajo pretende eliminar. Tiene su propio carril de
+            # uno en uno.
+            inference_slot = self._background_inference_slot
+        else:
+            inference_slot = self._parallel_inference_slot if allow_parallel else self._serial_inference_slot
         async with inference_slot:
-            allowed = {item.lower() for item in request.model_requirements.allowed_providers}
+            declared = request.model_requirements.allowed_providers
+            allowed = {item.lower() for item in declared} if declared is not None else None
             provider_name = model.provider.lower()
             embedding = request.inference_kind == InferenceKind.embedding
-            if provider_name not in allowed:
+            if allowed is not None and provider_name not in allowed:
                 raise ProviderError("PROVIDER_NOT_ALLOWED", f"Proveedor no permitido: {model.provider}")
             if provider_name == "ollama":
                 if not self.config.providers.ollama.enabled:

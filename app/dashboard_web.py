@@ -31,7 +31,7 @@ from app.config import (
     save_config,
 )
 from app.coordinator import ConsensusCoordinator
-from app.dashboard import DashboardQueryRepository
+from app.dashboard import DashboardQueryRepository, lane_capacities
 from app.dashboard_filters import register_filters
 from app.dashboard_forms import (
     PromptTesterError,
@@ -50,6 +50,7 @@ from app.dashboard_forms import (
 from app.ingestion.detection import ALLOWED_FORMATS
 from app.ingestion.service import AttachmentError, stream_upload_to_temp
 from app.model_stats import load_model_stats
+from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.providers.routing import task_affinity_excluded, task_affinity_patterns
@@ -186,7 +187,7 @@ def create_dashboard_router(
     @protected.get("/dashboard", response_class=HTMLResponse)
     async def dashboard(request: Request):
         context: dict[str, Any] = {
-            "summary": queries.summary(window_hours=24),
+            "summary": queries.summary(window_hours=24, lane_capacities=lane_capacities(config)),
             "queue": queries.list_tasks(page=1, page_size=5, status=TaskStatus.queued, origin=None),
             "active": queries.active_task_detail(),
             "health": await health_loader(),
@@ -382,7 +383,7 @@ def create_dashboard_router(
                 request, "files.html", _files_page_context(upload_error=str(error)),
             )
         if created:
-            ingestion.launch(record.id)
+            ingestion.enqueue(repository, record.id)
         return RedirectResponse("/dashboard/files", status_code=303)
 
     @protected.post("/dashboard/actions/files/{file_id}/delete", status_code=204)
@@ -406,7 +407,9 @@ def create_dashboard_router(
                 selected = queries.task_detail(task_id)
             except KeyError as error:
                 raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
-            if selected.task.execution_strategy.value != "mixture_of_agents":
+            # Una conversión no tiene estrategia (execution_strategy es None):
+            # tampoco es un mixture, así que cae por el mismo camino.
+            if getattr(selected.task.execution_strategy, "value", None) != "mixture_of_agents":
                 raise HTTPException(status_code=422, detail="TASK_IS_NOT_MIXTURE")
             comparison_view = _comparison_view(selected)
         elif tasks.items:
@@ -455,7 +458,7 @@ def create_dashboard_router(
         return templates.TemplateResponse(
             request=request,
             name="fragments/summary.html",
-            context={"summary": queries.summary(window_hours=24)},
+            context={"summary": queries.summary(window_hours=24, lane_capacities=lane_capacities(config))},
         )
 
     @protected.get("/dashboard/fragments/queue", response_class=HTMLResponse)
@@ -1037,7 +1040,15 @@ def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[
     return insights
 
 
-_TASK_TYPE_LABELS = {"code": "Código", "long_context": "Contexto largo", "prose": "Prosa"}
+_TASK_TYPE_LABELS = {
+    "code": "Código",
+    "long_context": "Contexto largo",
+    "prose": "Prosa",
+    # Bucket propio de las descripciones de figuras (app.ingestion.service).
+    # No compite en la selección de modelo para texto, pero sí se enseña: es
+    # trabajo real de un modelo real y se paga en GPU.
+    "vision": "Visión",
+}
 
 
 def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) -> dict[str, Any]:
@@ -1049,6 +1060,10 @@ def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) ->
     stats = load_model_stats(repository.db, window_days=routing.stats_window_days)
     groups: dict[str, list[dict[str, Any]]] = {}
     for (provider, deployment, model, task_type), stat in stats.items():
+        # El mismo cálculo que decide el enrutado, para que el panel enseñe el
+        # criterio real y no una aproximación parecida. `loaded=None` porque
+        # esta vista no mira la VRAM: el tiempo se muestra sin distinguir carga.
+        estimate = estimate_seconds(stat, loaded=None, min_invocations=routing.min_invocations)
         groups.setdefault(task_type, []).append({
             "provider": provider,
             "deployment": deployment,
@@ -1057,14 +1072,26 @@ def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) ->
             "success_rate": round(stat.success_rate * 100),
             "avg_latency_ms": round(stat.avg_latency_ms) if stat.avg_latency_ms is not None else None,
             "avg_cost_usd": stat.avg_cost_usd,
+            "estimated_seconds": round(estimate.seconds, 1) if estimate is not None else None,
+            "estimate_detail": estimate.explain() if estimate is not None else None,
+            "tokens_per_second": (
+                round(estimate.tokens_per_second)
+                if estimate is not None and estimate.tokens_per_second is not None
+                else None
+            ),
             "usable": stat.attempts >= routing.min_invocations,
         })
     task_groups = []
     for task_type in sorted(groups, key=lambda t: _TASK_TYPE_LABELS.get(t, t)):
+        # Mismo orden que usa el router: primero los que tienen estimación, de
+        # menos segundos a más; después los que aún no la tienen.
         rows = sorted(
             groups[task_type],
-            key=lambda r: (r["usable"], r["success_rate"], r["attempts"]),
-            reverse=True,
+            key=lambda r: (
+                r["estimated_seconds"] is None,
+                r["estimated_seconds"] if r["estimated_seconds"] is not None else 0.0,
+                -r["attempts"],
+            ),
         )
         task_groups.append({
             "task_type": task_type,
@@ -1312,9 +1339,10 @@ def _comparison_warnings(
     warnings: list[str] = []
     if not timeline_available:
         warnings.append("No hay timestamps started_at/completed_at suficientes para demostrar solapamiento real.")
-    if detail.task.execution_preset.value == "fast":
+    preset = getattr(detail.task.execution_preset, "value", None)
+    if preset == "fast":
         warnings.append("fast se representa como secuencia serial; no se debe interpretar como paralelismo.")
-    if detail.task.execution_preset.value == "slow" and timeline_available and not overlap_detected:
+    if preset == "slow" and timeline_available and not overlap_detected:
         warnings.append("slow fue solicitado, pero las invocaciones registradas no muestran solapamiento.")
     if detail.result is None:
         warnings.append("La tarea aun no tiene resultado terminal; solo se muestra estado persistido.")

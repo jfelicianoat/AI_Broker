@@ -114,7 +114,7 @@ Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecc
 - La accion construye `TaskCreateRequest` y usa `TaskRepository.create_task`; no llama a providers directamente.
 - Implementados modos `single` exacto y `mixture_of_agents/fast|slow` manual con proponentes, roles y arbitro.
 - JSON de entrada invalido no crea tarea; JSON valido se conserva como `content.prompt`.
-- `fallback_allowed` y `cloud_allowed` no se activan implicitamente.
+- `fallback_allowed` no se activa implicitamente. El permiso de cloud ya no es una casilla: lo deriva el broker de la clasificación de datos elegida (contrato 2.6).
 - El request validado se muestra escapado y las pruebas cubren XSS basico.
 - Pendiente: historial HTML del probador, cancelacion/repeticion desde la pantalla, resultado raw/uso/fallback/metadata de consenso y seguridad 5.5.
 

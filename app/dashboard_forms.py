@@ -21,7 +21,14 @@ from app.config import (
 )
 from app.logging_config import configure_logging
 from app.providers.base import infer_openai_compatible_capabilities
-from app.schemas import ModelReference, OutputFormat, TaskCreateRequest, is_local_deployment
+from app.schemas import (
+    DataClassification,
+    ModelReference,
+    OutputFormat,
+    TaskCreateRequest,
+    classification_allows_cloud,
+    is_local_deployment,
+)
 
 
 class PromptTesterError(ValueError):
@@ -74,13 +81,11 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'prompt_compression_level': ('Nivel de compresión', 'Compresión de prompts'),
     'prompt_compression_min_chars': ('Mínimo de caracteres para comprimir', 'Compresión de prompts'),
     'queue_max_size': ('Tamaño máximo de cola', 'Configuración'),
-    'routing_cost_weight': ('Peso — coste', 'Selección adaptativa de modelo'),
     'routing_exploration_rate': ('Tasa de exploración (0-1)', 'Selección adaptativa de modelo'),
-    'routing_latency_weight': ('Peso — latencia', 'Selección adaptativa de modelo'),
     'routing_min_invocations': ('Mín. invocaciones para puntuar (arranque en frío)', 'Selección adaptativa de modelo'),
     'routing_stats_window_days': ('Ventana de histórico (días)', 'Selección adaptativa de modelo'),
-    'routing_success_weight': ('Peso — fiabilidad', 'Selección adaptativa de modelo'),
     'sandbox_cpus': ('CPUs', 'Sandbox de código'),
+    'shadow_probe_max_prompt_chars': ('Máx. caracteres de prompt para sondear', 'Sondeo en sombra'),
     'sandbox_docker_path': ('Binario docker', 'Sandbox de código'),
     'sandbox_image': ('Imagen Docker', 'Sandbox de código'),
     'sandbox_max_output_chars': ('Salida máxima (caracteres)', 'Sandbox de código'),
@@ -131,7 +136,6 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "output_format": "markdown",
         "json_schema": "",
         "data_classification": "internal",
-        "cloud_allowed": "",
         "fallback_allowed": "",
         "timeout_seconds": "600",
         "max_cost_usd": "",
@@ -414,10 +418,15 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
             "adaptive_selection": _checked(form, "routing_adaptive_selection"),
             "stats_window_days": _int_range_field(form, "routing_stats_window_days", minimum=1, maximum=365),
             "min_invocations": _int_range_field(form, "routing_min_invocations", minimum=1, maximum=1000),
-            "success_weight": _float_range_field(form, "routing_success_weight", minimum=0.0, maximum=10.0),
-            "latency_weight": _float_range_field(form, "routing_latency_weight", minimum=0.0, maximum=10.0),
-            "cost_weight": _float_range_field(form, "routing_cost_weight", minimum=0.0, maximum=10.0),
             "exploration_rate": _float_range_field(form, "routing_exploration_rate", minimum=0.0, maximum=1.0),
+        }
+    if form.get("shadow_probe_max_prompt_chars") is not None:
+        payload["shadow_probe"] = {
+            "enabled": _checked(form, "shadow_probe_enabled"),
+            "probe_local_models": _checked(form, "shadow_probe_local_models"),
+            "max_prompt_chars": _int_range_field(
+                form, "shadow_probe_max_prompt_chars", minimum=1, maximum=1000000,
+            ),
         }
     if form.get("task_affinity_exclude_always") is not None:
         payload["task_affinity"] = {
@@ -583,6 +592,9 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     # desde el panel persistía el YAML pero exploration_rate/pesos/etc.
     # seguían con el valor antiguo hasta reiniciar el proceso.
     target.routing = updated.routing
+    # ShadowProbe.settings lee config.shadow_probe en cada sondeo, así que
+    # activarlo o apagarlo desde el panel surte efecto sin reiniciar.
+    target.shadow_probe = updated.shadow_probe
     # Misma razón: el filtro de idoneidad se consulta en cada selección contra
     # el BrokerConfig compartido.
     target.task_affinity = updated.task_affinity
@@ -842,7 +854,14 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             ) from error
 
     strategy = form.get("strategy", "single")
-    cloud_allowed = _checked(form, "cloud_allowed")
+    # El probador ya no tiene casilla "Permitir cloud": la privacidad se declara
+    # una sola vez, en Clasificación de datos, y de ahí se deriva el permiso.
+    # Tener dos mandos que había que acertar a la vez era justo el problema.
+    try:
+        classification = DataClassification(form.get("data_classification", "internal"))
+    except ValueError as error:
+        raise PromptTesterError("Clasificación de datos no válida.") from error
+    cloud_allowed = classification_allows_cloud(classification)
     fallback_allowed = _checked(form, "fallback_allowed")
     if strategy == "single":
         target = _parse_model_reference(form.get("single_model", ""))
@@ -971,7 +990,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
         "model_requirements": model_requirements,
         "execution": execution,
         "risk": {
-            "data_classification": form.get("data_classification", "internal"),
+            "data_classification": classification.value,
             "human_review_required": False,
         },
         "priority": _int_field(form, "priority", 100),
@@ -1138,7 +1157,9 @@ def _ensure_cloud_allowed(models: list[ModelReference], cloud_allowed: bool) -> 
     ]
     if blocked:
         raise PromptTesterError(
-            "Marca Permitir cloud o selecciona solo modelos locales: " + ", ".join(blocked)
+            "Esta clasificación de datos no permite salir de la máquina: "
+            "cambia Clasificación de datos o selecciona solo modelos locales: "
+            + ", ".join(blocked)
         )
 
 

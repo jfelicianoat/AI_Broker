@@ -149,7 +149,7 @@
     <div class="subsection-heading">
       <div>
         <h3>Selección adaptativa de modelo</h3>
-        <p>Ordena los modelos candidatos por evidencia operativa (éxito, latencia, coste), segmentada por tipo de tarea — código, contexto largo, prosa — en vez de un único score agregado para todo. Detalle por modelo en <a href="/dashboard/routing">Enrutamiento</a>.</p>
+        <p>Ordena los modelos candidatos por el <strong>tiempo esperado hasta una respuesta correcta</strong>: la latencia medida, corregida por la tasa de éxito y por si el modelo está ya cargado en VRAM. La evidencia se segmenta por tipo de tarea — código, contexto largo, prosa —. Un modelo sin medidas suficientes no recibe un tiempo inventado: espera a tenerlas. Detalle por modelo en <a href="/dashboard/routing">Enrutamiento</a>.</p>
       </div>
       <span class="badge badge-neutral">routing</span>
     </div>
@@ -169,21 +169,39 @@
         <span>Mín. invocaciones para puntuar (arranque en frío)</span>
         <input name="routing_min_invocations" value="{{ routing.min_invocations }}" inputmode="numeric">
       </label>
-      <label class="field">
-        <span>Peso — fiabilidad</span>
-        <input name="routing_success_weight" value="{{ routing.success_weight }}" inputmode="decimal">
-      </label>
-      <label class="field">
-        <span>Peso — latencia</span>
-        <input name="routing_latency_weight" value="{{ routing.latency_weight }}" inputmode="decimal">
-      </label>
-      <label class="field">
-        <span>Peso — coste</span>
-        <input name="routing_cost_weight" value="{{ routing.cost_weight }}" inputmode="decimal">
-      </label>
+      {# Los tres pesos del score multiobjetivo se retiraron el 2026-07-26: el
+         ranking ya no combina componentes sin unidades, estima el tiempo
+         esperado en segundos. Dejarlos aquí sin efecto sería peor que
+         quitarlos —un mando que se mueve y no cambia nada—. #}
       <label class="field">
         <span>Tasa de exploración (0-1)</span>
         <input name="routing_exploration_rate" value="{{ routing.exploration_rate }}" inputmode="decimal">
+      </label>
+    </div>
+  </div>
+  <div class="config-subsection">
+    <div class="subsection-heading">
+      <div>
+        <h3>Sondeo en sombra</h3>
+        <p>Mide los modelos que aún no tienen evidencia <strong>sin que nadie espere</strong>: cuando una tarea ya ha terminado, se invoca a un aspirante con el mismo prompt solo para cronometrarlo y se descarta su salida. Se mide un modelo cada vez, hasta completar su evidencia. El sondeo hereda la clasificación de datos de la tarea que lo origina, así que una tarea confidencial solo sondea modelos locales.</p>
+      </div>
+      <span class="badge badge-neutral">shadow_probe</span>
+    </div>
+    <div class="form-body config-grid">
+      {% set shadow = config.shadow_probe %}
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="shadow_probe_enabled" {% if shadow.enabled %}checked{% endif %}>
+          Activar el sondeo en sombra
+        </label>
+        <label>
+          <input type="checkbox" name="shadow_probe_local_models" {% if shadow.probe_local_models %}checked{% endif %}>
+          Sondear también modelos locales (solo con la máquina ociosa)
+        </label>
+      </div>
+      <label class="field">
+        <span>Máx. caracteres de prompt para sondear</span>
+        <input name="shadow_probe_max_prompt_chars" value="{{ shadow.max_prompt_chars }}" inputmode="numeric">
       </label>
     </div>
   </div>

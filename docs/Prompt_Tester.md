@@ -125,6 +125,6 @@ La UI presenta códigos tipados como `CONTRACT_VALIDATION_FAILED`, `MODEL_UNAVAI
 - Validacion sintactica de JSON sin interpretar su semantica.
 - Encolado de `single` con `target_model.provider/deployment/model`.
 - Encolado de `mixture_of_agents/fast|slow` con `selection.mode = manual`.
-- `fallback_allowed` y `cloud_allowed` solo se activan cuando el usuario los marca.
+- `fallback_allowed` solo se activa cuando el usuario lo marca. La casilla «Permitir cloud» se retiró: tener dos mandos de privacidad que había que acertar a la vez era el problema, así que el permiso se deriva del desplegable «Clasificación de datos» (Confidencial y Solo local se quedan en la máquina).
 - El contenido del usuario y el preview se escapan como texto.
 - Pruebas de integracion para render, JSON invalido sin tarea, single exacto, mixture manual y XSS basico.

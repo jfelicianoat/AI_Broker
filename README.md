@@ -12,7 +12,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Un nivel más abajo:** es un servicio que corre en tu propio ordenador (no depende de ninguna nube para funcionar), expone una API y un panel web local, y gestiona una cola de tareas de inferencia. Cada tarea declara qué necesita (privacidad, coste máximo, formato de salida) y el broker decide qué modelo o modelos la ejecutan, entre los que tengas en Ollama, LM Studio o proveedores de API como DeepSeek o NVIDIA.
 
-**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.5) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
+**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.6) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
 
 ## 2. Qué sabe hacer
 
@@ -65,11 +65,15 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Para empezar:** no todos los modelos valen para todo, y algunos fallan más que otros. El broker aprende de la experiencia: recuerda qué modelos responden bien, rápido y barato, y prefiere esos. Antes de usar un modelo comprueba qué sabe hacer de verdad (¿entiende imágenes? ¿puede usar herramientas?), en lugar de fiarse del nombre. Y no manda a un especialista en código a redactar prosa solo porque esté a mano.
 
-**Las capas de decisión:** primero se filtran los candidatos por **elegibilidad** (proveedores permitidos, política cloud/local, capacidad requerida, ventana de contexto suficiente) y por **idoneidad** (`task_affinity`: qué modelos *deberían* atender cada tipo de tarea); después se reordenan por un score multiobjetivo sobre evidencia real — tasa de éxito con suavizado de Laplace, latencia y coste medios normalizados min-max — calculado sobre `model_invocations` en una ventana configurable. Un modelo sin historial puntúa neutro (el arranque en frío no castiga). `target_model`/`preferred_model` mantienen prioridad absoluta sobre ambas capas.
+**Las capas de decisión:** primero se filtran los candidatos por **elegibilidad** (proveedores permitidos, frontera de datos, capacidad requerida, ventana de contexto suficiente) y por **idoneidad** (`task_affinity`: qué modelos *deberían* atender cada tipo de tarea); después se ordenan por **tiempo esperado hasta una respuesta correcta**, en segundos, calculado sobre `model_invocations` en una ventana configurable. `target_model`/`preferred_model` mantienen prioridad absoluta sobre ambas capas.
+
+**Cómo se estiman esos segundos:** de la latencia medida se separa primero la **carga desde disco** (la diferencia entre la media en frío y la media en caliente del propio modelo, no una constante inventada), que es coste fijo y solo se suma si el modelo no está ahora mismo en VRAM. El resto se convierte en un **ritmo en tokens/segundo** dividiéndolo entre los tokens que lo provocaron, y se reaplica al tamaño de esta petición más la salida media observada de ese modelo. El total se divide por la **tasa de éxito** con suavizado de Laplace: con probabilidad de éxito *p* el número esperado de intentos es 1/*p*, así que un modelo que falla tarda más en dar algo útil. El resultado es explicable en una frase y contrastable contra un cronómetro — «4,2 s estimados (3,8 s medido en caliente, modelo ya en VRAM; éxito 92% sobre 24 invocaciones)» — en vez de un score sin unidades.
 
 **Idoneidad por tipo de tarea (`task_affinity`):** los filtros de elegibilidad solo responden a "¿puede este modelo atender la petición?". Sin una capa que responda a "¿debería?", un modelo de código es candidato de pleno derecho para redactar prosa, y un guardarraíl o un OCR entran en la rotación general. `exclude_always` aparta los modelos de propósito único; `exclude_by_task_type` aparta a los especialistas de código en `prose`/`long_context`. Los patrones son fnmatch (insensibles a mayúsculas) contra el nombre del modelo y su `catalog_id` de models.dev — el mismo modelo se llama distinto según el proveedor. El filtro es best-effort: si dejara la selección sin candidatos se ignora, porque una preferencia nunca debe convertir en irresoluble una tarea atendible.
 
-**Cómo se reparte la evidencia:** el score solo distingue a los modelos que ya tienen `min_invocations` en ese tipo de tarea; el resto empatan en neutro, y ese empate es el caso normal al principio. Deshacerlo por orden de catálogo ataba cada petición al primer modelo que devolviera el proveedor (en Ollama, el último descargado), que así se llevaba el 100% del tráfico y era el único que acumulaba historial. El desempate lo decide ahora la evidencia pendiente: primero se remata al que ya está a medias, luego se estrena a los no probados, y por último van los ya medidos (el menos usado antes). Y cuando alguien gana por score, `exploration_rate` cede una fracción de las peticiones a los candidatos aún sin medir — dirigida, rematando de uno en uno: un sorteo uniforme sobre ~80 candidatos dispersaría las exploraciones en invocaciones sueltas que nunca llegan a `min_invocations`.
+**Cómo se reparte la evidencia:** solo se estima el tiempo de los modelos que ya tienen `min_invocations` en ese tipo de tarea. Al resto **no se le asigna un número inventado**: van detrás de todos los medidos, que es lo honesto —no compiten porque no se sabe nada de ellos, no porque se les suponga malos—. En arranque en frío absoluto nadie tiene medidas y el orden lo decide la evidencia pendiente: primero se remata al que ya está a medias, luego se estrena a los no probados. Deshacer ese empate por orden de catálogo ataba cada petición al primer modelo que devolviera el proveedor (en Ollama, el último descargado), que así se llevaba el 100% del tráfico y era el único que acumulaba historial.
+
+**Sondeo en sombra:** la vía por la que un modelo sin evidencia la consigue sin hacer esperar a nadie. Cuando una tarea ya ha terminado, se invoca a **un** aspirante con el mismo prompt solo para cronometrarlo y se descarta su salida; se mide un modelo cada vez, hasta completar su evidencia, y solo tras una tarea completada (con un prompt que acaba de fallar, el aspirante fallaría por un defecto ajeno). El sondeo **hereda la clasificación de datos** de la tarea que lo origina —una tarea confidencial solo puede sondear modelos locales— y a los modelos locales solo se les sondea con la máquina ociosa, porque compiten por la misma VRAM. Corre por un carril de ejecución propio: si ocupara el slot que sirve respuestas, la siguiente tarea de la cola esperaría por él. `exploration_rate` sigue existiendo como segunda vía, cediendo una fracción de peticiones reales a candidatos sin medir.
 
 **Historial anterior a `task_type`:** las métricas se segmentan por tipo de tarea, así que las invocaciones registradas antes de esa columna se descartan (sin clasificar no se sabe a qué segmento pertenecen) y el enrutamiento arranca en frío pese a tener meses de datos. `python scripts/backfill_task_type.py [--dry-run]` las reclasifica aplicando el mismo clasificador determinista a la petición ya guardada.
 
@@ -110,7 +114,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Capas de defensa:**
 
-- **Frontera de datos:** `data_classification: local_only` fuerza proveedores locales y desactiva cloud a nivel de contrato (validación, no convención). `cloud_allowed: false` es el default.
+- **Frontera de datos:** `risk.data_classification` es el mando único. `local_only` y `confidential` fuerzan proveedores locales y desactivan cloud a nivel de contrato (validación, no convención); `public` e `internal` permiten salir. De esa clasificación se **derivan** `cloud_allowed` y `allowed_providers` cuando la app cliente no los envía, así que no hay tres campos que acertar a la vez. Un `cloud_allowed: false` explícito se respeta siempre; un `true` explícito **no** puede saltarse una clasificación restrictiva.
 - **Anti-inyección sistemática:** candidatos del consenso, resultados de skills y documentos adjuntos viajan en sandboxes XML con delimitadores neutralizados; los system prompts marcan ese contenido como datos no confiables.
 - **SSRF:** `fetch_url` resuelve DNS y rechaza cualquier host no público (el dashboard del propio broker incluido).
 - **Sandbox:** el código generado por modelos jamás toca el host (sección 4).
@@ -173,8 +177,6 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
   "output": { "format": "markdown", "language": "es" },
   "generation": { "temperature": 0.3, "max_output_tokens": 4000 },
   "model_requirements": {
-    "cloud_allowed": false,
-    "allowed_providers": ["ollama", "lmstudio"],
     "max_cost_usd": 0.5
   },
   "execution": {
@@ -187,6 +189,8 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 }
 ```
 
+Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni `allowed_providers`. Desde el contrato 2.6 los deriva el broker de `risk.data_classification` — aquí `local_only`, así que la tarea no saldrá de la máquina. Enviarlos sigue siendo válido y manda sobre la derivación, con un límite: una clasificación restrictiva no se puede abrir con un `cloud_allowed: true`. Si tu app envía `internal` o `public`, el catálogo cloud entra en la selección sin que tengas que declarar nada más.
+
 **Endpoints:**
 
 | Endpoint | Método | Descripción |
@@ -198,24 +202,25 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 | `/api/v1/files` | POST | Subir fichero adjunto (multipart, `202`, dedupe SHA-256) |
 | `/api/v1/files/{id}` | GET | Estado de conversión, metadatos, tokens estimados |
 | `/api/v1/files/{id}/markdown` | GET | Markdown resultante (cuando `ready`) |
-| `/api/v1/queue` | GET / PATCH | Snapshot de cola / reordenar pendientes |
+| `/api/v1/queue` | GET / PATCH | Snapshot de cola (con `kind` por carril) / reordenar pendientes |
 | `/api/v1/models` | GET | Catálogo con compatibilidad y capacidades sondeadas |
 | `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
 | `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo |
-| `/api/v1/capabilities` | GET | Contrato 2.5: estrategias, presets, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, flags del router |
+| `/api/v1/capabilities` | GET | Contrato 2.6: estrategias, presets, `derived_data_boundary`, `work_lanes`, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, flags del router |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
-| `/api/v1/dashboard/*` | GET | Read models: summary, tasks, resources |
-| `/api/v1/dispatcher/tick` | POST | Tick manual de diagnóstico (el dispatcher es autónomo) |
+| `/api/v1/dashboard/*` | GET | Read models: summary (con `lanes`), tasks (filtrable por `kind`), resources |
+| `/api/v1/dispatcher/tick` | POST | Tick manual del carril de inferencia (el dispatcher es autónomo) |
+| `/api/v1/dispatcher/ingestion/tick` | POST | Tick manual del carril de conversiones |
 | `/health` `/health/live` `/health/ready` | GET | Salud detallada, liveness, readiness |
 
-**Detalle técnico del contrato:** validación Pydantic estricta (`extra="forbid"`; inválido → `422 CONTRACT_VALIDATION_FAILED` con campos). Idempotencia por `idempotency_key` + hash canónico del cuerpo: mismo cuerpo → `200` con la tarea original; cuerpo distinto → `409 IDEMPOTENCY_CONFLICT`. Adjuntos: solo `type: "broker_file"` con `file_id` (por `metadata.file_id` o `uri: broker://files/{id}`); ficheros no listos → `409 ATTACHED_FILE_NOT_READY`. Estados de progreso: `queued → routing/planning/resource_planning → generating|proposing → (evaluating) → synthesizing → completed`, más `waiting_for_tools`, y terminales `completed|failed|cancelled` desde cualquier estado. Recuperación al arranque: tareas activas vuelven a `queued` con `attempt+1` hasta `max_task_attempts` (después `failed` con `TASK_RETRY_LIMIT_EXCEEDED`). Guía de integración completa: [`Agent_AI_Broker.md`](Agent_AI_Broker.md).
+**Detalle técnico del contrato:** validación Pydantic estricta (`extra="forbid"`; inválido → `422 CONTRACT_VALIDATION_FAILED` con campos). Idempotencia por `idempotency_key` + hash canónico del cuerpo: mismo cuerpo → `200` con la tarea original; cuerpo distinto → `409 IDEMPOTENCY_CONFLICT`. Adjuntos: solo `type: "broker_file"` con `file_id` (por `metadata.file_id` o `uri: broker://files/{id}`); ficheros no listos → `409 ATTACHED_FILE_NOT_READY`. Estados de progreso: `queued → routing/planning/resource_planning → generating|proposing → (evaluating) → synthesizing → completed`, más `waiting_for_tools`, el `converting` del carril de ingesta, y terminales `completed|failed|cancelled` desde cualquier estado. Recuperación al arranque: tareas activas vuelven a `queued` con `attempt+1` hasta `max_task_attempts` (después `failed` con `TASK_RETRY_LIMIT_EXCEEDED`). Guía de integración completa: [`Agent_AI_Broker.md`](Agent_AI_Broker.md).
 
 ## 12. Estructura del proyecto
 
 ```
 ├── app/
 │   ├── main.py                # FastAPI app (factory) + endpoints API
-│   ├── schemas.py             # Contrato Pydantic completo (v2.5)
+│   ├── schemas.py             # Contrato Pydantic completo (v2.6)
 │   ├── coordinator.py         # Orquestación: single, mixture, agent, auto
 │   ├── strategy_router.py     # Meta-router: clasificador + aprendizaje
 │   ├── skills.py              # Skills del agente (web, URL, cálculo, código)
@@ -247,6 +252,7 @@ GET  /api/v1/tasks/{id}  →  { status: queued|…|completed, result }
 | [`Deployment_Guide.md`](Deployment_Guide.md) | Despliegue completo en Windows |
 | [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md) | Ingesta de ficheros adjuntos |
 | [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md) | Sandbox de ejecución de código |
+| [`docs/Phase_9_Speed_And_Lanes.md`](docs/Phase_9_Speed_And_Lanes.md) | Tiempo esperado, sondeo en sombra y carriles de trabajo |
 | [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) | Panel operativo (normativo para las pantallas) |
 | [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md) | Compresión de prompts |
 | [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md) | Probador de prompts |
