@@ -30,10 +30,15 @@
           <td class="position">{{ task.queue_position or '-' }}</td>
           <td>
             <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
-            <small>{{ task.origin or 'api' }}</small>
+            <small>{{ task.kind|lane_label }} · {{ task.origin or 'api' }}</small>
           </td>
           <td>
-            {% if task.requested_model %}
+            {# Una conversión no tiene modelo ni estrategia: lo que identifica
+               el trabajo es el fichero que se está convirtiendo. #}
+            {% if task.kind.value == 'ingestion' %}
+              <span>{{ task.label or 'Conversión de fichero' }}</span>
+              <small>Carril de conversiones</small>
+            {% elif task.requested_model %}
               <span>{{ task.requested_model.model }}</span>
               <small>{{ task.requested_model.provider }}/{{ task.requested_model.deployment }}</small>
             {% else %}

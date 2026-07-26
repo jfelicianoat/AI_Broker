@@ -70,10 +70,11 @@ routing:
   adaptive_selection: true
   stats_window_days: 7
   min_invocations: 3
-  success_weight: 0.5
-  latency_weight: 0.3
-  cost_weight: 0.2
   exploration_rate: 0.15
+shadow_probe:
+  enabled: true
+  probe_local_models: true
+  max_prompt_chars: 8000
 task_affinity:
   enabled: true
   exclude_always:

@@ -4,6 +4,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.config import BrokerConfig
 from app.db import Database, loads_json
 from app.repository import _parse_dt
 from app.schemas import (
@@ -15,11 +16,15 @@ from app.schemas import (
     DashboardTaskPage,
     ExecutionPreset,
     ExecutionStrategy,
+    LaneOccupancy,
     ModelReference,
+    TaskKind,
     TaskStatus,
     UsageResponse,
 )
 
+# Trabajo en vuelo en CUALQUIER carril, conversiones incluidas: es lo que el
+# panel debe llamar "activo" si quiere describir la carga real de la máquina.
 ACTIVE_STATUSES = (
     "routing",
     "planning",
@@ -31,7 +36,19 @@ ACTIVE_STATUSES = (
     "debating",
     "synthesizing",
     "verifying",
+    "converting",
 )
+
+
+def lane_capacities(config: BrokerConfig) -> dict[str, int]:
+    """Cuánto trabajo simultáneo admite cada carril.
+
+    Inferencia: el invariante de un único workflow. Ingesta: su propio tope,
+    configurable, que es lo que impide que subir cinco PDFs asfixie la máquina."""
+    return {
+        TaskKind.inference.value: config.processing.max_active_workflows,
+        TaskKind.ingestion.value: config.ingestion.max_concurrent,
+    }
 
 
 class DashboardQueryRepository:
@@ -40,7 +57,39 @@ class DashboardQueryRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def summary(self, *, window_hours: int) -> DashboardSummaryResponse:
+    def lane_occupancy(self, capacities: dict[str, int]) -> list[LaneOccupancy]:
+        """Cuánto trabajo hay en vuelo y en espera en cada carril.
+
+        Es la respuesta a «cuál es la carga real de la máquina»: hasta que las
+        conversiones fueron tareas, la mitad de esa carga no se podía contar."""
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        rows = self.db.query_all(
+            f"""
+            SELECT kind,
+                   SUM(CASE WHEN status IN ({placeholders}) THEN 1 ELSE 0 END) AS active,
+                   SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued
+            FROM tasks
+            GROUP BY kind
+            """,
+            ACTIVE_STATUSES,
+        )
+        counts = {str(row["kind"]): row for row in rows}
+        lanes: list[LaneOccupancy] = []
+        for kind in (TaskKind.inference, TaskKind.ingestion):
+            row = counts.get(kind.value)
+            lanes.append(
+                LaneOccupancy(
+                    kind=kind,
+                    active=int((row["active"] if row else 0) or 0),
+                    queued=int((row["queued"] if row else 0) or 0),
+                    capacity=int(capacities.get(kind.value, 1)),
+                )
+            )
+        return lanes
+
+    def summary(
+        self, *, window_hours: int, lane_capacities: dict[str, int] | None = None,
+    ) -> DashboardSummaryResponse:
         checked_at = datetime.now(timezone.utc)
         window_start = (checked_at - timedelta(hours=window_hours)).isoformat()
         active_placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
@@ -101,6 +150,7 @@ class DashboardQueryRepository:
             tokens_output=sum(int(row["tokens_output"] or 0) for row in invocation_rows),
             cost_actual_usd=round(sum(float(row["cost_usd"] or 0) for row in invocation_rows), 8),
             oldest_queued_seconds=oldest_seconds,
+            lanes=self.lane_occupancy(lane_capacities or {}),
         )
 
     def list_tasks(
@@ -110,9 +160,13 @@ class DashboardQueryRepository:
         page_size: int,
         status: TaskStatus | None,
         origin: str | None,
+        kind: TaskKind | None = None,
     ) -> DashboardTaskPage:
         where: list[str] = []
         params: list[Any] = []
+        if kind is not None:
+            where.append("t.kind = ?")
+            params.append(kind.value)
         if status is not None:
             where.append("t.status = ?")
             params.append(status.value)
@@ -226,11 +280,17 @@ class DashboardQueryRepository:
         )
 
     def active_task_detail(self) -> DashboardTaskDetail | None:
+        """El workflow de inferencia en curso, que es único por invariante.
+
+        Filtra por carril a propósito: el panel "Tarea activa" habla de la
+        inferencia, y una conversión no tiene ni prompt ni estrategia que
+        enseñar ahí. La carga de las conversiones se ve en la ocupación de
+        carriles (`lane_occupancy`)."""
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
         row = self.db.query_one(
             f"""
             SELECT id FROM tasks
-            WHERE status IN ({placeholders})
+            WHERE kind = 'inference' AND status IN ({placeholders})
             ORDER BY updated_at DESC
             LIMIT 1
             """,
@@ -325,8 +385,13 @@ class DashboardQueryRepository:
 
     @staticmethod
     def _task_item(row: Any) -> DashboardTaskItem:
-        request = loads_json(row["request_json"], {})
+        kind = TaskKind(row["kind"] if "kind" in row.keys() else TaskKind.inference.value)
+        payload = loads_json(row["request_json"], {})
         result = loads_json(row["result_json"], None) or {}
+        # En el carril de ingesta el payload es un descriptor de conversión, no
+        # una petición: leerle "execution" devolvería el default single/fast y
+        # el panel enseñaría una estrategia que esa tarea nunca tuvo.
+        request = payload if kind == TaskKind.inference else {}
         requirements = request.get("model_requirements") or {}
         requested_model = _model_reference(requirements.get("target_model"))
         effective_model = _model_reference(result.get("model_used"))
@@ -334,13 +399,23 @@ class DashboardQueryRepository:
         execution = request.get("execution") or {}
         return DashboardTaskItem(
             task_id=row["id"],
+            kind=kind,
+            label=payload.get("filename") if kind == TaskKind.ingestion else None,
             request_id=row["request_id"],
             status=TaskStatus(row["status"]),
             priority=int(row["priority"]),
             queue_position=row["queue_position"],
             origin=metadata.get("origin") if isinstance(metadata.get("origin"), str) else None,
-            execution_strategy=ExecutionStrategy(execution.get("strategy", "single")),
-            execution_preset=ExecutionPreset(execution.get("preset", "fast")),
+            execution_strategy=(
+                ExecutionStrategy(execution.get("strategy", "single"))
+                if kind == TaskKind.inference
+                else None
+            ),
+            execution_preset=(
+                ExecutionPreset(execution.get("preset", "fast"))
+                if kind == TaskKind.inference
+                else None
+            ),
             requested_model=requested_model,
             effective_model=effective_model,
             fallback_used=result.get("fallback_used") if isinstance(result.get("fallback_used"), bool) else None,

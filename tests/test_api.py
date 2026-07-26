@@ -379,7 +379,12 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.5"
+    assert body["contract_version"] == "2.6"
+    # 2.6: la frontera de datos se declara en un único campo y los carriles de
+    # trabajo son consultables. Un cliente que lo vea puede omitir
+    # cloud_allowed/allowed_providers y confiar en su clasificación.
+    assert body["derived_data_boundary"] is True
+    assert body["work_lanes"] == ["inference", "ingestion"]
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
     assert body["presets"]["agent"] == ["fast"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]
@@ -444,7 +449,10 @@ def test_dashboard_read_models_are_paged_filterable_and_source_backed(tmp_path: 
     assert len(detail.json()["invocations"]) == 1
     assert detail.json()["events"]
     assert usage.status_code == 200
-    assert usage.json()["providers"]["ollama"]["invocations"] == 1.0
+    # El proveedor fake se nombra a sí mismo. Antes heredaba "ollama" del
+    # default allowed_providers=["ollama"] del contrato, que ya no existe:
+    # atribuirle a Ollama invocaciones que nunca hizo era una métrica falsa.
+    assert usage.json()["providers"]["bootstrap"]["invocations"] == 1.0
     assert resources.status_code == 200
     assert resources.json()["provider"] == "bootstrap"
     assert resources.json()["used_vram_bytes"] == 0
@@ -589,9 +597,6 @@ def test_dashboard_configuration_updates_routing_live(tmp_path: Path) -> None:
                 "routing_adaptive_selection": "on",
                 "routing_stats_window_days": "10",
                 "routing_min_invocations": "5",
-                "routing_success_weight": "0.6",
-                "routing_latency_weight": "0.2",
-                "routing_cost_weight": "0.2",
                 "routing_exploration_rate": "0.2",
             },
         )
@@ -1544,7 +1549,9 @@ def test_prompt_tester_enqueues_exact_single_model(tmp_path: Path) -> None:
     assert "Tarea encolada" in response.text
     assert "Impacto operativo validado" in response.text
     assert "single/fast - 1 invocación(es)" in response.text
-    assert "Cloud bloqueado - fallback bloqueado" in response.text
+    # Sin clasificación declarada el formulario usa "internal", que sí permite
+    # cloud: el permiso lo deriva la clasificación, no una casilla aparte.
+    assert "Cloud permitido - fallback bloqueado" in response.text
     assert f"/dashboard/tasks/{queue['pending'][0]['task_id']}" in response.text
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in response.text
     assert "<script>alert('x')</script>" not in response.text
@@ -1914,6 +1921,9 @@ def test_task_status_fragment_polls_until_terminal(tmp_path: Path) -> None:
 
 
 def test_prompt_tester_rejects_cloud_models_when_cloud_is_not_allowed(tmp_path: Path) -> None:
+    """La clasificación de datos es el único mando: marcar la prueba como
+    confidencial basta para que un proponente cloud sea rechazado, sin casilla
+    aparte que haya que acordarse de desmarcar."""
     local_model = json.dumps({"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"})
     cloud_model = json.dumps({"provider": "ollama", "deployment": "cloud", "model": "remote:cloud"})
     with make_client(tmp_path) as client:
@@ -1928,6 +1938,7 @@ def test_prompt_tester_rejects_cloud_models_when_cloud_is_not_allowed(tmp_path: 
                 "strategy": "mixture_of_agents",
                 "preset": "slow",
                 "scheduling": "parallel",
+                "data_classification": "confidential",
                 "proposer_model_1": local_model,
                 "proposer_role_1": "architect",
                 "proposer_model_2": cloud_model,
@@ -1938,7 +1949,7 @@ def test_prompt_tester_rejects_cloud_models_when_cloud_is_not_allowed(tmp_path: 
         queue = client.get("/api/v1/queue").json()
 
     assert response.status_code == 200
-    assert "Marca Permitir cloud" in response.text
+    assert "Esta clasificación de datos no permite salir de la máquina" in response.text
     assert queue["pending"] == []
 
 

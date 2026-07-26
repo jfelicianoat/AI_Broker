@@ -12,6 +12,7 @@ STATUS_LABELS = {
     "generating": "Generando",
     "proposing": "Proponiendo",
     "synthesizing": "Sintetizando",
+    "converting": "Convirtiendo",
     "waiting_for_tools": "Esperando herramientas",
     "completed": "Completada",
     "failed": "Fallida",
@@ -24,6 +25,13 @@ STATUS_LABELS = {
 # El estado de salud viaja por la API en inglés (`healthy`/`degraded`/
 # `unavailable`) porque es contrato; el panel no debe mostrarlo así. El
 # vocabulario se alinea con COMPATIBILITY_TEXTS ("No operativo").
+# Carriles de trabajo. "Conversiones" en vez de "Ingesta" porque el panel debe
+# nombrar lo que el usuario ve pasar, no el módulo que lo implementa.
+LANE_LABELS = {
+    "inference": "Inferencia",
+    "ingestion": "Conversiones",
+}
+
 HEALTH_LABELS = {
     "healthy": "Operativo",
     "degraded": "Degradado",
@@ -159,6 +167,11 @@ def file_status_label(value: Any) -> str:
     return FILE_STATUS_LABELS.get(key, str(key))
 
 
+def lane_label(value: Any) -> str:
+    key = getattr(value, "value", value)
+    return LANE_LABELS.get(key, str(key))
+
+
 def register_filters(env: Any) -> None:
     env.filters["gb"] = gb
     env.filters["short_time"] = short_time
@@ -173,3 +186,4 @@ def register_filters(env: Any) -> None:
     env.filters["status_label"] = status_label
     env.filters["health_label"] = health_label
     env.filters["file_status_label"] = file_status_label
+    env.filters["lane_label"] = lane_label

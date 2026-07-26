@@ -72,7 +72,10 @@ class BootstrapModelProvider:
         target = request.model_requirements.target_model
         if target is not None:
             return [target.model_copy(update={"role": roles[index]}) for index in range(count)]
-        return [ModelReference(provider=request.model_requirements.allowed_providers[0], deployment="bootstrap",
+        # allowed_providers=None significa "sin restricción": el proveedor fake
+        # se nombra a sí mismo en vez de leer una lista que puede no venir.
+        declared = request.model_requirements.allowed_providers or ["bootstrap"]
+        return [ModelReference(provider=declared[0], deployment="bootstrap",
                                model=request.model_requirements.preferred_model or f"bootstrap-{i+1}", role=roles[i])
                 for i in range(count)]
 

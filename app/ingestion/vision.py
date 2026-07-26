@@ -26,6 +26,10 @@ class VisionTarget:
 
     provider: str
     model: str
+    # Deployment del catálogo (local/cloud/api). Viaja hasta el registro de la
+    # invocación: sin él, las descripciones de figuras no se podrían casar con
+    # el resto de la evidencia del mismo modelo.
+    deployment: str
     base_url: str
     api_key: str | None
     # `ollama` habla su propio dialecto (`/api/chat` con `images: [b64]`);
@@ -102,6 +106,7 @@ def select_vision_target(
             VisionTarget(
                 provider=str(entry.get("provider") or ""),
                 model=str(entry.get("name") or ""),
+                deployment=str(entry.get("deployment") or "local"),
                 base_url=base_url,
                 api_key=api_key,
                 dialect=dialect,

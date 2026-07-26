@@ -303,13 +303,17 @@
                     <option value="json" {% if form.output_format == 'json' %}selected{% endif %}>JSON</option>
                   </select>
                 </label>
+                {# Mando único de privacidad: de esta elección se derivan el
+                   permiso de cloud y los proveedores elegibles. Por eso la
+                   etiqueta dice a dónde van los datos, no solo cómo se llama
+                   la clasificación en el contrato. #}
                 <label class="field">
-                  <span>Clasificación</span>
+                  <span>Clasificación de datos</span>
                   <select name="data_classification">
-                    <option value="public" {% if form.data_classification == 'public' %}selected{% endif %}>public</option>
-                    <option value="internal" {% if form.data_classification == 'internal' %}selected{% endif %}>internal</option>
-                    <option value="confidential" {% if form.data_classification == 'confidential' %}selected{% endif %}>confidential</option>
-                    <option value="local_only" {% if form.data_classification == 'local_only' %}selected{% endif %}>local_only</option>
+                    <option value="public" {% if form.data_classification == 'public' %}selected{% endif %}>Pública — puede salir a cloud</option>
+                    <option value="internal" {% if form.data_classification == 'internal' %}selected{% endif %}>Interna — puede salir a cloud</option>
+                    <option value="confidential" {% if form.data_classification == 'confidential' %}selected{% endif %}>Confidencial — solo modelos locales</option>
+                    <option value="local_only" {% if form.data_classification == 'local_only' %}selected{% endif %}>Solo local — solo modelos locales</option>
                   </select>
                 </label>
               </div>
@@ -321,7 +325,6 @@
                  cuyo sondeo verificó que no soportan JSON estructurado. #}
               <div class="alert warning tester-feature-warning" data-feature-warnings hidden></div>
               <div class="check-row">
-                <label><input type="checkbox" name="cloud_allowed" {% if form.cloud_allowed %}checked{% endif %}> Permitir cloud</label>
                 <label><input type="checkbox" name="fallback_allowed" {% if form.fallback_allowed %}checked{% endif %}> Permitir fallback</label>
               </div>
               <label class="field compact-field">

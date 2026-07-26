@@ -37,6 +37,7 @@ class Database:
                 idempotency_key TEXT,
                 request_hash TEXT,
                 request_json TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'inference',
                 status TEXT NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 100,
                 queue_position INTEGER,
@@ -196,6 +197,13 @@ class Database:
             if "agent_state_json" not in task_columns:
                 # Conversación del agente persistida al pausar por tools del cliente.
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN agent_state_json TEXT")
+            if "kind" not in task_columns:
+                # Carril de trabajo (app.schemas.TaskKind). Todo lo anterior a
+                # los carriles es inferencia, de ahí el default: la migración
+                # no necesita reescribir ninguna fila.
+                self._conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'inference'"
+                )
             invocation_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(model_invocations)").fetchall()
             }
@@ -209,6 +217,14 @@ class Database:
                 # columna, se tratan como sin clasificar y no participan en el
                 # score adaptativo por tipo.
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN task_type TEXT")
+            if "was_loaded" not in invocation_columns:
+                # ¿Estaba el modelo ya cargado en VRAM cuando empezó esta
+                # invocación? Un modelo local en frío paga la carga desde disco
+                # dentro de su propia latencia, así que sin este dato la media
+                # mezcla dos poblaciones muy distintas y el tiempo estimado no
+                # sirve para decidir AHORA. NULL = desconocido (filas previas y
+                # proveedores cloud, que no cargan nada).
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN was_loaded INTEGER")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"
@@ -216,6 +232,12 @@ class Database:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_invocations_task_type "
                 "ON model_invocations(task_type, provider, model, status)"
+            )
+            # Después de los ALTER: en una base anterior a los carriles la
+            # columna `kind` no existe hasta la migración de arriba, y el
+            # índice fallaría si se creara con el resto del esquema.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_lane ON tasks(kind, status, created_at)"
             )
             self._conn.commit()
 

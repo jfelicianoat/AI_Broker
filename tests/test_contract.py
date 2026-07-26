@@ -13,7 +13,69 @@ def test_task_contract_defaults_to_single() -> None:
 
     assert payload.execution.strategy == ExecutionStrategy.single
     assert payload.execution.selection.mode == SelectionMode.auto
-    assert payload.model_requirements.allowed_providers == ["ollama"]
+    # Sin declaración del cliente no hay restricción por proveedor: el default
+    # ["ollama"] anterior era un cerrojo silencioso que dejaba fuera al cloud
+    # aunque cloud_allowed fuese true.
+    assert payload.model_requirements.allowed_providers is None
+
+
+def test_classification_derives_the_cloud_permission_when_client_is_silent() -> None:
+    """data_classification es el mando único de privacidad: de él se deriva
+    cloud_allowed cuando la app cliente no se pronuncia."""
+    for classification, expected in (
+        ("public", True),
+        ("internal", True),
+        ("confidential", False),
+        ("local_only", False),
+    ):
+        payload = TaskCreateRequest.model_validate({
+            "idempotency_key": f"contract:derive:{classification}",
+            "content": {"prompt": "Resume este texto"},
+            "risk": {"data_classification": classification},
+        })
+        assert payload.model_requirements.cloud_allowed is expected, classification
+
+
+def test_explicit_cloud_allowed_false_survives_a_permissive_classification() -> None:
+    payload = TaskCreateRequest.model_validate({
+        "idempotency_key": "contract:explicit-local",
+        "content": {"prompt": "Resume este texto"},
+        "model_requirements": {"cloud_allowed": False},
+        "risk": {"data_classification": "public"},
+    })
+
+    assert payload.model_requirements.cloud_allowed is False
+
+
+def test_classification_wins_over_an_explicit_cloud_request() -> None:
+    """La frontera no se cede: pedir cloud en una tarea confidencial es
+    contradictorio y se resuelve a favor de la privacidad."""
+    payload = TaskCreateRequest.model_validate({
+        "idempotency_key": "contract:contradiction",
+        "content": {"prompt": "Resume este texto"},
+        "model_requirements": {"cloud_allowed": True},
+        "risk": {"data_classification": "confidential"},
+    })
+
+    assert payload.model_requirements.cloud_allowed is False
+
+
+def test_confidential_target_model_must_be_local() -> None:
+    try:
+        TaskCreateRequest.model_validate({
+            "idempotency_key": "contract:confidential-target",
+            "content": {"prompt": "Privado"},
+            "model_requirements": {
+                "cloud_allowed": True,
+                "allowed_providers": ["deepseek"],
+                "target_model": {"provider": "deepseek", "deployment": "api", "model": "chat"},
+            },
+            "risk": {"data_classification": "confidential"},
+        })
+    except Exception as exc:
+        assert "confidential target_model" in str(exc)
+    else:
+        raise AssertionError("confidential cloud target should fail")
 
 
 def test_legacy_execution_mode_alias_is_accepted() -> None:

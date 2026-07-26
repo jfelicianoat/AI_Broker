@@ -21,7 +21,7 @@ from app.admin_auth import (
 )
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
-from app.dashboard import DashboardQueryRepository
+from app.dashboard import DashboardQueryRepository, lane_capacities
 from app.dashboard_web import (
     CSRF_COOKIE_NAME,
     create_dashboard_router,
@@ -30,7 +30,7 @@ from app.dashboard_web import (
     valid_csrf_token_shape,
 )
 from app.db import Database
-from app.dispatcher import dispatcher_loop
+from app.dispatcher import dispatcher_loop, ingestion_dispatcher_loop
 from app.health import HealthCache, health_response
 from app.ingestion import (
     ALLOWED_FORMATS,
@@ -73,6 +73,7 @@ from app.schemas import (
     SchedulingPolicy,
     TaskAcceptedResponse,
     TaskCreateRequest,
+    TaskKind,
     TaskStateResponse,
     TaskStatus,
     ToolResultsRequest,
@@ -172,9 +173,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         repository.recover_interrupted_tasks(max_attempts=broker_config.processing.max_task_attempts)
         ingestion.cleanup_incoming()
         if broker_config.ingestion.enabled:
-            # Conversiones interrumpidas por un reinicio: se relanzan (idempotentes).
+            # Conversiones interrumpidas por un reinicio: vuelven a la cola del
+            # carril de ingesta (convertir otra vez es idempotente). Se cubren
+            # los dos casos: las que ya tenían tarea y las de ficheros
+            # pendientes anteriores a los carriles, que aún no la tienen.
+            repository.requeue_interrupted_ingestion_tasks()
             for pending_file_id in ingestion.recover_pending():
-                ingestion.launch(pending_file_id)
+                ingestion.enqueue(repository, pending_file_id)
         pruned_events = prune_terminal_task_events(
             db, older_than_days=broker_config.persistence.events_retention_days
         )
@@ -205,6 +210,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             )
         stop_dispatcher = asyncio.Event()
         dispatcher_task = None
+        ingestion_dispatcher_task = None
         if broker_config.processing.auto_dispatch:
             dispatcher_task = asyncio.create_task(
                 dispatcher_loop(
@@ -214,13 +220,33 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                     broker_config.processing.dispatcher_interval_seconds,
                 )
             )
+            if broker_config.ingestion.enabled:
+                # Carril propio: nunca compite por el workflow único de
+                # inferencia, y tiene su propio tope de concurrencia.
+                ingestion_dispatcher_task = asyncio.create_task(
+                    ingestion_dispatcher_loop(
+                        repository,
+                        ingestion,
+                        stop_dispatcher,
+                        broker_config.processing.dispatcher_interval_seconds,
+                        broker_config.ingestion.max_concurrent,
+                    )
+                )
         app.state.dispatcher_task = dispatcher_task
+        app.state.ingestion_dispatcher_task = ingestion_dispatcher_task
         try:
             yield
         finally:
             stop_dispatcher.set()
-            if dispatcher_task is not None:
-                await asyncio.gather(dispatcher_task, return_exceptions=True)
+            pending_loops = [
+                task for task in (dispatcher_task, ingestion_dispatcher_task) if task is not None
+            ]
+            if pending_loops:
+                await asyncio.gather(*pending_loops, return_exceptions=True)
+            # Los sondeos en sombra son trabajo desechable: se cancelan antes
+            # de cerrar el proveedor para no dejar peticiones en vuelo contra
+            # clientes HTTP que están a punto de cerrarse.
+            await coordinator.shadow_probe.shutdown()
             await ingestion.shutdown()
             await provider.close()
             db.close()
@@ -460,7 +486,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 status_code=status, detail={"code": exc.code, "message": str(exc)},
             ) from exc
         if created:
-            ingestion.launch(record.id)
+            ingestion.enqueue(repository, record.id)
         return FileAcceptedResponse(
             file_id=record.id,
             status=FileStatus(record.status),
@@ -511,6 +537,25 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         verify_admin_access(request, broker_config)
         task_id = await coordinator.process_next(repository)
         return {"task_id": task_id}
+
+    @app.post("/api/v1/dispatcher/ingestion/tick")
+    async def ingestion_dispatcher_tick(request: Request) -> dict[str, str | None]:
+        """Avanza el carril de ingesta una conversión.
+
+        Contrapartida de /dispatcher/tick para el otro carril: con
+        auto_dispatch desactivado, es la única forma de que una conversión
+        progrese sin esperar al bucle de fondo."""
+        verify_admin_access(request, broker_config)
+        if not broker_config.ingestion.enabled:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        claimed = await asyncio.to_thread(
+            repository.claim_next_ingestion_task, broker_config.ingestion.max_concurrent,
+        )
+        if claimed is None:
+            return {"task_id": None, "file_id": None}
+        task_id, file_id = claimed
+        await ingestion.run_task(repository, task_id, file_id)
+        return {"task_id": task_id, "file_id": file_id}
 
     @app.get("/api/v1/models")
     async def list_models() -> dict[str, object]:
@@ -581,7 +626,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.5",
+            contract_version="2.6",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -622,6 +667,12 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             file_ingestion=broker_config.ingestion.enabled,
             ingestion_formats=ALLOWED_FORMATS if broker_config.ingestion.enabled else {},
             long_context_map_reduce=True,
+            derived_data_boundary=True,
+            work_lanes=(
+                [TaskKind.inference, TaskKind.ingestion]
+                if broker_config.ingestion.enabled
+                else [TaskKind.inference]
+            ),
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
@@ -636,7 +687,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     def dashboard_summary(
         window_hours: int = Query(default=24, ge=1, le=24 * 90),
     ) -> DashboardSummaryResponse:
-        return dashboard_queries.summary(window_hours=window_hours)
+        return dashboard_queries.summary(
+            window_hours=window_hours, lane_capacities=lane_capacities(broker_config),
+        )
 
     @app.get("/api/v1/dashboard/tasks", response_model=DashboardTaskPage)
     def dashboard_tasks(
@@ -645,6 +698,8 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         page_size: int = Query(default=50, ge=1, le=200),
         status: TaskStatus | None = None,
         origin: str | None = Query(default=None, min_length=1, max_length=64),
+        # Carril de trabajo: inference o ingestion. Sin valor, ambos.
+        kind: TaskKind | None = None,
     ) -> DashboardTaskPage:
         verify_admin_access(request, broker_config)
         return dashboard_queries.list_tasks(
@@ -652,6 +707,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             page_size=page_size,
             status=status,
             origin=origin,
+            kind=kind,
         )
 
     @app.get("/api/v1/dashboard/tasks/{task_id}", response_model=DashboardTaskDetail)

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,12 +23,99 @@ from uuid import uuid4
 from app.config import BrokerConfig
 from app.db import Database, dumps_json, loads_json
 from app.ingestion import engines
-from app.ingestion.detection import CODE_TEXT_EXTENSIONS, TABULAR_EXTENSIONS, detect, safe_filename
+from app.ingestion.conversion import (
+    FIGURES_DIRNAME,
+    ConversionInput,
+    ConversionResult,
+    convert_file,
+    dump_settings,
+)
+from app.ingestion.detection import TABULAR_EXTENSIONS, detect, safe_filename
 from app.ingestion.vision import VisionTarget, select_vision_target
-from app.providers.base import estimate_tokens_upper_bound
-from app.schemas import TaskCreateRequest, attachment_file_id
+from app.providers.base import ModelOutput, estimate_tokens_upper_bound
+from app.schemas import ModelReference, TaskCreateRequest, TaskStatus, attachment_file_id
 
 logger = logging.getLogger("ai_broker.ingestion")
+
+# Raíz desde la que se lanza el proceso hijo de conversión: el directorio que
+# contiene el paquete `app`, para que `-m app.ingestion.worker` lo encuentre.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+# Rol y tipo de tarea con los que se registran las descripciones de figuras.
+# El tipo es propio a propósito: `classify_task_type` nunca devuelve "vision",
+# así que estas invocaciones NO entran en los buckets de prosa, código o
+# contexto largo que alimentan la selección de modelo para texto. Cuentan como
+# evidencia y como carga —que es lo que se pedía— sin contaminar una medida
+# que describe otra cosa.
+VISION_TASK_TYPE = "vision"
+VISION_ROLE = "vision"
+
+
+class _VisionRecorder:
+    """Contabiliza cada descripción de figura como la invocación que es.
+
+    Antes de esto, el modelo de visión podía atender cientos de figuras sin
+    acumular una sola línea de historial, y su consumo de GPU no aparecía por
+    ninguna parte. Si falta el repositorio o la tarea (ruta directa, sin
+    carril), se limita a ejecutar la llamada sin registrar nada."""
+
+    def __init__(self, repository: Any, task_id: str | None, vision: VisionTarget | None) -> None:
+        self.repository = repository
+        self.task_id = task_id
+        self.enabled = repository is not None and task_id is not None and vision is not None
+        self.model = (
+            ModelReference(
+                provider=vision.provider,
+                deployment=vision.deployment,
+                model=vision.model,
+                role=VISION_ROLE,
+            )
+            if vision is not None
+            else None
+        )
+
+    def invoke(self, call: Any) -> Any:
+        if not self.enabled or self.model is None:
+            return call()
+        invocation_id = self.repository.start_invocation(
+            self.task_id, None, VISION_ROLE, self.model, VISION_TASK_TYPE, None,
+        )
+        try:
+            description = call()
+        except Exception as error:
+            self.repository.fail_invocation(
+                invocation_id,
+                self.task_id,
+                str(getattr(error, "code", type(error).__name__)),
+                str(error)[:2000],
+            )
+            raise
+        self.repository.complete_invocation(
+            invocation_id,
+            self.task_id,
+            # Coste 0: el endpoint de visión no devuelve precio y aquí no hay
+            # tarifa que aplicar. Los tokens sí son los que reporta el
+            # proveedor, o 0 cuando no los reporta.
+            ModelOutput(
+                description.content,
+                description.tokens_input,
+                description.tokens_output,
+                0.0,
+                description.latency_ms,
+            ),
+        )
+        return description
+
+
+class WorkerFailure(RuntimeError):
+    """Fallo declarado por el proceso hijo de conversión, con su código."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
 
 RECEIVED = "received"
 CONVERTING = "converting"
@@ -298,11 +387,68 @@ class IngestionService:
 
     # ------------------------------------------------------------- procesado
 
-    def launch(self, file_id: str) -> None:
-        """Lanza la conversión como tarea asyncio; requiere loop en marcha."""
-        job = asyncio.create_task(self.process(file_id))
-        self._jobs.add(job)
-        job.add_done_callback(self._jobs.discard)
+    def enqueue(self, repository: Any, file_id: str) -> str | None:
+        """Da de alta la conversión como TAREA del carril de ingesta.
+
+        Sustituye al antiguo `launch`, que creaba una tarea asyncio suelta: la
+        conversión no aparecía en la cola, ni en el historial, ni en ninguna
+        proyección del panel, y no había límite de cuántas corrían a la vez.
+        Ahora la reclama `ingestion_dispatcher_loop` cuando el carril tiene
+        sitio. Devuelve el id de la tarea, o None si el fichero ya no está."""
+        record = self.get(file_id)
+        if record is None:
+            return None
+        existing = repository.ingestion_task_for_file(file_id)
+        if existing is not None:
+            return str(existing)
+        return str(repository.create_ingestion_task(file_id, record.filename, record.size_bytes))
+
+    async def run_task(self, repository: Any, task_id: str, file_id: str) -> None:
+        """Ejecuta la conversión reclamada y cierra la fila de la tarea.
+
+        El estado del fichero (`ingested_files.status`) y el de la tarea se
+        escriben desde aquí, que es el único punto que los mueve: son la misma
+        verdad vista desde el carril y desde el fichero, no dos verdades."""
+        try:
+            await self.process(file_id, repository=repository, task_id=task_id)
+        except asyncio.CancelledError:
+            # Apagado o cancelación: la tarea queda en 'converting' y la
+            # recuperación del próximo arranque la devuelve a la cola.
+            raise
+        except Exception as error:
+            logger.exception("ingestion.task_failed", extra={
+                "event": "ingestion.task_failed", "task_id": task_id, "file_id": file_id,
+            })
+            repository.update_task(
+                task_id,
+                TaskStatus.failed,
+                progress={"phase": TaskStatus.failed.value},
+                error={"code": "CONVERSION_FAILED", "message": str(error)[:2000], "retryable": False},
+                clear_queue_position=True,
+            )
+            return
+        record = self.get(file_id)
+        if record is not None and record.status == FAILED:
+            repository.update_task(
+                task_id,
+                TaskStatus.failed,
+                progress={"phase": TaskStatus.failed.value},
+                error=record.error or {"code": "CONVERSION_FAILED", "message": "Conversión fallida"},
+                clear_queue_position=True,
+            )
+            return
+        meta = (record.meta if record is not None else {}) or {}
+        repository.update_task(
+            task_id,
+            TaskStatus.completed,
+            progress={"phase": TaskStatus.completed.value},
+            result={
+                "file_id": file_id,
+                "markdown_chars": meta.get("markdown_chars"),
+                "tokens_estimate": meta.get("tokens_estimate"),
+            },
+            clear_queue_position=True,
+        )
 
     async def shutdown(self) -> None:
         for job in list(self._jobs):
@@ -310,7 +456,12 @@ class IngestionService:
         if self._jobs:
             await asyncio.gather(*self._jobs, return_exceptions=True)
 
-    async def process(self, file_id: str) -> None:
+    async def process(
+        self, file_id: str, repository: Any | None = None, task_id: str | None = None,
+    ) -> None:
+        """Convierte el fichero. `repository`/`task_id` llegan desde el carril
+        de ingesta y son lo que permite contabilizar las invocaciones al modelo
+        de visión contra la tarea que las provocó."""
         record = self.get(file_id)
         if record is None or record.status == READY:
             return
@@ -318,13 +469,21 @@ class IngestionService:
         timeout = self.config.ingestion.conversion_timeout_seconds
         vision = await self._resolve_vision_target()
         try:
-            markdown, meta = await asyncio.wait_for(
-                asyncio.to_thread(self._convert, record, vision), timeout=timeout,
+            # Fase 1, la pesada y matable: fichero → Markdown con marcadores.
+            result = await self._run_conversion(record, timeout)
+            # Fase 2, en el padre: describir las figuras con el modelo de
+            # visión. Vive aquí porque necesita el proveedor, las credenciales
+            # y escribir en la base — nada de eso debe cruzar al hijo.
+            markdown, meta = await asyncio.to_thread(
+                self._apply_vision, record, result, vision, repository, task_id,
             )
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
             self._set_failed(file_id, "CONVERSION_TIMEOUT", f"Conversión no completada en {timeout}s")
+            return
+        except WorkerFailure as error:
+            self._set_failed(file_id, error.code, error.message)
             return
         except engines.EngineMissing as error:
             self._set_failed(file_id, "ENGINE_MISSING", str(error))
@@ -370,44 +529,201 @@ class IngestionService:
 
     # ------------------------------------------------------ conversión (hilo)
 
-    def _convert(
-        self, record: FileRecord, vision: VisionTarget | None = None,
-    ) -> tuple[str, dict[str, Any]]:
+    async def _run_conversion(self, record: FileRecord, timeout: float) -> ConversionResult:
+        """Fase 1. En proceso hijo por defecto; en hilo si está desactivado.
+
+        El hijo es lo que permite abortar de verdad y lo que impide que un OOM
+        de torch se lleve el broker. El modo en hilo existe para los tests, que
+        sustituyen los motores por dobles dentro del propio proceso."""
+        source = ConversionInput.from_record(record)
         settings = self.config.ingestion
-        path = Path(record.original_path)
-        if record.kind == "pdf":
-            result = engines.convert_pdf_docling(
-                path,
-                ocr_enabled=settings.ocr_enabled,
-                ocr_languages=settings.ocr_languages,
-                max_pages=settings.max_pdf_pages,
-                extract_images=settings.images.enabled,
+        if not settings.isolate_conversions:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    convert_file,
+                    source,
+                    settings,
+                    lambda data: self._merge_meta(record.id, data),
+                ),
+                timeout=timeout,
             )
-            markdown, described, errors = self._describe_pictures(
-                result.markdown, result.pictures, vision,
+        return await self._run_conversion_subprocess(record, source, timeout)
+
+    async def _run_conversion_subprocess(
+        self, record: FileRecord, source: ConversionInput, timeout: float,
+    ) -> ConversionResult:
+        job = json.dumps({"source": source.to_json(), "ingestion": dump_settings(self.config.ingestion)})
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "app.ingestion.worker",
+            cwd=str(_PROJECT_ROOT),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(job.encode("utf-8")), timeout=timeout,
             )
-            meta: dict[str, Any] = {
-                "engine": "docling", "pages": result.pages, "ocr": result.ocr_enabled,
-                "pictures": len(result.pictures), "pictures_described": described,
-                "pictures_describe_errors": errors,
-            }
-            # Qué modelo describió las figuras y por qué se le creyó capaz de
-            # verlas: sin esto, una descripción generada no tiene procedencia.
-            if vision is not None and described:
-                meta["vision_model"] = f"{vision.provider}/{vision.model}"
-                meta["vision_evidence"] = vision.evidence
-            return markdown, meta
-        if record.kind == "office":
-            return engines.convert_with_markitdown(path), {"engine": "markitdown"}
-        if record.kind == "text":
-            return self._convert_text(record, path)
-        if record.kind == "image":
-            return self._convert_image(record, path, vision)
-        if record.kind == "audio":
-            return self._transcribe(record, path)
-        if record.kind == "video":
-            return self._convert_video(record, path)
-        raise RuntimeError(f"Tipo de fichero desconocido: {record.kind}")
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # Aquí está el motivo de todo esto: matar el proceso PARA el
+            # trabajo. Cancelar un hilo solo dejaba de esperarlo.
+            self._kill(process)
+            await self._reap(process)
+            raise
+        if stderr:
+            # Docling y torch escriben avisos por su cuenta; no son un fallo.
+            logger.debug(
+                "ingestion.worker_stderr",
+                extra={"event": "ingestion.worker_stderr", "file_id": record.id},
+            )
+        return self._read_worker_output(record, stdout, process.returncode)
+
+    def _read_worker_output(
+        self, record: FileRecord, stdout: bytes, returncode: int | None,
+    ) -> ConversionResult:
+        result: ConversionResult | None = None
+        failure: WorkerFailure | None = None
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # ruido de alguna librería en stdout: se ignora
+            kind = event.get("event")
+            if kind == "progress":
+                self._merge_meta(record.id, dict(event.get("data") or {}))
+            elif kind == "result":
+                result = ConversionResult.from_json(event.get("data") or {})
+            elif kind == "error":
+                failure = WorkerFailure(
+                    str(event.get("code") or "CONVERSION_FAILED"),
+                    str(event.get("message") or "Conversión fallida"),
+                )
+        if failure is not None:
+            raise failure
+        if result is None:
+            raise WorkerFailure(
+                "CONVERSION_FAILED",
+                f"El proceso de conversión terminó con código {returncode} sin devolver resultado",
+            )
+        return result
+
+    @staticmethod
+    def _kill(process: Any) -> None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+    @staticmethod
+    async def _reap(process: Any) -> None:
+        """Espera al hijo ya matado para no dejar un zombi ni un pipe abierto."""
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except (asyncio.TimeoutError, asyncio.CancelledError, ProcessLookupError):
+            pass
+
+    def _apply_vision(
+        self,
+        record: FileRecord,
+        result: ConversionResult,
+        vision: VisionTarget | None,
+        repository: Any | None = None,
+        task_id: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Fase 2: describe las figuras que el hijo dejó en disco.
+
+        Es lo único de la conversión que habla con un modelo, y por eso se
+        queda en el padre: el hijo no tiene proveedor, ni credenciales, ni
+        debe escribir en la base de datos."""
+        markdown = result.markdown
+        meta = dict(result.meta)
+        described = 0
+        errors = 0
+        recorder = _VisionRecorder(repository, task_id, vision)
+        try:
+            if record.kind == "pdf" and result.figures:
+                markdown, described, errors = self._describe_pictures(
+                    markdown, self._read_figures(result.figures), vision, recorder,
+                )
+                meta["pictures_described"] = described
+                meta["pictures_describe_errors"] = errors
+            elif record.kind == "image" and result.figures:
+                markdown, described, errors = self._describe_single_image(
+                    markdown, record, result.figures[0], vision, recorder,
+                )
+                if described:
+                    meta["described"] = True
+                if errors:
+                    meta["describe_error"] = "la descripción de la imagen falló"
+        finally:
+            self._cleanup_figures(record)
+        # Qué modelo describió las figuras y por qué se le creyó capaz de
+        # verlas: sin esto, una descripción generada no tiene procedencia.
+        if vision is not None and described:
+            meta["vision_model"] = f"{vision.provider}/{vision.model}"
+            meta["vision_evidence"] = vision.evidence
+        return markdown, meta
+
+    @staticmethod
+    def _read_figures(paths: list[str]) -> list[bytes | None]:
+        figures: list[bytes | None] = []
+        for item in paths:
+            if not item:
+                figures.append(None)
+                continue
+            try:
+                figures.append(Path(item).read_bytes())
+            except OSError:
+                figures.append(None)
+        return figures
+
+    def _cleanup_figures(self, record: FileRecord) -> None:
+        """Las figuras solo existen para que el padre pueda mirarlas. Una vez
+        descritas, conservarlas sería acumular disco sin utilidad: el artefacto
+        que se guarda es el Markdown."""
+        import shutil
+
+        figures_dir = Path(record.original_path).parent / FIGURES_DIRNAME
+        try:
+            if figures_dir.exists():
+                shutil.rmtree(figures_dir)
+        except OSError:
+            pass
+
+    def _describe_single_image(
+        self,
+        markdown: str,
+        record: FileRecord,
+        image_path: str,
+        vision: VisionTarget | None,
+        recorder: _VisionRecorder | None = None,
+    ) -> tuple[str, int, int]:
+        settings = self.config.ingestion
+        if not settings.images.enabled or vision is None or not image_path:
+            return markdown or "(imagen sin texto reconocible ni descripción disponible)", 0, 0
+        recorder = recorder or _VisionRecorder(None, None, vision)
+        try:
+            described = recorder.invoke(lambda: engines.describe_image(
+                vision,
+                Path(image_path).read_bytes(),
+                f"Imagen suelta adjuntada por el usuario: {record.filename}",
+                settings.images.timeout_seconds,
+            ))
+            description = described.content
+        except Exception as error:
+            logger.warning(
+                "ingestion.describe_failed: %s",
+                str(error)[:300],
+                extra={"event": "ingestion.describe_failed"},
+            )
+            return markdown or "(imagen sin texto reconocible ni descripción disponible)", 0, 1
+        if not description:
+            return markdown or "(imagen sin texto reconocible ni descripción disponible)", 0, 0
+        header = f"**Descripción de la imagen (generada por IA):** {description}"
+        return ("\n\n".join([header, markdown]) if markdown else header), 1, 0
 
     def _merge_meta(self, file_id: str, extra: dict[str, Any]) -> None:
         """Actualiza meta_json sin esperar al final de la conversión: la
@@ -422,107 +738,12 @@ class IngestionService:
             (dumps_json(meta), _utc_now_iso(), file_id),
         )
 
-    def _record_duration(self, record: FileRecord, media_path: Path) -> float | None:
-        duration = engines.probe_media_duration(
-            media_path, ffmpeg_path=self.config.ingestion.transcription.ffmpeg_path,
-        )
-        if duration is not None:
-            self._merge_meta(record.id, {"duration_seconds": round(duration, 1)})
-        return duration
-
-    def _convert_text(self, record: FileRecord, path: Path) -> tuple[str, dict[str, Any]]:
-        data = path.read_bytes()
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = data.decode("cp1252", errors="replace")
-        language = CODE_TEXT_EXTENSIONS.get(record.extension)
-        if language is not None:
-            fence = "````" if "```" in text else "```"
-            text = f"{fence}{language}\n{text}\n{fence}"
-        return text, {"engine": "passthrough"}
-
-    def _convert_image(
-        self, record: FileRecord, path: Path, vision: VisionTarget | None = None,
-    ) -> tuple[str, dict[str, Any]]:
-        settings = self.config.ingestion
-        parts: list[str] = []
-        meta: dict[str, Any] = {"engine": "docling", "ocr": settings.ocr_enabled}
-        if settings.images.enabled and vision is not None:
-            try:
-                description = engines.describe_image(
-                    vision,
-                    path.read_bytes(),
-                    f"Imagen suelta adjuntada por el usuario: {record.filename}",
-                    settings.images.timeout_seconds,
-                )
-                if description:
-                    parts.append(f"**Descripción de la imagen (generada por IA):** {description}")
-                    meta["described"] = True
-                    meta["vision_model"] = f"{vision.provider}/{vision.model}"
-                    meta["vision_evidence"] = vision.evidence
-            except Exception as error:
-                meta["describe_error"] = str(error)[:500]
-        if settings.ocr_enabled:
-            ocr_text = engines.convert_image_docling(path, ocr_languages=settings.ocr_languages)
-            if ocr_text.strip():
-                parts.append(f"**Texto reconocido (OCR):**\n\n{ocr_text}")
-        if not parts:
-            parts.append("(imagen sin texto reconocible ni descripción disponible)")
-        return "\n\n".join(parts), meta
-
-    def _transcribe(self, record: FileRecord, path: Path) -> tuple[str, dict[str, Any]]:
-        settings = self.config.ingestion.transcription
-        if not settings.enabled:
-            raise engines.EngineMissing(
-                "transcription", "activa ingestion.transcription.enabled en broker_config.yaml",
-            )
-        probed = self._record_duration(record, path)
-        text, meta = engines.transcribe_audio(
-            path,
-            model_size=settings.model_size,
-            device=settings.device,
-            language=settings.language,
-        )
-        meta["engine"] = "whisper"
-        if probed is not None:
-            # ffprobe mide el contenedor completo; el valor de whisper puede
-            # quedarse corto si el VAD recorta silencio final.
-            meta["duration_seconds"] = round(probed, 1)
-        return text, meta
-
-    def _convert_video(self, record: FileRecord, path: Path) -> tuple[str, dict[str, Any]]:
-        settings = self.config.ingestion.transcription
-        if not settings.enabled:
-            raise engines.EngineMissing(
-                "transcription", "activa ingestion.transcription.enabled en broker_config.yaml",
-            )
-        probed = self._record_duration(record, path)
-        wav_path = path.parent / "audio.wav"
-        engines.extract_audio_ffmpeg(
-            path, wav_path,
-            ffmpeg_path=settings.ffmpeg_path,
-            timeout_seconds=self.config.ingestion.conversion_timeout_seconds,
-        )
-        try:
-            text, meta = engines.transcribe_audio(
-                wav_path,
-                model_size=settings.model_size,
-                device=settings.device,
-                language=settings.language,
-            )
-        finally:
-            try:
-                wav_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        meta["engine"] = "ffmpeg+whisper"
-        if probed is not None:
-            meta["duration_seconds"] = round(probed, 1)
-        return text, meta
-
     def _describe_pictures(
-        self, markdown: str, pictures: list[bytes | None], vision: VisionTarget | None = None,
+        self,
+        markdown: str,
+        pictures: list[bytes | None],
+        vision: VisionTarget | None = None,
+        recorder: _VisionRecorder | None = None,
     ) -> tuple[str, int, int]:
         """Sustituye los placeholders de figura por descripciones del LLM de visión.
 
@@ -539,6 +760,7 @@ class IngestionService:
                 "ingestion.vision_unavailable",
                 extra={"event": "ingestion.vision_unavailable"},
             )
+        recorder = recorder or _VisionRecorder(None, None, vision)
         segments = markdown.split(engines.IMAGE_PLACEHOLDER)
         described = 0
         errors = 0
@@ -549,9 +771,12 @@ class IngestionService:
             if settings.enabled and vision is not None and png is not None and described < settings.max_images:
                 context = rebuilt[-1][-800:] + "\n[FIGURA AQUÍ]\n" + segment_after[:400]
                 try:
-                    description = engines.describe_image(
+                    # Cada figura es una invocación contabilizada: un PDF de
+                    # cuarenta páginas con ilustraciones no es "una conversión",
+                    # son decenas de llamadas a un modelo.
+                    description = recorder.invoke(lambda png=png, context=context: engines.describe_image(
                         vision, png, context, settings.timeout_seconds,
-                    )
+                    )).content
                     if description:
                         replacement = (
                             f"> **[Figura {index + 1} — descripción generada por IA]:** {description}"

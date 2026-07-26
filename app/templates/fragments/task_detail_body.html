@@ -77,7 +77,7 @@
           <div><dt>Modelo fallido</dt><dd>{{ task_result.error_provider }}/{{ task_result.error_deployment }}/{{ task_result.error_model }}</dd></div>
           <div><dt>Rol fallido</dt><dd>{{ task_result.error_role or 'N/D' }}</dd></div>
         {% endif %}
-        <div><dt>Estrategia</dt><dd>{{ detail.task.execution_strategy.value }}/{{ detail.task.execution_preset.value }}</dd></div>
+        <div><dt>Estrategia</dt><dd>{% if detail.task.kind.value == 'ingestion' %}{{ detail.task.kind|lane_label }}{% else %}{{ detail.task.execution_strategy.value }}/{{ detail.task.execution_preset.value }}{% endif %}</dd></div>
         <div><dt>Tokens salida</dt><dd>{{ detail.task.tokens_output }}</dd></div>
         <div><dt>Coste</dt><dd>${{ '%.4f'|format(detail.task.cost_actual_usd) }}</dd></div>
       </dl>

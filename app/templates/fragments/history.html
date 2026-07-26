@@ -33,7 +33,13 @@
             </td>
             <td><span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span></td>
             <td>
-              <span>{{ task.execution_strategy.value }}/{{ task.execution_preset.value }}</span>
+              {# Las conversiones comparten historial con la inferencia pero
+                 no tienen estrategia: se identifican por su fichero. #}
+              {% if task.kind.value == 'ingestion' %}
+                <span>{{ task.label or 'Conversión de fichero' }}</span>
+              {% else %}
+                <span>{{ task.execution_strategy.value }}/{{ task.execution_preset.value }}</span>
+              {% endif %}
               {% if task.effective_model %}
                 <small>{{ task.effective_model.model }}</small>
               {% endif %}

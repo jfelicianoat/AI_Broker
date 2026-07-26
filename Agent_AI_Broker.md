@@ -565,9 +565,35 @@ La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de
 
 En `single`, el progreso se limita a `queued`, `routing`, `generating` y un estado terminal. En `mixture_of_agents/fast|slow` también existen `resource_planning`, `proposing` y `synthesizing` como etapas técnicas internas. `slow` persiste plan, wave y concurrencia observada. Extracción, chunking y workflows de conocimiento pertenecen al Orchestrator.
 
+### Novedades del contrato 2.6 (26 de julio de 2026)
+
+`GET /api/v1/capabilities` devuelve `contract_version: "2.6"` con dos flags nuevos: `derived_data_boundary: true` y `work_lanes: ["inference", "ingestion"]`.
+
+**1. La frontera de datos se declara en un solo campo.** Hasta 2.5, para que un modelo cloud fuese siquiera candidato la app tenía que acertar **tres** cosas a la vez: `risk.data_classification` permisiva, `model_requirements.cloud_allowed: true` y un `allowed_providers` que incluyera al proveedor. Los dos últimos tenían defaults restrictivos (`false` y `["ollama"]`), así que una app que solo declarase su clasificación se quedaba en local sin saberlo.
+
+Ahora `risk.data_classification` es el mando único y los otros dos se **derivan** de él cuando el cliente no se pronuncia:
+
+| `data_classification` | Cloud elegible | Proveedores |
+|---|---|---|
+| `public`, `internal` | sí | todos los configurados |
+| `confidential`, `local_only` | **no** | solo locales |
+
+`confidential` pasa a comportarse como `local_only`: antes solo marcaba `high_stakes` para el meta-router y la tarea podía salir a cloud igual que una `internal`. Cambios de tipo en `ModelRequirements`: `cloud_allowed: bool | None = None` y `allowed_providers: list[str] | None = None`, donde `None` significa «decide tú». Un valor explícito sigue mandando, con un límite que no se cede: **una clasificación restrictiva no se puede abrir con `cloud_allowed: true`**. Si tu app ya enviaba los tres campos, nada cambia para ella.
+
+**2. Carriles de trabajo (`kind`).** Las conversiones de fichero son ahora tareas de pleno derecho con `kind: "ingestion"`, visibles en cola, activas e historial. La inferencia conserva su invariante de un único workflow; la ingesta tiene su propia concurrencia y **no** compite por ese slot. Consecuencias en el contrato:
+
+- `TaskStateResponse` y los items de `/api/v1/queue` llevan `kind`.
+- En una tarea de ingesta, `execution_strategy`, `execution_preset` y `selection_mode` son `null`: una conversión no tiene ejecución que describir, y rellenarlos con `single`/`fast` sería inventarla.
+- Estado nuevo `converting` (activo, terminal ninguno).
+- `GET /api/v1/dashboard/tasks?kind=inference|ingestion` filtra por carril; **sin el parámetro devuelve ambos**.
+- `GET /api/v1/dashboard/summary` incluye `lanes` con `{kind, active, queued, capacity}`.
+- `POST /api/v1/dispatcher/ingestion/tick` avanza el carril de conversiones (contrapartida de `/dispatcher/tick`).
+
+Cancelar una tarea de ingesta **aborta el proceso de conversión de verdad**: la fase pesada corre en un subproceso matable, no en un hilo.
+
 ### Novedades del contrato 2.5 (julio 2026)
 
-`GET /api/v1/capabilities` devuelve `contract_version: "2.5"`. Cambio aditivo único sobre 2.4:
+Cambio aditivo único sobre 2.4:
 
 **Map-reduce de contexto largo (`execution.long_context`).** Cuando los documentos adjuntos de una tarea no caben en el contexto de ningún modelo elegible, el comportamiento por defecto sigue siendo fallar explícito con `CONTEXT_LIMIT_EXCEEDED` (el broker jamás divide ni trunca en silencio). La tarea puede **autorizar** el troceo con `execution.long_context: "map_reduce"` (default `"fail"`; solo estrategia `single`/`auto`, inference `chat`, sin salida JSON):
 
