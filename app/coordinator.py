@@ -45,6 +45,11 @@ from app.task_classifier import classify_task_type
 
 logger = logging.getLogger("ai_broker.coordinator")
 
+# Estados de los que ya no se sale: la tarea no volverá a pedir turno.
+_TERMINAL_STATUSES = frozenset({
+    TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled,
+})
+
 
 @dataclass
 class AgentLoopResult:
@@ -138,6 +143,15 @@ class ConsensusCoordinator:
         return task_id
 
     async def process_task(self, repository, task_id: str) -> None:
+        # Primero de todo: echar de la máquina a los sondeos en sombra. Son
+        # trabajo opcional y su modelo puede estar ocupando la VRAM que esta
+        # tarea necesita, con un lease que impide desalojarlo.
+        try:
+            await self.shadow_probe.yield_to_real_work()
+        except Exception:  # noqa: BLE001 - ceder es best-effort, nunca bloquea
+            logger.warning("shadow_probe.preempt_failed", extra={
+                "event": "shadow_probe.preempt_failed", "task_id": task_id,
+            })
         request = repository.get_task_request(task_id)
         if self.ingestion is not None and request.content.attachments:
             try:
@@ -190,6 +204,13 @@ class ConsensusCoordinator:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return
+            if error.code == "VRAM_INSUFFICIENT":
+                # No cabe AHORA, pero cabría en la máquina vacía: no es un
+                # fallo. Cede el turno conservando su sitio en la cola y deja
+                # pasar a quien sí quepa. VRAM_MODEL_TOO_LARGE no entra aquí a
+                # propósito: ese no cabe nunca y esperar sería engañar.
+                if self._defer_for_memory(repository, task_id, error):
+                    return
             current = repository.get_task(task_id)
             context = self._error_context(error, current.progress)
             stage = context.get("stage")
@@ -222,6 +243,14 @@ class ConsensusCoordinator:
                 },
             )
         finally:
+            # Una tarea que ya terminó no arrastra su historial de espera: los
+            # contadores solo tienen sentido mientras sigue peleando por un
+            # turno. (En `waiting_for_memory` NO se limpia: ahí es donde vive.)
+            try:
+                if repository.get_task(task_id).status in _TERMINAL_STATUSES:
+                    repository.clear_memory_wait(task_id)
+            except Exception:
+                logger.warning("task.clear_memory_wait_failed", extra={"task_id": task_id})
             # Registra el caso de enrutamiento (para el aprendizaje) sea cual sea
             # el desenlace; el helper filtra los estados no terminales.
             try:
@@ -237,6 +266,36 @@ class ConsensusCoordinator:
                     self.shadow_probe.schedule(repository, task_id, request)
             except Exception:
                 logger.warning("shadow_probe.schedule_failed", extra={"task_id": task_id})
+
+    def _defer_for_memory(self, repository, task_id: str, error: ProviderError) -> bool:
+        """Devuelve la tarea a la cola en espera de memoria.
+
+        Devuelve si el aplazamiento salió adelante: si algo falla aquí se sigue
+        por el camino normal y la tarea acaba en `failed`, que es peor pero
+        honesto — lo intolerable sería dejarla en un limbo sin estado."""
+        resources = self.scheduler.config.resources
+        block = dict(getattr(error, "memory_block", None) or {"message": str(error)})
+        try:
+            state = repository.defer_task_for_memory(
+                task_id,
+                block,
+                wait_seconds=resources.memory_wait_seconds,
+                reserve_after=resources.memory_reserve_after,
+                reserve_window_seconds=resources.memory_reserve_window_seconds,
+            )
+        except Exception:
+            logger.warning("task.defer_failed", exc_info=True, extra={
+                "event": "task.defer_failed", "task_id": task_id,
+            })
+            return False
+        logger.info("task.waiting_for_memory", extra={
+            "event": "task.waiting_for_memory",
+            "task_id": task_id,
+            "deferrals": state.get("deferrals"),
+            "reserved": bool(state.get("reserved_until")),
+            "model": block.get("model"),
+        })
+        return True
 
     def _maybe_record_routing_case(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         """Guarda un caso (bucket → decisión → resultado) al terminar una tarea
@@ -435,6 +494,7 @@ class ConsensusCoordinator:
                 "phase": TaskStatus.generating.value,
                 "invocations_completed": 0,
                 "invocations_total": 1,
+                "active_invocations": [model.model_dump(mode="json")],
                 "budget_limit_usd": request.model_requirements.max_cost_usd,
                 "cost_estimated_usd": None,
                 "cost_actual_usd": 0.0,
@@ -609,6 +669,7 @@ class ConsensusCoordinator:
                 "invocations_completed": completed,
                 "invocations_total": chunk_total + 1,
                 "chunks_total": chunk_total,
+                "active_invocations": [model.model_dump(mode="json")],
                 "budget_limit_usd": request.model_requirements.max_cost_usd,
                 "cost_estimated_usd": None,
                 "cost_actual_usd": round(sum(item.cost_usd for item in outputs), 6),
@@ -1127,6 +1188,7 @@ class ConsensusCoordinator:
                 "invocations_total": max_iterations,
                 "agent_iteration": iteration,
                 "agent_max_iterations": max_iterations,
+                "active_invocations": [model.model_dump(mode="json")],
                 "budget_limit_usd": budget,
                 "cost_actual_usd": round(cost, 8),
             }

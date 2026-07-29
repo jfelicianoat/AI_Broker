@@ -68,6 +68,9 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'logging_level': ('Nivel', 'Registro'),
     'logging_max_bytes': ('Tamaño máximo por fichero (bytes)', 'Registro'),
     'max_loaded_local_models': ('Máx. modelos locales cargados', 'Configuración'),
+    'memory_reserve_after': ('Turnos cedidos antes de reservar', 'Configuración'),
+    'memory_reserve_window_seconds': ('Duración de la reserva (s)', 'Configuración'),
+    'memory_wait_seconds': ('Espera entre reintentos por memoria (s)', 'Configuración'),
     'max_parallel_invocations': ('Máx. invocaciones paralelas slow', 'Configuración'),
     'max_task_attempts': ('Reintentos por tarea', 'Configuración'),
     'model_enrichment_refresh_hours': ('Refresco (horas)', 'Catálogo externo de modelos'),
@@ -181,6 +184,9 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("resources.vram_safety_margin_gb", "Margen seguridad VRAM"),
         ("resources.max_loaded_local_models", "Máx. modelos locales cargados"),
         ("resources.allow_execution_waves", "Permitir waves"),
+        ("resources.memory_wait_seconds", "Espera entre reintentos por memoria"),
+        ("resources.memory_reserve_after", "Turnos cedidos antes de reservar"),
+        ("resources.memory_reserve_window_seconds", "Duración de la reserva"),
         ("processing.max_task_attempts", "Reintentos por tarea"),
         ("processing.dispatcher_interval_seconds", "Intervalo del dispatcher"),
         ("processing.unload_after_task", "Descargar modelos al terminar"),
@@ -364,6 +370,15 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         form, "max_loaded_local_models", minimum=1, maximum=64
     )
     resources["allow_execution_waves"] = _checked(form, "allow_execution_waves")
+    resources["memory_wait_seconds"] = _float_range_field(
+        form, "memory_wait_seconds", minimum=1.0, maximum=3600.0
+    )
+    resources["memory_reserve_after"] = _int_range_field(
+        form, "memory_reserve_after", minimum=1, maximum=100
+    )
+    resources["memory_reserve_window_seconds"] = _float_range_field(
+        form, "memory_reserve_window_seconds", minimum=10.0, maximum=86400.0
+    )
     # Guard de presencia: sin él, un formulario parcial que no incluya estas
     # casillas desactivaría el dispatcher automático al guardar.
     if form.get("max_task_attempts") is not None:

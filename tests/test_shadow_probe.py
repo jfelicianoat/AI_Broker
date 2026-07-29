@@ -6,6 +6,7 @@ trabajo local en una máquina ocupada.
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -87,6 +88,8 @@ class _ProviderStub:
         self.stats = stats or {}
         self.measured: list[str] = []
         self.fail = False
+        self.hold: asyncio.Event | None = None
+        self.started = asyncio.Event()
 
     async def eligible_catalog(self, request):
         return self.catalog, self.catalog, self.catalog
@@ -98,6 +101,11 @@ class _ProviderStub:
         self.measured.append(model.model)
         if self.fail:
             raise RuntimeError("el aspirante no responde")
+        if self.hold is not None:
+            # Sondeo que se queda ocupando la máquina hasta que alguien lo
+            # suelta (o lo cancela), como el aspirante real de 48 GB.
+            self.started.set()
+            await self.hold.wait()
         return ModelOutput("respuesta descartada", 10, 5, 0.0, 1234.0)
 
 
@@ -211,6 +219,39 @@ class ShadowProbeRunTests(unittest.IsolatedAsyncioTestCase):
         await probe.drain()
 
         self.assertEqual(provider.measured, [])
+
+    async def test_an_inflight_probe_gives_the_machine_back_to_real_work(self) -> None:
+        """La regresión que tumbó una petición del usuario: el sondeo eligió un
+        aspirante de 48 GB con la máquina ociosa y, cuando entró una tarea real
+        de 13 GB, no cabían juntos en los 62 GB del presupuesto. El desalojo
+        por capacidad no podía tocar al aspirante porque su lease seguía vivo,
+        así que la tarea murió con VRAM_INSUFFICIENT en vez de esperar los 7
+        segundos que le faltaban al sondeo.
+
+        La comprobación de máquina ociosa solo mira el instante del arranque;
+        esta es la otra mitad, la que cubre lo que pasa después.
+        """
+        provider = _ProviderStub([_entry("aspirante-pesado")])
+        provider.hold = asyncio.Event()
+        probe = ShadowProbe(provider, self._config())
+
+        probe.schedule(self.repository, self.task_id, self._request())
+        await asyncio.wait_for(provider.started.wait(), timeout=5)
+
+        preempted = await asyncio.wait_for(probe.yield_to_real_work(), timeout=5)
+
+        self.assertTrue(preempted)
+        self.assertEqual(probe._jobs, set())
+        # La medida interrumpida no cuenta como evidencia ni a favor ni en
+        # contra: queda en 'started', que las estadísticas ya excluyen.
+        rows = self._invocations()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "started")
+
+    async def test_yielding_with_no_probe_in_flight_is_a_no_op(self) -> None:
+        probe = ShadowProbe(_ProviderStub([]), self._config())
+
+        self.assertFalse(await probe.yield_to_real_work())
 
     async def test_cloud_models_are_probed_even_with_the_machine_busy(self) -> None:
         """El cloud no compite por la VRAM local, así que la ocupación de la

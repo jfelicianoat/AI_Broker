@@ -177,6 +177,22 @@ class ResourceConfig(BaseModel):
     max_loaded_local_models: int | str = "auto"
     scheduling_policy: str = "adaptive"
     allow_execution_waves: bool = True
+    # --- Espera por memoria (app.repository.defer_task_for_memory) ---
+    # Una tarea que no cabe AHORA pero sí cabría en la máquina vacía no es un
+    # fallo: cede el turno y espera. Lo que sigue gobierna esa espera.
+    #
+    # Espera indefinida por decisión explícita: nunca se descarta trabajo por
+    # un pico de memoria. La tarea queda visible en el panel como "Esperando
+    # memoria" con quién se la ocupa, y se cancela a mano si estorba.
+    memory_wait_seconds: float = Field(default=20.0, ge=1.0, le=3600.0)
+    # Tras cuántos turnos cedidos la tarea reserva el suyo. Es el freno a la
+    # inanición: sin él, una petición de 48 GB nunca correría mientras sigan
+    # llegando peticiones de 8 GB que sí caben.
+    memory_reserve_after: int = Field(default=5, ge=1, le=100)
+    # Cuánto dura esa reserva. Al expirar, el contador se reinicia y la cola
+    # vuelve a fluir: si la memoria no se libera jamás, la reserva no puede
+    # convertirse en un bloqueo permanente de todo lo demás.
+    memory_reserve_window_seconds: float = Field(default=300.0, ge=10.0, le=86400.0)
 
 
 class ModelEnrichmentConfig(BaseModel):

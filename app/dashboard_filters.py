@@ -14,6 +14,7 @@ STATUS_LABELS = {
     "synthesizing": "Sintetizando",
     "converting": "Convirtiendo",
     "waiting_for_tools": "Esperando herramientas",
+    "waiting_for_memory": "Esperando memoria",
     "completed": "Completada",
     "failed": "Fallida",
     "cancelled": "Cancelada",

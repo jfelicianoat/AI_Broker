@@ -565,6 +565,22 @@ La cota previa usa bytes UTF-8 de entrada, schema, reserva de salida y margen de
 
 En `single`, el progreso se limita a `queued`, `routing`, `generating` y un estado terminal. En `mixture_of_agents/fast|slow` también existen `resource_planning`, `proposing` y `synthesizing` como etapas técnicas internas. `slow` persiste plan, wave y concurrencia observada. Extracción, chunking y workflows de conocimiento pertenecen al Orchestrator.
 
+> **¿Solo quieres integrar una aplicación?** [`docs/Client_API.md`](docs/Client_API.md) es la especificación autocontenida y al día: qué enviar, qué recibir y qué errores esperar, sin tener que reconstruirlo leyendo este histórico de versiones.
+
+### Novedades del contrato 2.7 (28 de julio de 2026)
+
+`GET /api/v1/capabilities` devuelve `contract_version: "2.7"`. Un estado nuevo, `waiting_for_memory`, y un código de error nuevo, `VRAM_MODEL_TOO_LARGE`.
+
+**Quedarse sin memoria deja de ser un fallo.** Hasta 2.6, una tarea que pedía un modelo local sin VRAM libre moría con `VRAM_INSUFFICIENT` y `retryable: false`, aunque el hueco fuese a liberarse segundos después: bastaba con que otro proceso tuviera un modelo grande cargado en ese instante. Ahora la tarea **cede el turno** y pasa a `waiting_for_memory` conservando su posición en la cola; el despachador adelanta a la siguiente que sí quepa, y la aplazada reintenta sola.
+
+Para que ceder el turno no se convierta en no correr nunca, tras `resources.memory_reserve_after` turnos cedidos la tarea **reserva** el suyo y nadie la adelanta. La reserva es una ventana (`resources.memory_reserve_window_seconds`), no un derecho perpetuo: al expirar, la cola vuelve a fluir. Sin esa caducidad, una máquina que jamás libera memoria acabaría bloqueada al completo por una única tarea que no puede correr.
+
+La espera **no caduca** por decisión de producto: no se descarta trabajo por un pico de memoria. La tarea queda visible en el panel con quién le ocupa la memoria y se cancela a mano si estorba.
+
+Distinto es que el modelo no quepa **ni con la máquina vacía**: eso no se arregla esperando, así que falla al momento con `VRAM_MODEL_TOO_LARGE` (no reintentable). `VRAM_INSUFFICIENT` pasa a significar solo "ahora mismo no, vuelve luego" y viaja con `retryable: true`.
+
+**Qué cambia para una app cliente:** trata `waiting_for_memory` como un estado no terminal más — sigue sondeando y no hagas nada. Si tu cliente asumía que todo lo que no fuese `queued` ni una etapa conocida era un error, es el único punto a revisar.
+
 ### Novedades del contrato 2.6 (26 de julio de 2026)
 
 `GET /api/v1/capabilities` devuelve `contract_version: "2.6"` con dos flags nuevos: `derived_data_boundary: true` y `work_lanes: ["inference", "ingestion"]`.

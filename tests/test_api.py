@@ -379,7 +379,7 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.6"
+    assert body["contract_version"] == "2.7"
     # 2.6: la frontera de datos se declara en un único campo y los carriles de
     # trabajo son consultables. Un cliente que lo vea puede omitir
     # cloud_allowed/allowed_providers y confiar en su clasificación.

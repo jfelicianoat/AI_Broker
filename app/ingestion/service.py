@@ -576,10 +576,10 @@ class IngestionService:
                 "ingestion.worker_stderr",
                 extra={"event": "ingestion.worker_stderr", "file_id": record.id},
             )
-        return self._read_worker_output(record, stdout, process.returncode)
+        return self._read_worker_output(record, stdout, stderr, process.returncode)
 
     def _read_worker_output(
-        self, record: FileRecord, stdout: bytes, returncode: int | None,
+        self, record: FileRecord, stdout: bytes, stderr: bytes, returncode: int | None,
     ) -> ConversionResult:
         result: ConversionResult | None = None
         failure: WorkerFailure | None = None
@@ -604,11 +604,29 @@ class IngestionService:
         if failure is not None:
             raise failure
         if result is None:
-            raise WorkerFailure(
-                "CONVERSION_FAILED",
-                f"El proceso de conversión terminó con código {returncode} sin devolver resultado",
-            )
+            # El hijo murió sin poder contarlo (un OOM, o una excepción antes
+            # de emitir nada). Su stderr es la única pista que queda: dejarla
+            # caer convertía cada muerte muda en una investigación desde cero.
+            detail = self._stderr_tail(stderr)
+            logger.error("ingestion.worker_crashed", extra={
+                "event": "ingestion.worker_crashed", "file_id": record.id,
+                "returncode": returncode, "stderr_tail": detail,
+            })
+            message = f"El proceso de conversión terminó con código {returncode} sin devolver resultado"
+            if detail:
+                message += f". Último error del proceso: {detail}"
+            raise WorkerFailure("CONVERSION_FAILED", message)
         return result
+
+    @staticmethod
+    def _stderr_tail(stderr: bytes, *, limit: int = 600) -> str:
+        """Las últimas líneas con contenido de stderr: en un traceback de
+        Python es donde está el tipo de excepción y su mensaje."""
+        text = stderr.decode("utf-8", errors="replace").strip()
+        if not text:
+            return ""
+        lines = [line for line in text.splitlines() if line.strip()]
+        return " | ".join(lines[-3:])[-limit:]
 
     @staticmethod
     def _kill(process: Any) -> None:

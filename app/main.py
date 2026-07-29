@@ -626,7 +626,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.6",
+            contract_version="2.7",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,

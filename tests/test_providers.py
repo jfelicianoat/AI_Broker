@@ -232,6 +232,33 @@ class OllamaProviderTests(unittest.IsolatedAsyncioTestCase):
             async with provider.lifecycle.lease("nuevo", estimated_size=500_000_000):
                 pass
         self.assertEqual(raised.exception.code, "VRAM_INSUFFICIENT")
+        # Reintentable y con el detalle de quién ocupa: es lo que permite al
+        # coordinador aplazar la tarea en vez de matarla, y al panel decir de
+        # quién se está esperando.
+        self.assertTrue(raised.exception.retryable)
+        block = raised.exception.memory_block
+        self.assertEqual(block["model"], "nuevo")
+        self.assertEqual(block["holders"], ["big"])
+        await provider.close()
+
+    async def test_a_model_bigger_than_the_whole_budget_never_waits(self) -> None:
+        """Distinción que decide el destino de la tarea: esto no cabe ni con la
+        máquina vacía, así que aplazarlo sería prometer un turno que no llega
+        nunca. Código propio y NO reintentable."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": []})
+            return httpx.Response(404)
+
+        config = BrokerConfig(
+            resources=ResourceConfig(local_vram_budget_gb=1.0, vram_safety_margin_gb=0.0),
+        )
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            async with provider.lifecycle.lease("gigante", estimated_size=8 * 1024**3):
+                pass
+        self.assertEqual(raised.exception.code, "VRAM_MODEL_TOO_LARGE")
+        self.assertFalse(raised.exception.retryable)
         await provider.close()
 
     async def test_unload_maps_http_error_to_retryable_failure(self) -> None:
