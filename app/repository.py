@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -37,6 +37,12 @@ ACTIVE_TASK_STATUSES = (
 ACTIVE_INFERENCE_STATUSES = tuple(
     status for status in ACTIVE_TASK_STATUSES if status != "converting"
 )
+
+# Estados de una tarea que sigue esperando turno. `waiting_for_memory` cuenta
+# como pendiente en todo lo que mira la cola —listado, reordenación, mover
+# arriba/abajo— porque para el usuario ES una tarea en cola: no ha corrido, no
+# ha fallado, y quiere poder colocarla o cancelarla como cualquier otra.
+PENDING_QUEUE_STATUSES = ("queued", "waiting_for_memory")
 
 
 class IdempotencyConflict(ValueError):
@@ -134,11 +140,33 @@ class TaskRepository:
         )
         return row is not None
 
+    # Estados desde los que una tarea de inferencia puede entrar a ejecutarse:
+    # la que nunca ha corrido y la que cedió el turno esperando memoria. Son un
+    # único conjunto a propósito — para el orden de la cola, esperar memoria no
+    # degrada a la tarea ni la manda al final.
+    CLAIMABLE_INFERENCE_STATUSES = (
+        TaskStatus.queued.value, TaskStatus.waiting_for_memory.value,
+    )
+
     def claim_next_queued_task_id(self) -> str | None:
         """Reclama como máximo un workflow de INFERENCIA en una transacción
-        inmediata. El carril de ingesta va por `claim_next_ingestion_task`."""
+        inmediata. El carril de ingesta va por `claim_next_ingestion_task`.
+
+        Dos reglas por encima del orden FIFO, ambas por la memoria:
+
+        1. **Se salta a quien está esperando su turno.** Una tarea aplazada
+           lleva `not_before` en el futuro; mientras tanto pasa la siguiente
+           que sí quepa. Es lo que evita que la máquina se quede ociosa
+           delante de una cola llena solo porque la cabeza no cabe.
+        2. **Salvo que alguien tenga reserva.** Tras `memory_reserve_after`
+           turnos cedidos, la tarea aplazada reserva el suyo y nadie la
+           adelanta hasta que la ventana expire. Sin esto, una petición grande
+           no correría jamás mientras siguieran llegando pequeñas.
+        """
         active = ACTIVE_INFERENCE_STATUSES
         marks = ",".join("?" for _ in active)
+        claimable = self.CLAIMABLE_INFERENCE_STATUSES
+        claim_marks = ",".join("?" for _ in claimable)
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             if connection.execute(
@@ -146,18 +174,44 @@ class TaskRepository:
                 active,
             ).fetchone():
                 return None
-            row = connection.execute(
-                "SELECT id, progress_json FROM tasks WHERE status = 'queued' AND kind = 'inference' "
-                "ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1"
+            # La reserva vencida se limpia antes de mirar nada: si siguiera en
+            # pie tras expirar, la cola quedaría congelada para siempre cuando
+            # la memoria no llega a liberarse.
+            connection.execute(
+                "UPDATE tasks SET memory_reserved_until = NULL, memory_deferrals = 0 "
+                "WHERE memory_reserved_until IS NOT NULL AND memory_reserved_until <= ?",
+                (now,),
+            )
+            order = "ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1"
+            reserved = connection.execute(
+                f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
+                f"AND kind = 'inference' AND memory_reserved_until > ? {order}",
+                (*claimable, now),
             ).fetchone()
+            if reserved is not None:
+                # Con reserva en pie solo corre la reservada, y solo cuando le
+                # toca reintentar. Si aún no le toca, nadie corre: eso es
+                # exactamente lo que la reserva significa.
+                row = connection.execute(
+                    "SELECT id, progress_json FROM tasks WHERE id = ? "
+                    "AND (not_before IS NULL OR not_before <= ?)",
+                    (reserved["id"], now),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
+                    f"AND kind = 'inference' AND (not_before IS NULL OR not_before <= ?) {order}",
+                    (*claimable, now),
+                ).fetchone()
             if row is None:
                 return None
             progress = loads_json(row["progress_json"], {})
             progress["phase"] = TaskStatus.routing.value
             cursor = connection.execute(
-                "UPDATE tasks SET status = ?, queue_position = NULL, progress_json = ?, updated_at = ? "
-                "WHERE id = ? AND status = 'queued'",
-                (TaskStatus.routing.value, dumps_json(progress), now, row["id"]),
+                f"UPDATE tasks SET status = ?, queue_position = NULL, progress_json = ?, "
+                f"not_before = NULL, updated_at = ? "
+                f"WHERE id = ? AND status IN ({claim_marks})",
+                (TaskStatus.routing.value, dumps_json(progress), now, row["id"], *claimable),
             )
             if cursor.rowcount != 1:
                 return None
@@ -166,6 +220,79 @@ class TaskRepository:
                 (row["id"], "task.claimed", dumps_json({"status": "routing"}), now),
             )
             return str(row["id"])
+
+    def defer_task_for_memory(
+        self,
+        task_id: str,
+        block: dict[str, Any],
+        *,
+        wait_seconds: float,
+        reserve_after: int,
+        reserve_window_seconds: float,
+    ) -> dict[str, Any]:
+        """Devuelve la tarea a la cola porque ahora mismo no hay memoria.
+
+        No es un fallo y no se pierde trabajo: la tarea conserva su sitio en la
+        cola (`queue_position` intacto) y vuelve a ser reclamable dentro de
+        `wait_seconds`. Mientras tanto el despachador puede adelantar a quien
+        sí quepa, que es de lo que se trata.
+
+        Al alcanzar `reserve_after` turnos cedidos abre una ventana de reserva:
+        durante ella nadie la adelanta. La ventana caduca sola para que una
+        máquina que nunca libera memoria no acabe congelando toda la cola.
+
+        Devuelve el estado de la espera, para el evento y para el panel.
+        """
+        now = datetime.now(timezone.utc)
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT status, memory_deferrals, memory_reserved_until FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            deferrals = int(row["memory_deferrals"] or 0) + 1
+            reserved_until = row["memory_reserved_until"]
+            # La reserva se abre una vez al cruzar el umbral y no se renueva en
+            # cada aplazamiento: renovarla la haría perpetua, que es justo lo
+            # que la ventana existe para impedir.
+            if deferrals >= reserve_after and not reserved_until:
+                reserved_until = (
+                    now + timedelta(seconds=reserve_window_seconds)
+                ).isoformat()
+            not_before = (now + timedelta(seconds=wait_seconds)).isoformat()
+            state = {
+                **block,
+                "deferrals": deferrals,
+                "waiting_since": block.get("waiting_since") or now.isoformat(),
+                "retry_at": not_before,
+                "reserved_until": reserved_until,
+            }
+            connection.execute(
+                "UPDATE tasks SET status = ?, not_before = ?, memory_deferrals = ?, "
+                "memory_reserved_until = ?, memory_block_json = ?, updated_at = ? WHERE id = ?",
+                (
+                    TaskStatus.waiting_for_memory.value, not_before, deferrals,
+                    reserved_until, dumps_json(state), now.isoformat(), task_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.waiting_for_memory", dumps_json(state), now.isoformat()),
+            )
+            return state
+
+    def clear_memory_wait(self, task_id: str) -> None:
+        """Borra el rastro de la espera cuando la tarea por fin arranca.
+
+        Se llama al empezar a ejecutar de verdad, no al reclamar: entre reclamo
+        y ejecución todavía puede volver a no haber memoria, y en ese caso el
+        contador de aplazamientos debe seguir contando."""
+        self.db.execute(
+            "UPDATE tasks SET not_before = NULL, memory_deferrals = 0, "
+            "memory_reserved_until = NULL, memory_block_json = NULL WHERE id = ?",
+            (task_id,),
+        )
 
     def create_ingestion_task(self, file_id: str, filename: str, size_bytes: int) -> str:
         """Fila de tarea para una conversión de fichero.
@@ -528,7 +655,7 @@ class TaskRepository:
             SELECT * FROM tasks
             ORDER BY
               CASE
-                WHEN status = 'queued' THEN 0
+                WHEN status IN ('queued','waiting_for_memory') THEN 0
                 WHEN status IN ('routing','planning','resource_planning','chunking','generating','proposing','evaluating','debating','synthesizing','verifying') THEN 1
                 ELSE 2
               END,
@@ -555,7 +682,7 @@ class TaskRepository:
         terminal_statuses = {TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled}
         for row in rows:
             item = self._row_to_queue_item(row)
-            if item.status == TaskStatus.queued:
+            if item.status.value in PENDING_QUEUE_STATUSES:
                 pending.append(item)
             elif item.status in active_statuses:
                 active.append(item)
@@ -587,14 +714,18 @@ class TaskRepository:
     def reorder_queue(self, task_ids: list[str]) -> QueueResponse:
         now = _utc_now_iso()
         with self.db.transaction() as connection:
-            rows = connection.execute("SELECT id FROM tasks WHERE status = 'queued'").fetchall()
+            marks = ",".join("?" for _ in PENDING_QUEUE_STATUSES)
+            rows = connection.execute(
+                f"SELECT id FROM tasks WHERE status IN ({marks})", PENDING_QUEUE_STATUSES,
+            ).fetchall()
             current_ids = {str(row["id"]) for row in rows}
             if set(task_ids) != current_ids:
                 raise ValueError("task_ids must contain exactly all queued task ids")
             for position, task_id in enumerate(task_ids, start=1):
                 connection.execute(
-                    "UPDATE tasks SET queue_position = ?, updated_at = ? WHERE id = ? AND status = 'queued'",
-                    (position, now, task_id),
+                    f"UPDATE tasks SET queue_position = ?, updated_at = ? "
+                    f"WHERE id = ? AND status IN ({marks})",
+                    (position, now, task_id, *PENDING_QUEUE_STATUSES),
                 )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",

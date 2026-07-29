@@ -158,7 +158,7 @@ class DashboardQueryRepository:
         *,
         page: int,
         page_size: int,
-        status: TaskStatus | None,
+        status: TaskStatus | tuple[TaskStatus, ...] | None,
         origin: str | None,
         kind: TaskKind | None = None,
     ) -> DashboardTaskPage:
@@ -168,8 +168,11 @@ class DashboardQueryRepository:
             where.append("t.kind = ?")
             params.append(kind.value)
         if status is not None:
-            where.append("t.status = ?")
-            params.append(status.value)
+            # Acepta varios estados porque "en cola" ya no es uno solo: una
+            # tarea esperando memoria sigue pendiente y debe verse en la cola.
+            wanted = (status,) if isinstance(status, TaskStatus) else tuple(status)
+            where.append(f"t.status IN ({','.join('?' for _ in wanted)})")
+            params.extend(item.value for item in wanted)
         if origin is not None:
             where.append("json_extract(t.request_json, '$.content.metadata.origin') = ?")
             params.append(origin)
@@ -192,7 +195,7 @@ class DashboardQueryRepository:
             {where_sql}
             GROUP BY t.id
             ORDER BY
-              CASE WHEN t.status = 'queued' THEN 0
+              CASE WHEN t.status IN ('queued','waiting_for_memory') THEN 0
                    WHEN t.status IN ({','.join('?' for _ in ACTIVE_STATUSES)}) THEN 1
                    ELSE 2 END,
               t.queue_position ASC,
@@ -419,6 +422,11 @@ class DashboardQueryRepository:
             requested_model=requested_model,
             effective_model=effective_model,
             fallback_used=result.get("fallback_used") if isinstance(result.get("fallback_used"), bool) else None,
+            memory_block=(
+                loads_json(row["memory_block_json"], None)
+                if "memory_block_json" in row.keys()
+                else None
+            ),
             invocations=int(row["invocation_count"] or 0),
             tokens_input=int(row["invocation_tokens_input"] or 0),
             tokens_output=int(row["invocation_tokens_output"] or 0),

@@ -156,6 +156,10 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .badge-completed { border-color: var(--green-line); background: var(--green-fill); color: var(--green-ink); }
 .badge-failed { border-color: var(--red-line); background: var(--red-fill); color: var(--red-ink); }
 .badge-cancelled { border-color: var(--muted-line); background: var(--raised); color: var(--text-4); }
+/* Esperando memoria no es un fallo: comparte la familia ámbar de "en cola",
+   que es lo que de verdad es — una tarea pendiente de turno. */
+.badge-waiting_for_memory { border-color: var(--amber-line); background: var(--amber-fill); color: var(--amber-ink); }
+.memory-wait { display: block; margin-top: 4px; color: var(--text-3); }
 .badge-degraded { border-color: var(--amber-line); color: var(--amber-ink); }
 .badge-unavailable { border-color: var(--red-line); color: var(--red-ink); }
 .badge-neutral { color: var(--info-ink); }

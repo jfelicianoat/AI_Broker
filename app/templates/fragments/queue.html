@@ -47,7 +47,18 @@
             {% endif %}
           </td>
           <td>{{ task.created_at|short_date }}</td>
-          <td><span class="badge badge-queued">{{ task.status|status_label }}</span></td>
+          <td>
+            <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+            {% if task.memory_block %}
+              {# Sin el detalle, "Esperando memoria" no deja decidir si vale la
+                 pena cancelar: lo que importa es quién ocupa y cuánto falta. #}
+              <small class="memory-wait">
+                {{ task.memory_block.model }} necesita {{ task.memory_block.needed_bytes|gb }}
+                {%- if task.memory_block.holders %}; ocupan {{ task.memory_block.holders|join(', ') }}{% endif %}
+                {%- if task.memory_block.reserved_until %} · turno reservado{% endif %}
+              </small>
+            {% endif %}
+          </td>
           <td class="align-right actions">
             <button class="link-button" type="button"
                     hx-post="/dashboard/actions/queue/{{ task.task_id }}/top"

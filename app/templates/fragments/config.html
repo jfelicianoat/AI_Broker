@@ -65,6 +65,21 @@
       <input name="max_loaded_local_models" value="{{ config.resources.max_loaded_local_models }}" placeholder="auto">
     </label>
     <label class="field">
+      <span>Espera entre reintentos por memoria (s)</span>
+      <input name="memory_wait_seconds" value="{{ config.resources.memory_wait_seconds }}" inputmode="decimal">
+      <small>Una tarea que no cabe ahora cede el turno y reintenta pasado este tiempo. Mientras tanto pasa la siguiente que sí quepa.</small>
+    </label>
+    <label class="field">
+      <span>Turnos cedidos antes de reservar</span>
+      <input name="memory_reserve_after" value="{{ config.resources.memory_reserve_after }}" inputmode="numeric">
+      <small>Tras este número de aplazamientos nadie la adelanta. Es el freno a que una petición grande no corra nunca.</small>
+    </label>
+    <label class="field">
+      <span>Duración de la reserva (s)</span>
+      <input name="memory_reserve_window_seconds" value="{{ config.resources.memory_reserve_window_seconds }}" inputmode="decimal">
+      <small>Al expirar, la cola vuelve a fluir: si la memoria no se libera nunca, la reserva no puede bloquear todo lo demás.</small>
+    </label>
+    <label class="field">
       <span>Reintentos por tarea</span>
       <input name="max_task_attempts" value="{{ config.processing.max_task_attempts }}" inputmode="numeric">
     </label>

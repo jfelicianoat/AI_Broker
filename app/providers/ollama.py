@@ -23,6 +23,12 @@ from app.providers.base import (
 from app.schemas import OutputFormat, TaskCreateRequest
 
 
+def _gib(value: float) -> str:
+    """Bytes en GiB para mensajes de error. La cifra la lee una persona que
+    está decidiendo si cancelar: en bytes no le dice nada."""
+    return f"{value / 1024**3:.1f} GB"
+
+
 class OllamaLifecycleManager:
     def __init__(self, client: httpx.AsyncClient, config: BrokerConfig) -> None:
         self.client = client
@@ -67,6 +73,16 @@ class OllamaLifecycleManager:
             (self.config.resources.local_vram_budget_gb - self.config.resources.vram_safety_margin_gb)
             * 1024**3
         )
+        # Distinción que antes no se hacía y que decide el destino de la tarea:
+        # un modelo más grande que TODO el presupuesto no cabrá por mucho que
+        # se espere, así que esperar sería mentirle al usuario. Los demás casos
+        # son ocupación temporal y se resuelven cediendo el turno.
+        if estimated_size > budget:
+            raise ProviderError(
+                "VRAM_MODEL_TOO_LARGE",
+                f"{model} necesita {_gib(estimated_size)} y el presupuesto completo es "
+                f"{_gib(budget)}: no cabe ni con la máquina vacía",
+            )
         running_names = {str(item.get("name") or item.get("model") or "") for item in running}
         occupied = sum(int(item.get("size_vram") or 0) for item in running)
         occupied += sum(size for name, size in self._reserved_sizes.items() if name not in running_names)
@@ -83,7 +99,27 @@ class OllamaLifecycleManager:
         occupied = sum(int(item.get("size_vram") or 0) for item in refreshed)
         occupied += sum(size for name, size in self._reserved_sizes.items() if name not in refreshed_names)
         if occupied + estimated_size > budget:
-            raise ProviderError("VRAM_INSUFFICIENT", f"No hay VRAM segura para cargar {model}")
+            # Retryable y con el detalle de quién ocupa: el coordinador lo
+            # traduce en un aplazamiento con turno cedido, y el panel puede
+            # decir de quién se está esperando en vez de un "espera" a secas.
+            holders = sorted(
+                {name for name in refreshed_names if name}
+                | {name for name in self._reserved_sizes if name not in refreshed_names}
+            )
+            error = ProviderError(
+                "VRAM_INSUFFICIENT",
+                f"No hay VRAM segura para cargar {model}: necesita {_gib(estimated_size)}, "
+                f"hay {_gib(occupied)} ocupados de {_gib(budget)}",
+                retryable=True,
+            )
+            error.memory_block = {  # type: ignore[attr-defined]
+                "model": model,
+                "needed_bytes": estimated_size,
+                "occupied_bytes": occupied,
+                "budget_bytes": budget,
+                "holders": holders,
+            }
+            raise error
 
     async def unload(self, model: str) -> None:
         try:

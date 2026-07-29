@@ -28,6 +28,11 @@ class TaskStatus(str, Enum):
     # activo, pero no consume el workflow único de la inferencia.
     converting = "converting"
     waiting_for_tools = "waiting_for_tools"
+    # La tarea cabe en el presupuesto, pero ahora mismo no hay memoria libre:
+    # algo la ocupa (otro proceso, un modelo cargado a mano en LM Studio). No
+    # es un fallo y no consume el workflow único — espera su turno mientras el
+    # resto de la cola sigue avanzando.
+    waiting_for_memory = "waiting_for_memory"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -690,6 +695,9 @@ class DashboardTaskItem(StrictBaseModel):
     requested_model: ModelReference | None
     effective_model: ModelReference | None
     fallback_used: bool | None
+    # Por qué está esperando memoria y quién se la ocupa, cuando el estado es
+    # `waiting_for_memory`. None en cualquier otro caso.
+    memory_block: dict[str, Any] | None = None
     invocations: int
     tokens_input: int
     tokens_output: int

@@ -34,6 +34,7 @@ def _run_worker(job: dict) -> tuple[int, list[dict]]:
         input=json.dumps(job),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=str(_PROJECT_ROOT),
         timeout=120,
     )
@@ -80,6 +81,25 @@ class WorkerProtocolTests(unittest.TestCase):
         errors = [event for event in events if event["event"] == "error"]
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0]["code"], "CONVERSION_FAILED")
+
+    def test_symbols_outside_the_console_codepage_survive_the_pipe(self) -> None:
+        """La regresión que mató un PDF de matemáticas de 2204 páginas: en
+        Windows el stdout del hijo se abría en cp1252, y la primera integral
+        reventaba el write con UnicodeEncodeError. El hijo moría con código 1
+        sin emitir nada, así que el padre solo sabía decir 'terminó sin
+        devolver resultado' — 27 minutos de conversión tirados y ninguna pista.
+        """
+        contenido = "# Análisis\n\n∫ f(x) dx = ∑ αᵢ → π² ≈ 9,87 · 10³ ✓ 日本語"
+        path = self.tmp / "matematicas.md"
+        path.write_text(contenido, encoding="utf-8")
+        source = ConversionInput("file_3", "matematicas.md", ".md", "text", str(path))
+
+        code, events = _run_worker(self._job(source))
+
+        self.assertEqual(code, 0)
+        results = [event for event in events if event["event"] == "result"]
+        self.assertEqual(len(results), 1)
+        self.assertIn("∫ f(x) dx = ∑ αᵢ → π²", results[0]["data"]["markdown"])
 
     def test_bad_input_is_rejected_without_pretending_to_convert(self) -> None:
         code, events = _run_worker({"source": {"roto": True}, "ingestion": {}})
@@ -134,6 +154,25 @@ class IsolatedConversionTests(unittest.IsolatedAsyncioTestCase):
         source = ConversionInput.from_record(record)
         with self.assertRaises(TimeoutError):
             await service._run_conversion_subprocess(record, source, timeout=0.01)
+
+    async def test_a_mute_crash_reports_what_the_child_left_on_stderr(self) -> None:
+        """Un hijo que muere sin emitir su evento `error` (un OOM, una
+        excepción antes del primer write) solo deja rastro en stderr. Tirarlo
+        convertía cada muerte en una investigación desde cero."""
+        service = self._service()
+        record, _ = service.store_upload("muda.md", b"# Titulo")
+
+        with self.assertRaises(Exception) as captured:
+            service._read_worker_output(
+                record,
+                stdout=b"",
+                stderr=b"Traceback (most recent call last):\nMemoryError: sin memoria\n",
+                returncode=1,
+            )
+
+        message = str(captured.exception)
+        self.assertIn("código 1", message)
+        self.assertIn("MemoryError: sin memoria", message)
 
     async def test_a_timeout_marks_the_file_failed_with_its_code(self) -> None:
         service = self._service()

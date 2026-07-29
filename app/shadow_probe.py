@@ -126,6 +126,39 @@ class ShadowProbe:
         if self._jobs:
             await asyncio.gather(*self._jobs, return_exceptions=True)
 
+    async def yield_to_real_work(self) -> bool:
+        """Aborta los sondeos en vuelo porque llega trabajo de verdad.
+
+        El sondeo comprueba que la máquina está ociosa ANTES de arrancar, pero
+        esa comprobación no cubre lo que pase después: una tarea que entra a
+        mitad de un sondeo se encuentra la VRAM ocupada por un modelo que
+        además está arrendado, así que el desalojo por capacidad no puede
+        tocarlo y la tarea muere con VRAM_INSUFFICIENT. Un aspirante de 48 GB
+        tumbaba así una petición de 13 GB en una máquina de 62 GB.
+
+        Cancelar no cuesta nada: la salida del sondeo se descarta siempre. Al
+        soltarse el lease, el modelo deja de estar protegido y el desalojo
+        normal puede descargarlo. La invocación queda en 'started' a
+        propósito — una medida interrumpida no es evidencia, ni a favor ni en
+        contra del aspirante, y ese estado ya está excluido de las
+        estadísticas (app.model_stats).
+
+        Devuelve si había algo que cancelar, para que quien llame pueda dejar
+        constancia."""
+        jobs = [job for job in self._jobs if not job.done()]
+        if not jobs:
+            return False
+        logger.info("shadow_probe.preempted", extra={
+            "event": "shadow_probe.preempted", "probes": len(jobs),
+        })
+        for job in jobs:
+            job.cancel()
+        # Se espera a que mueran de verdad: devolver el control antes de que
+        # el `finally` del lease se haya ejecutado dejaría al llamante
+        # compitiendo con la reserva que viene a liberar.
+        await asyncio.gather(*jobs, return_exceptions=True)
+        return True
+
     async def drain(self) -> None:
         """Espera a que terminen los sondeos en vuelo, sin cancelarlos.
 

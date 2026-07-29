@@ -204,6 +204,28 @@ class Database:
                 self._conn.execute(
                     "ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'inference'"
                 )
+            if "not_before" not in task_columns:
+                # Momento a partir del cual la tarea vuelve a ser reclamable.
+                # Lo pone el aplazamiento por memoria: reintentar en bucle
+                # cerrado contra una máquina llena solo quema CPU. NULL = ya.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN not_before TEXT")
+            if "memory_deferrals" not in task_columns:
+                # Veces que esta tarea ha cedido el turno por falta de memoria.
+                # Es el contador que dispara la reserva anti-inanición.
+                self._conn.execute(
+                    "ALTER TABLE tasks ADD COLUMN memory_deferrals INTEGER NOT NULL DEFAULT 0"
+                )
+            if "memory_reserved_until" not in task_columns:
+                # Ventana durante la cual NADIE adelanta a esta tarea. Es una
+                # ventana y no una reserva perpetua a propósito: si la memoria
+                # no se libera nunca, una reserva sin caducidad congelaría la
+                # cola entera en vez de dejar pasar a quien sí cabe.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN memory_reserved_until TEXT")
+            if "memory_block_json" not in task_columns:
+                # Qué ocupaba la memoria la última vez que se intentó: modelo
+                # pedido, bytes necesarios y quién los tenía. Sin esto el panel
+                # solo puede decir "espera", que no ayuda a decidir si cancelar.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN memory_block_json TEXT")
             invocation_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(model_invocations)").fetchall()
             }

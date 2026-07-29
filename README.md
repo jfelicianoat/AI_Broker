@@ -252,6 +252,7 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | [`Deployment_Guide.md`](Deployment_Guide.md) | Despliegue completo en Windows |
 | [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md) | Ingesta de ficheros adjuntos |
 | [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md) | Sandbox de ejecución de código |
+| [`docs/Client_API.md`](docs/Client_API.md) | **Especificación para aplicaciones cliente** (contrato 2.6, autocontenida) |
 | [`docs/Phase_9_Speed_And_Lanes.md`](docs/Phase_9_Speed_And_Lanes.md) | Tiempo esperado, sondeo en sombra y carriles de trabajo |
 | [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) | Panel operativo (normativo para las pantallas) |
 | [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md) | Compresión de prompts |

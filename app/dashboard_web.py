@@ -67,6 +67,11 @@ from app.schemas import (
 )
 from app.strategy_router import describe_bucket, heuristic_for_bucket, recommend_from_cases
 
+# Lo que el panel enseña como "cola": la que nunca ha corrido y la que cedió
+# el turno esperando memoria. Ocultar la segunda dejaría tareas vivas fuera de
+# la vista, sin forma de verlas ni de cancelarlas.
+PENDING_TASK_STATUSES = (TaskStatus.queued, TaskStatus.waiting_for_memory)
+
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
 CSRF_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 8
@@ -188,7 +193,7 @@ def create_dashboard_router(
     async def dashboard(request: Request):
         context: dict[str, Any] = {
             "summary": queries.summary(window_hours=24, lane_capacities=lane_capacities(config)),
-            "queue": queries.list_tasks(page=1, page_size=5, status=TaskStatus.queued, origin=None),
+            "queue": queries.list_tasks(page=1, page_size=5, status=PENDING_TASK_STATUSES, origin=None),
             "active": queries.active_task_detail(),
             "health": await health_loader(),
             "resources": await resources(),
@@ -202,7 +207,7 @@ def create_dashboard_router(
             request,
             "tasks.html",
             {
-                "queue": queries.list_tasks(page=1, page_size=50, status=TaskStatus.queued, origin=None),
+                "queue": queries.list_tasks(page=1, page_size=50, status=PENDING_TASK_STATUSES, origin=None),
                 "history": queries.list_terminal_tasks(page_size=20),
                 "nav_active": "tareas",
             },

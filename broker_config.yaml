@@ -31,12 +31,14 @@ ingestion:
   enabled: true
   storage_dir: state/files
   max_file_mb: 8192
-  max_pdf_pages: 2000
+  max_pdf_pages: 5000
   ocr_enabled: true
   ocr_languages:
   - es
   - en
   conversion_timeout_seconds: 7200
+  max_concurrent: 2
+  isolate_conversions: true
   images:
     enabled: true
     base_url: http://127.0.0.1:1234/v1
@@ -1928,8 +1930,22 @@ providers:
       capabilities:
       - specialized
       compatibility: unknown
-      compatibility_checked_at: '2026-07-25T21:35:01.375952+00:00'
+      compatibility_checked_at: '2026-07-26T20:33:26.316960+00:00'
       compatibility_error: Capacidad no-chat catalogada; endpoint de ejecucion aun
         no soportado.
       features: {}
       features_checked_at: null
+    - name: nvidia/riva-translate-4b-instruct-v2
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-28T16:43:24.163591+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: false
+      features_checked_at: '2026-07-28T16:43:30.760297+00:00'
