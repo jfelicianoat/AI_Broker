@@ -33,21 +33,52 @@ GET /api/v1/capabilities
 
 Devuelve, entre otros:
 
-| Campo | Para qué te sirve |
-|---|---|
-| `contract_version` | `"2.7"`. Si no coincide con lo que esperas, revisa §11 |
-| `derived_data_boundary` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
-| `work_lanes` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
-| `strategies` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
-| `presets` | Presets válidos **por estrategia** |
-| `scheduling_by_preset` | Políticas de planificación válidas por preset |
-| `agent_skills` | Skills que el agente puede usar. `run_code` solo si hay sandbox |
-| `sandbox_run_code` | Si es `false`, pedir `run_code` da `409` |
-| `file_ingestion`, `ingestion_formats` | Si puedes adjuntar ficheros y de qué tipos |
-| `long_context_map_reduce` | Si puedes autorizar troceo de documentos largos |
-| `max_active_workflows` | Cuántas inferencias corren a la vez (es 1 por invariante) |
+| Campo | Forma | Para qué te sirve |
+|---|---|---|
+| `contract_version` | `string` | `"2.7"`. Si no coincide con lo que esperas, revisa §11 |
+| `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
+| `work_lanes` | `[string]` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
+| `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
+| `presets` | `{string: [string]}` | Presets válidos **por estrategia**: la clave es la estrategia |
+| `scheduling_by_preset` | `{string: [string]}` | Políticas de planificación válidas **por preset**: la clave es el preset |
+| `agent_skills` | `[string]` | Skills que el agente puede usar. `run_code` solo si hay sandbox |
+| `sandbox_run_code` | `bool` | Si es `false`, pedir `run_code` da `409` |
+| `file_ingestion` | `bool` | Si puedes adjuntar ficheros |
+| `ingestion_formats` | `{string: [string]}` | Extensiones admitidas **agrupadas por tipo**: la clave es el grupo (`pdf`, `office`, `text`, `image`, `audio`, `video`), el valor su lista de extensiones con punto |
+| `long_context_map_reduce` | `bool` | Si puedes autorizar troceo de documentos largos |
+| `max_active_workflows` | `int` | Cuántas inferencias corren a la vez (es 1 por invariante) |
+
+**Ojo con los tres campos `{string: [string]}`.** Son **objetos**, no listas. Es el error de integración más común: un cliente con tipado estricto que declara `ingestion_formats` como array falla al deserializar la respuesta entera y se queda sin ninguna capacidad — no solo sin la de ficheros. Si lo que necesitas es la lista plana de extensiones para filtrar un selector de ficheros, aplana tú los valores del mapa.
+
+Respuesta real abreviada, para que no tengas que adivinar la forma:
+
+```json
+{
+  "contract_version": "2.7",
+  "strategies": ["single", "mixture_of_agents", "agent"],
+  "presets": { "single": ["fast"], "mixture_of_agents": ["fast", "slow"], "agent": ["fast"] },
+  "scheduling_by_preset": { "fast": ["sequential"], "slow": ["adaptive", "parallel", "waves", "sequential"] },
+  "agent_skills": ["web_search", "fetch_url", "calculator", "current_datetime", "run_code"],
+  "sandbox_run_code": true,
+  "file_ingestion": true,
+  "ingestion_formats": {
+    "pdf": [".pdf"],
+    "office": [".docx", ".epub", ".pptx", ".xlsx"],
+    "text": [".csv", ".json", ".md", ".py", ".txt"],
+    "image": [".jpg", ".png", ".webp"],
+    "audio": [".mp3", ".wav"],
+    "video": [".mkv", ".mp4"]
+  },
+  "derived_data_boundary": true,
+  "work_lanes": ["inference", "ingestion"]
+}
+```
 
 **Consúltalo al arrancar tu aplicación, no en cada petición.** Cambia solo cuando cambia la configuración del broker.
+
+**El contrato crece de forma aditiva: no rechaces campos desconocidos.** Entre 2.5 y 2.7 aparecieron `derived_data_boundary`, `work_lanes` y el estado `converting`, y seguirán apareciendo otros. Un cliente que trate un campo nuevo como error se romperá en la siguiente versión del broker sin que nada haya cambiado para él. Ignora lo que no conozcas y da valor por defecto a lo que falte.
+
+**Si no puedes leer `capabilities`, no bloquees al usuario.** La respuesta puede fallar por red, por token o por un campo que tu cliente aún no entiende; ninguna de esas tres cosas significa que el broker no sepa hacer lo que le pides. Avisa, deja enviar la tarea igualmente y confía en el `409` (§11): ese sí distingue un sandbox apagado de un parseo roto. Deducir "no hay sandbox" de un fallo de lectura produce mensajes que apuntan al sitio equivocado y esconden la avería real.
 
 ---
 
@@ -610,6 +641,7 @@ Es un endurecimiento deliberado: el nombre prometía una frontera que no se apli
 ## 14. Recomendaciones de integración
 
 - **Consulta `capabilities` al arrancar** y adapta lo que ofreces a tu usuario. Pedir `run_code` a un broker sin sandbox es un `409` evitable.
+- **Deserializa `capabilities` con tolerancia** (§2): `presets`, `scheduling_by_preset` e `ingestion_formats` son objetos, no listas; los campos que no conozcas se ignoran, los que falten van por defecto. Y si aun así no puedes leerlo, avisa pero deja enviar: un fallo de lectura no es una capacidad ausente.
 - **Deja elegir el modelo al broker.** Ordena por tiempo esperado con evidencia de su propia máquina; un `target_model` fijo desactiva eso.
 - **Declara la clasificación de datos siempre**, aunque sea `internal`. Es el campo que gobierna a dónde van tus datos, y el default no es una decisión tuya.
 - **Usa claves de idempotencia estables** por unidad de trabajo, no UUIDs por intento.
