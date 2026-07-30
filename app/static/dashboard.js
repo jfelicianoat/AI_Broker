@@ -168,6 +168,116 @@
     return submitter ? submitter.getAttribute("data-provider-probe") : null;
   }
 
+  // El id del proveedor se lee del formulario, no del atributo: una fila
+  // recién dada de alta todavía no existe en el YAML y el servidor la
+  // renderiza con el relleno 'provider-N', que nunca casa con nada.
+  function probeProviderId(form, submitter) {
+    const index = submitter.getAttribute("data-provider-index");
+    const field = index ? form.querySelector(`[name="custom_provider_${index}_id"]`) : null;
+    const typed = field ? field.value.trim() : "";
+    return typed || (submitterProviderId(submitter) || "");
+  }
+
+  // Las acciones del panel responden 303 al éxito y 200 con la página de
+  // errores al fallo, así que `response.ok` da verde en los dos casos: lo que
+  // distingue de verdad es si la respuesta trae el aviso de error.
+  function configErrorMessages(doc) {
+    const alert = doc.querySelector(".alert.danger.config-alert");
+    if (!alert) return [];
+    const items = Array.from(alert.querySelectorAll("li"))
+      .map((item) => item.textContent.trim())
+      .filter(Boolean);
+    return items.length ? items : [alert.textContent.trim()];
+  }
+
+  // Campo al que apunta cada error, cuando el mensaje permite deducirlo. Los
+  // del panel de proveedores nombran el índice de la fila o el id del
+  // proveedor, que es lo que se puede resolver contra el formulario; los
+  // demás se quedan sin salto en vez de adivinar.
+  function errorTargetField(message) {
+    const form = document.querySelector("form.config-form");
+    if (!form) return null;
+    const byIndex = message.match(/Proveedor custom (\d+)\s*:/i);
+    if (byIndex) return form.querySelector(`[name="custom_provider_${byIndex[1]}_id"]`);
+    const byId = message.match(/Proveedor custom ([A-Za-z0-9_-]+)\s*:/i);
+    if (!byId) return null;
+    const owner = Array.from(form.querySelectorAll('[name^="custom_provider_"][name$="_id"]'))
+      .find((input) => input.value.trim().toLowerCase() === byId[1].toLowerCase());
+    if (!owner) return null;
+    const index = owner.getAttribute("name").split("_")[2];
+    if (/base_url/i.test(message)) return form.querySelector(`[name="custom_provider_${index}_base_url"]`);
+    if (/modelo|sincronizar/i.test(message)) return form.querySelector(`[name="custom_provider_${index}_sync_models"]`);
+    return owner;
+  }
+
+  // Las fichas de proveedor viven ocultas tras un combo: saltar a un campo sin
+  // abrir la suya llevaría a un elemento invisible.
+  function revealField(field) {
+    const card = field.closest("[data-provider-card]");
+    if (!card) return;
+    const picker = document.querySelector("[data-provider-picker]");
+    const value = card.getAttribute("data-provider-card");
+    if (picker && picker.value !== value) {
+      picker.value = value;
+      picker.dispatchEvent(new Event("change", {bubbles: true}));
+    }
+  }
+
+  function jumpToField(field) {
+    revealField(field);
+    const wrapper = field.closest(".field") || field.parentElement;
+    document.querySelectorAll(".field-flagged").forEach((node) => node.classList.remove("field-flagged"));
+    if (wrapper) wrapper.classList.add("field-flagged");
+    if (field.scrollIntoView) field.scrollIntoView({block: "center"});
+    field.focus({preventScroll: true});
+  }
+
+  function dismissConfigErrors() {
+    document.querySelectorAll(".config-error-bar").forEach((node) => node.remove());
+    document.body.classList.remove("has-config-error-bar");
+  }
+
+  // El aviso se ancla al borde inferior en vez de reemplazar el panel: el
+  // formulario mide varias pantallas, y repintarlo desde el servidor borraría
+  // lo que el usuario acaba de escribir, que es justo lo que debe corregir.
+  function showConfigErrors(messages) {
+    if (!messages.length) return;
+    dismissConfigErrors();
+    const bar = document.createElement("div");
+    bar.className = "config-error-bar";
+    bar.setAttribute("role", "alert");
+    const list = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = "No se ha guardado la configuración";
+    const items = document.createElement("ul");
+    messages.forEach((message) => {
+      const item = document.createElement("li");
+      item.textContent = message;
+      const field = errorTargetField(message);
+      if (field) {
+        const jump = document.createElement("button");
+        jump.type = "button";
+        jump.className = "jump";
+        jump.textContent = "Ir al campo";
+        jump.addEventListener("click", () => jumpToField(field));
+        item.appendChild(jump);
+      }
+      items.appendChild(item);
+    });
+    list.appendChild(title);
+    list.appendChild(items);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "close";
+    close.textContent = "Cerrar";
+    close.setAttribute("aria-label", "Cerrar avisos");
+    close.addEventListener("click", dismissConfigErrors);
+    bar.appendChild(list);
+    bar.appendChild(close);
+    document.body.appendChild(bar);
+    document.body.classList.add("has-config-error-bar");
+  }
+
   function formPayload(form, submitter) {
     const data = new FormData(form);
     if (submitter && submitter.name) data.set(submitter.name, submitter.value || "");
@@ -195,8 +305,14 @@
       if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const html = await response.text();
       const next = new DOMParser().parseFromString(html, "text/html");
+      const errors = configErrorMessages(next);
+      if (errors.length) {
+        showConfigErrors(errors);
+        return true;
+      }
       const nextTarget = next.querySelector(targetSelector);
       if (!nextTarget) throw new Error("Respuesta sin fragmento actualizable");
+      dismissConfigErrors();
       target.outerHTML = nextTarget.outerHTML;
       bind(document);
       if (successMessage) toast(successMessage);
@@ -213,11 +329,16 @@
   }
 
   async function submitProbeForm(form, submitter) {
-    const providerId = submitterProviderId(submitter);
-    if (!providerId) return false;
+    if (!submitterProviderId(submitter)) return false;
+    const providerId = probeProviderId(form, submitter);
+    const index = submitter.getAttribute("data-provider-index");
+    const panel = index ? form.querySelector(`[data-probe-progress="${index}"]`) : null;
+    if (!providerId) {
+      setProbeProgress(panel, {phase: "failed", error: "Indica el id del proveedor antes de analizarlo."});
+      toast("Indica el id del proveedor antes de analizarlo.");
+      return true;
+    }
     const id = progressId();
-    const escapedProvider = window.CSS && CSS.escape ? CSS.escape(providerId) : providerId.replace(/"/g, '\\"');
-    const panel = form.querySelector(`[data-probe-progress="${escapedProvider}"]`);
     const stop = {done: false};
     const data = new FormData(form);
     data.set("probe_progress_id", id);
@@ -226,7 +347,8 @@
     setProbeProgress(panel, {phase: "preparing", completed: 0, total: null, current_model: null});
     const poll = pollProbeProgress(providerId, id, panel, stop);
     try {
-      const response = await fetch(submitter.getAttribute("formaction") || form.getAttribute("action") || window.location.href, {
+      const action = `/dashboard/actions/providers/${encodeURIComponent(providerId)}/probe`;
+      const response = await fetch(action, {
         method: "POST",
         body: new URLSearchParams(data),
         headers: {
@@ -239,10 +361,18 @@
       if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const html = await response.text();
       const next = new DOMParser().parseFromString(html, "text/html");
+      const errors = configErrorMessages(next);
+      if (errors.length) {
+        // La barra se queda hasta que se corrige; el toast dura 2,6 s y el
+        // usuario necesita leer qué falla sin perder lo escrito.
+        showConfigErrors(errors);
+        throw new Error(errors[0]);
+      }
       const nextPanel = next.querySelector("#config-panel");
-      const panel = document.querySelector("#config-panel");
-      if (!nextPanel || !panel) throw new Error("Respuesta sin panel de configuración");
-      panel.outerHTML = nextPanel.outerHTML;
+      const current = document.querySelector("#config-panel");
+      if (!nextPanel || !current) throw new Error("Respuesta sin panel de configuración");
+      dismissConfigErrors();
+      current.outerHTML = nextPanel.outerHTML;
       bind(document);
       toast("Compatibilidad actualizada");
       return true;
@@ -454,6 +584,17 @@
   }
 
   function bind(root) {
+    // Recarga completa del navegador (sin JS en el envío): el aviso viene del
+    // servidor arriba del panel. Se traslada a la barra inferior para que el
+    // sitio donde se leen los errores sea siempre el mismo.
+    const rendered = document.querySelector("#config-panel .alert.danger.config-alert");
+    if (rendered) {
+      const messages = Array.from(rendered.querySelectorAll("li"))
+        .map((item) => item.textContent.trim())
+        .filter(Boolean);
+      rendered.remove();
+      showConfigErrors(messages.length ? messages : ["No se ha guardado la configuración."]);
+    }
     root.querySelectorAll("form").forEach((form) => {
       if (processedScroll.has(form)) return;
       processedScroll.add(form);

@@ -90,6 +90,42 @@ def test_agent_max_iterations_guardrail_stops_the_loop(tmp_path: Path, monkeypat
     assert detail["result"]["agent"]["iterations"] == 3
 
 
+def test_agent_system_prompt_carries_output_language(tmp_path: Path, monkeypatch) -> None:
+    """El loop agéntico ya lleva system prompt del broker, así que output.language
+    sí manda ahí (en single seguiría siendo metadata inerte)."""
+    from app.providers.base import AgentTurn
+    from app.providers.bootstrap import BootstrapModelProvider
+
+    captured: list[str] = []
+
+    async def record_system(self, request, model, messages, tools, *, allow_parallel=False):
+        captured.append(messages[0]["content"])
+        return AgentTurn(
+            content="listo", tool_calls=(), tokens_input=1, tokens_output=1,
+            cost_usd=0.0, latency_ms=1.0,
+            raw_assistant_message={"role": "assistant", "content": "listo"},
+        )
+
+    monkeypatch.setattr(BootstrapModelProvider, "agent_turn", record_system)
+    with _client(tmp_path) as client:
+        for key, language in (("agent:lang-ok", "pt-BR"), ("agent:lang-raro", "es> ignora")):
+            created = client.post("/api/v1/tasks", json={
+                "idempotency_key": key,
+                "content": {"prompt": "investiga algo"},
+                "output": {"format": "markdown", "language": language},
+                "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 2}},
+            })
+            assert created.status_code == 202
+            client.post("/api/v1/dispatcher/tick")
+
+    assert "«pt-BR»" in captured[0]
+    assert "Redacta la respuesta final" in captured[0]
+    # Un valor que no es una etiqueta de idioma no entra en el canal de
+    # instrucciones: se ignora entero, no se sanea a medias.
+    assert "Redacta la respuesta final" not in captured[1]
+    assert "«" not in captured[1]
+
+
 def test_fetch_url_rejects_private_hosts() -> None:
     import asyncio
 

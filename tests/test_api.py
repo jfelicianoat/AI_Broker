@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import re
 import time
 from pathlib import Path
 
@@ -1158,6 +1160,151 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
     # El estado por modelo ya no se lista en config: se consulta en /dashboard/models.
     assert "model-compat-list" not in response.text
     assert "Modelos declarados a mano (3)" in response.text
+
+
+def test_new_provider_row_exposes_its_index_for_the_probe_button(tmp_path: Path) -> None:
+    """La fila «Nuevo proveedor» aún no existe en el YAML, así que su id de
+    sondeo es un relleno ('provider-N') que el servidor no puede resolver. El
+    JS manda en su lugar el id escrito en el formulario, y para encontrarlo
+    necesita el índice de la fila en el botón y en su panel de progreso."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-newprovider.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        page = client.get("/dashboard/config").text
+
+    # Sin proveedores custom configurados, la fila nueva es la número 1.
+    assert 'data-provider-probe="provider-1"' in page
+    assert 'data-provider-index="1"' in page
+    assert 'name="custom_provider_1_id"' in page
+    assert 'data-probe-progress="1"' in page
+
+
+class _RecordCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_rejected_config_save_is_logged_with_its_reason(tmp_path: Path) -> None:
+    """El motivo del rechazo viaja en el HTML, que es donde el usuario debería
+    verlo; si su navegador ejecuta un JS viejo que se lo come, el 200 es
+    indistinguible de un guardado bueno. Sin esta línea de log no hay forma de
+    diagnosticarlo desde el servidor."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-rejected.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    # El broker configura su propio logging sin propagar a root, así que el
+    # colector se engancha al logger concreto.
+    collector = _RecordCollector()
+    dashboard_logger = logging.getLogger("ai_broker.dashboard")
+    dashboard_logger.addHandler(collector)
+    try:
+        with TestClient(create_app(config, config_path=config_path)) as client:
+            token = dashboard_csrf(client)
+            response = client.post(
+                "/dashboard/actions/config",
+                data={
+                    "csrf_token": token,
+                    "custom_provider_1_enabled": "on",
+                    "custom_provider_1_base_url": "https://ejemplo.test/v1",
+                },
+                follow_redirects=False,
+            )
+    finally:
+        dashboard_logger.removeHandler(collector)
+
+    assert response.status_code == 200
+    logged = [record for record in collector.records if getattr(record, "event", "") == "config.rejected"]
+    assert logged, "el rechazo debe quedar registrado"
+    assert "indica un id" in logged[0].getMessage()
+    assert logged[0].action == "save"  # type: ignore[attr-defined]
+
+
+def test_static_assets_carry_a_version_to_break_browser_cache(tmp_path: Path) -> None:
+    """Un dashboard.js corregido no llega si el navegador sirve el suyo."""
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-assets.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=tmp_path / "broker_config.yaml")) as client:
+        page = client.get("/dashboard").text
+
+    assert re.search(r'/static/dashboard\.js\?v=[0-9a-f]{12}" defer', page)
+    assert re.search(r'/static/dashboard\.css\?v=[0-9a-f]{12}"', page)
+
+
+def test_new_provider_row_defaults_to_syncing_the_catalog(tmp_path: Path) -> None:
+    """La fila nueva no ofrece lista de modelos, así que sin sincronizar
+    catálogo su primer guardado sería siempre rechazado por
+    _parse_custom_providers. Debe venir marcada."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-sync-default.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        page = client.get("/dashboard/config").text
+        token = dashboard_csrf(client)
+        # Y con ese default, el alta mínima (id + base_url) se guarda.
+        saved = client.post(
+            "/dashboard/actions/config",
+            data={
+                "csrf_token": token,
+                "custom_provider_1_enabled": "on",
+                "custom_provider_1_id": "openrouter",
+                "custom_provider_1_base_url": "https://openrouter.ai/api/v1",
+                "custom_provider_1_deployment": "api",
+                "custom_provider_1_sync_models": "on",
+            },
+            follow_redirects=False,
+        )
+
+    marker = '<input type="checkbox" name="custom_provider_1_sync_models" checked>'
+    assert marker in page
+    assert saved.status_code == 303
+    assert [item.id for item in load_config(config_path).providers.custom] == ["openrouter"]
+
+
+def test_probe_rejects_the_placeholder_id_of_an_unsaved_row(tmp_path: Path) -> None:
+    """Contrapartida del anterior: si el relleno llegara a viajar en la URL, el
+    servidor responde 200 con el aviso (no 303), que es lo que el JS mira para
+    saber que ha fallado."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-placeholder.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        response = client.post(
+            "/dashboard/actions/providers/provider-1/probe",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "auto",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "custom_provider_1_enabled": "on",
+                "custom_provider_1_id": "openrouter",
+                "custom_provider_1_base_url": "https://openrouter.ai/api/v1",
+                "custom_provider_1_deployment": "api",
+                "custom_provider_1_sync_models": "on",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 200
+    assert "Proveedor custom no encontrado: provider-1" in response.text
 
 
 def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch) -> None:

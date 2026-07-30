@@ -20,6 +20,7 @@ from app.providers.base import (
     _CatalogCache,
     _estimation_text,
     classify_probe_http_error,
+    decoded_json,
     enforce_context_limit,
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
@@ -80,9 +81,15 @@ class OpenAICompatibleProvider:
                 try:
                     response = await self.client.get("/models", headers=self._headers())
                     response.raise_for_status()
+                    payload = decoded_json(response, self.config.id)
+                    if not isinstance(payload, dict):
+                        raise ProviderError(
+                            "INVALID_PROVIDER_RESPONSE",
+                            f"{self.config.id} devolvió un catálogo que no es un objeto JSON",
+                        )
                     names = [
                         str(item["id"])
-                        for item in response.json().get("data") or []
+                        for item in payload.get("data") or []
                         if isinstance(item, dict) and item.get("id")
                     ]
                 except ProviderError:
@@ -150,7 +157,7 @@ class OpenAICompatibleProvider:
                 },
             )
             response.raise_for_status()
-            payload = response.json()
+            payload = decoded_json(response, self.config.id)
             choices = payload.get("choices") or []
             compatible = bool(choices)
             return {
@@ -223,7 +230,7 @@ class OpenAICompatibleProvider:
                 json=self._feature_probe_payload(model, feature),
             )
             response.raise_for_status()
-            return bool(response.json().get("choices"))
+            return bool(decoded_json(response, self.config.id).get("choices"))
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             if status == 429:
@@ -264,7 +271,7 @@ class OpenAICompatibleProvider:
                 json={"model": model, "input": "ping"},
             )
             response.raise_for_status()
-            payload = response.json()
+            payload = decoded_json(response, self.config.id)
             data = payload.get("data") or []
             vector = data[0].get("embedding") if data and isinstance(data[0], dict) else None
             compatible = isinstance(vector, list) and bool(vector)
@@ -435,7 +442,7 @@ class OpenAICompatibleProvider:
                 json={"model": model, "input": input_text},
             )
             response.raise_for_status()
-            payload = response.json()
+            payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as error:
@@ -489,7 +496,7 @@ class OpenAICompatibleProvider:
         try:
             response = await self.client.post("/chat/completions", headers=self._headers(), json=payload_body)
             response.raise_for_status()
-            payload = response.json()
+            payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as error:
@@ -567,7 +574,7 @@ class OpenAICompatibleProvider:
                 request_payload["response_format"] = {"type": "json_object"}
             response = await self.client.post("/chat/completions", headers=self._headers(), json=request_payload)
             response.raise_for_status()
-            payload = response.json()
+            payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as error:

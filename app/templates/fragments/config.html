@@ -700,7 +700,11 @@
                 Arrancar servidor local al iniciar Broker
               </label>
               <label>
-                <input type="checkbox" name="custom_provider_{{ index }}_sync_models" {% if provider and provider.sync_models %}checked{% endif %}>
+                {# Marcado por defecto en un proveedor nuevo: su fila no ofrece
+                   lista de modelos todavía, así que sin sincronizar catálogo el
+                   primer guardado siempre sería rechazado
+                   (dashboard_forms._parse_custom_providers). #}
+                <input type="checkbox" name="custom_provider_{{ index }}_sync_models" {% if not provider or provider.sync_models %}checked{% endif %}>
                 Sincronizar catálogo desde /models
               </label>
               <label>
@@ -726,14 +730,20 @@
                   Eliminar proveedor
                 </button>
               {% endif %}
+              {# El id que viaja en la URL lo resuelve el JS leyendo el campo
+                 "ID proveedor" de esta misma fila: en un proveedor todavía sin
+                 guardar, `probe_id` es un relleno ('provider-N') que el
+                 servidor no puede encontrar. El formaction de aquí es el
+                 camino sin JS, donde la fila ya está guardada. #}
               <button class="button secondary compact"
                       type="submit"
                       data-provider-probe="{{ probe_id }}"
+                      data-provider-index="{{ index }}"
                       formaction="/dashboard/actions/providers/{{ probe_id }}/probe">
                 Analizar compatibilidad
               </button>
             </div>
-            <div class="provider-wide probe-progress" data-probe-progress="{{ probe_id }}" hidden>
+            <div class="provider-wide probe-progress" data-probe-progress="{{ index }}" hidden>
               <div>
                 <strong>Analizando compatibilidad</strong>
                 <span data-probe-progress-label>Preparando catálogo...</span>

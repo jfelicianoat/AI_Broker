@@ -90,7 +90,7 @@ La pantalla muestra sin interpretar:
 
 El HTML escapa siempre prompts y respuestas. El contenido del LLM nunca se inserta como HTML confiable. No se muestran secretos, cabeceras de autorización ni cadenas privadas de razonamiento.
 
-No se muestran porcentajes de generación, tokens/s, confianza ni atribución de candidatos si el provider o el contrato no producen esos datos. `output.language` se trata como metadata y no como una orden que el Broker añada al prompt.
+No se muestran porcentajes de generación, tokens/s, confianza ni atribución de candidatos si el provider o el contrato no producen esos datos. `output.language` nunca se añade al prompt del usuario: en `agent` y `mixture_of_agents` viaja como instrucción dentro del system prompt que el Broker ya escribe, y en `single` es metadata sin efecto.
 
 ## Errores esperados
 

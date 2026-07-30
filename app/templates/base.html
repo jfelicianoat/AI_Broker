@@ -7,8 +7,10 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   {% block head_extra %}{% endblock %}
   <title>{% block title %}AI Broker{% endblock %}</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script src="/static/dashboard.js" defer></script>
+  {# ?v= es la huella de los estáticos: al cambiarlos, el navegador pide la
+     versión nueva en vez de servir la suya de caché. #}
+  <link rel="stylesheet" href="/static/dashboard.css?v={{ asset_version }}">
+  <script src="/static/dashboard.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
   <div class="app-shell">

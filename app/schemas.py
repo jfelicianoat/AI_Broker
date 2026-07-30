@@ -386,6 +386,26 @@ def run_code_available(execution: ExecutionConfig) -> bool:
     return False
 
 
+def uses_tool_loop(execution: ExecutionConfig) -> bool:
+    """True si el prompt del usuario va a viajar dentro de un loop agéntico.
+
+    En ese loop el prompt no es un enunciado que se lee una vez: se reenvía en
+    cada iteración como las instrucciones que el modelo debe seguir mientras
+    decide qué tool llamar e interpreta lo que devuelve. Lo usa `user_prompt`
+    para no comprimirlo tan agresivamente como una generación de un solo turno
+    (ver RoutedModelProvider.user_prompt).
+
+    auto se trata como True por la misma razón que en run_code_available: aún
+    no se sabe a qué estrategia resolverá, y equivocarse hacia la compresión
+    prudente solo cuesta unos tokens.
+    """
+    if execution.strategy == ExecutionStrategy.agent:
+        return True
+    if execution.strategy == ExecutionStrategy.mixture_of_agents:
+        return bool(execution.proposer_skills)
+    return execution.strategy == ExecutionStrategy.auto
+
+
 class RiskConfig(StrictBaseModel):
     data_classification: DataClassification = DataClassification.internal
     human_review_required: bool = False

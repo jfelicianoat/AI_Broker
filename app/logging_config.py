@@ -39,6 +39,8 @@ class JsonLineFormatter(logging.Formatter):
             "provider",
             "deployment",
             "model",
+            "action",
+            "errors",
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)

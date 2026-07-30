@@ -16,9 +16,11 @@ from app.providers.base import (
     estimate_required_context,
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
+    output_language_directive,
     provider_http_error_message,
     request_with_context_capped_output,
     role_system_prompt,
+    with_output_language,
 )
 from app.providers.bootstrap import BootstrapModelProvider
 from app.providers.deepseek import DeepSeekProvider
@@ -45,7 +47,9 @@ __all__ = [
     "estimate_required_context",
     "estimate_tokens_upper_bound",
     "infer_openai_compatible_capabilities",
+    "output_language_directive",
     "provider_http_error_message",
     "request_with_context_capped_output",
     "role_system_prompt",
+    "with_output_language",
 ]

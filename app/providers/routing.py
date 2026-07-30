@@ -24,6 +24,7 @@ from app.providers.base import (
     estimate_required_context,
     neutralize_consensus_delimiters,
     role_system_prompt,
+    with_output_language,
 )
 from app.providers.bootstrap import BootstrapModelProvider
 from app.providers.deepseek import DeepSeekProvider
@@ -36,6 +37,7 @@ from app.schemas import (
     ModelReference,
     TaskCreateRequest,
     is_local_deployment,
+    uses_tool_loop,
 )
 from app.task_classifier import classify_task_type
 
@@ -146,12 +148,38 @@ class RoutedModelProvider:
         if override == "off":
             return request.content.prompt
         if override is not None:
+            # Un nivel pedido explícitamente por la tarea se respeta tal cual:
+            # la petición manda sobre la política del broker.
             return PromptCompressor(
                 enabled=True,
                 level=override,
                 min_chars=self.config.prompt_compression.min_chars,
             ).compress_text(request.content.prompt)
-        return self.prompt_compressor.compress_text(request.content.prompt)
+        level = self._effective_global_level(request)
+        if level == self.prompt_compressor.level:
+            return self.prompt_compressor.compress_text(request.content.prompt)
+        return PromptCompressor(
+            enabled=self.prompt_compressor.enabled,
+            level=level,
+            min_chars=self.prompt_compressor.min_chars,
+        ).compress_text(request.content.prompt)
+
+    def _effective_global_level(self, request: TaskCreateRequest) -> str:
+        """Nivel de compresión global, acotado a `medium` en tareas agénticas.
+
+        `aggressive` borra artículos y determinantes (estilo caveman). En una
+        generación de un solo turno eso ahorra tokens sin cambiar lo que se
+        pide, pero en un loop de tools el mismo texto es la instrucción que el
+        modelo relee en cada iteración mientras interpreta lo que devuelven las
+        herramientas: degradarlo a telegrama le cuesta seguir el encargo, y el
+        ahorro es marginal porque el prompt es una fracción del contexto que
+        acaban ocupando los resultados de las tools. `medium` sigue quitando
+        cortesías, envoltorios y muletillas, que no instruyen nada.
+        """
+        level = self.prompt_compressor.level
+        if level == "aggressive" and uses_tool_loop(request.execution):
+            return "medium"
+        return level
 
     @staticmethod
     def _build_custom_providers(config: BrokerConfig) -> dict[str, OpenAICompatibleProvider]:
@@ -699,7 +727,9 @@ class RoutedModelProvider:
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         system = None
         if request.execution.strategy == ExecutionStrategy.mixture_of_agents:
-            system = role_system_prompt(model.role) or ROLE_SYSTEM_PROMPTS["proposer"]
+            system = with_output_language(
+                role_system_prompt(model.role) or ROLE_SYSTEM_PROMPTS["proposer"], request,
+            )
         return await self._generate(request, model, self.user_prompt(request), system=system)
 
     async def measure(self, request: TaskCreateRequest, model: ModelReference) -> ModelOutput:
@@ -782,7 +812,9 @@ class RoutedModelProvider:
             f"<original_request>\n{neutralize_consensus_delimiters(self.user_prompt(request))}\n</original_request>\n\n"
             f"<candidates>\n{candidates}\n</candidates>"
         )
-        return await self._generate(request, model, prompt, system=ROLE_SYSTEM_PROMPTS["arbiter"])
+        return await self._generate(
+            request, model, prompt, system=with_output_language(ROLE_SYSTEM_PROMPTS["arbiter"], request),
+        )
 
     @staticmethod
     def _resolve_catalog_entry(

@@ -68,6 +68,9 @@ resources:
   max_loaded_local_models: auto
   scheduling_policy: adaptive
   allow_execution_waves: true
+  memory_wait_seconds: 20.0
+  memory_reserve_after: 5
+  memory_reserve_window_seconds: 300.0
 routing:
   adaptive_selection: true
   stats_window_days: 7
@@ -90,16 +93,7 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    prose:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
+    code: []
     long_context:
     - '*-coder*'
     - '*_coder*'
@@ -110,7 +104,16 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
-    code: []
+    prose:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
 strategy_router:
   enabled: false
   heuristic_classifier: true
@@ -490,7 +493,7 @@ providers:
       capabilities:
       - embedding
       compatibility: error
-      compatibility_checked_at: '2026-07-24T19:03:18.490647+00:00'
+      compatibility_checked_at: '2026-07-30T20:31:21.769816+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/embeddings:
         {"error":"Something went wrong with the request."}'
       features: {}
@@ -1139,7 +1142,7 @@ providers:
       capabilities:
       - completion
       compatibility: error
-      compatibility_checked_at: '2026-07-20T20:13:47.441855+00:00'
+      compatibility_checked_at: '2026-07-30T20:31:50.801150+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
         Server Error","status":500,"detail":"Internal error while making inference
@@ -1930,7 +1933,7 @@ providers:
       capabilities:
       - specialized
       compatibility: unknown
-      compatibility_checked_at: '2026-07-26T20:33:26.316960+00:00'
+      compatibility_checked_at: '2026-07-30T20:31:58.821613+00:00'
       compatibility_error: Capacidad no-chat catalogada; endpoint de ejecucion aun
         no soportado.
       features: {}
@@ -1949,3 +1952,311 @@ providers:
         json_mode: true
         tools: false
       features_checked_at: '2026-07-28T16:43:30.760297+00:00'
+  - id: HCNSEC
+    enabled: true
+    adapter: openai_compatible
+    display_name: HCNSEC
+    base_url: https://api.hcnsec.cn/v1
+    timeout_seconds: 300.0
+    api_key_env: HCNSEC_API_KEY
+    keyring_service: ai-broker
+    keyring_username: HCNSEC_api_key
+    deployment: cloud
+    auto_start: false
+    sync_models: true
+    catalog_cache_seconds: 5.0
+    default_context_window: 128000
+    probe_max_output_tokens: 1
+    probe_delay_seconds: 0.25
+    probe_max_models: 900
+    probe_skip_compatible: true
+    probe_skip_checked: true
+    probe_features: true
+    input_cost_per_million: 70.0
+    output_cost_per_million: 70.0
+    models:
+    - name: auto
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:12:11.105130+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:12:22.534030+00:00'
+    - name: DeepSeek-V4-Flash
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:12:22.792553+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:12:43.579500+00:00'
+    - name: DeepSeek-V4-Pro
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:12:43.839611+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:13:48.081466+00:00'
+    - name: glm-5.1
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:13:48.335471+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:13:53.896326+00:00'
+    - name: glm-5.2
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-07-30T20:13:54.153484+00:00'
+      compatibility_error: ''
+      features: {}
+      features_checked_at: null
+    - name: kat-coder-pro-v2.5
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-30T20:18:54.447454+00:00'
+      compatibility_error: 'HTTP 400 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"Request was rejected due to reason: user is not allowed
+        to access, reason: CustomerId：0509849508，Action：CodingV1ChatCompletions，Action
+        plan limited .","type":"BadRequest","param":"","code":"UnaccessibleUser"}}'
+      features: {}
+      features_checked_at: null
+    - name: Kimi-K2.6
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:18:55.351972+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:19:00.309728+00:00'
+    - name: MiniMax-M3
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:19:00.574792+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-07-30T20:25:35.323817+00:00'
+    - name: Qwen3.5-397B-A17B
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:25:35.588049+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:25:39.699623+00:00'
+    - name: Qwen3.6-35B-A3B
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:25:39.961487+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:25:43.219750+00:00'
+    - name: sensenova-6.7-flash-lite
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:25:43.479485+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:25:47.578429+00:00'
+    - name: sensenova-u1-fast
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-30T20:25:47.839516+00:00'
+      compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"model is not found","type":"not_found_error","param":"","code":"5"}}'
+      features: {}
+      features_checked_at: null
+    - name: step-3.5-flash
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:25:48.682416+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:25:52.023112+00:00'
+    - name: step-3.5-flash-2603
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:25:52.275946+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:25:55.615325+00:00'
+    - name: step-3.7-flash
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:25:55.869441+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:26:02.097464+00:00'
+    - name: step-image-edit-2
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-30T20:26:02.353427+00:00'
+      compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"The model \"step-image-edit-2\" does not exist or you
+        do not have access to it.","type":"model_invalid","param":"","code":null}}'
+      features: {}
+      features_checked_at: null
+    - name: step-router-v1
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:26:03.791161+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:26:07.150781+00:00'
+    - name: stepaudio-2.5-asr
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-30T20:26:07.402542+00:00'
+      compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"The model \"stepaudio-2.5-asr\" does not exist or you
+        do not have access to it.","type":"model_invalid","param":"","code":null}}'
+      features: {}
+      features_checked_at: null
+    - name: stepaudio-2.5-chat
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-07-30T20:26:08.386094+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-07-30T20:26:12.216659+00:00'
+    - name: stepaudio-2.5-realtime
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-30T20:26:12.477148+00:00'
+      compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"The model \"stepaudio-2.5-realtime\" does not exist or
+        you do not have access to it.","type":"model_invalid","param":"","code":null}}'
+      features: {}
+      features_checked_at: null
+    - name: stepaudio-2.5-tts
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-07-30T20:29:12.253797+00:00'
+      compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"The model \"stepaudio-2.5-tts\" does not exist or you
+        do not have access to it.","type":"model_invalid","param":"","code":null}}'
+      features: {}
+      features_checked_at: null

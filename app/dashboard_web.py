@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -78,8 +79,46 @@ CSRF_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 8
 templates = Jinja2Templates(directory=TEMPLATES_ROOT)
 register_filters(templates.env)
 
+
+def _asset_version() -> str:
+    """Huella de los estáticos para romper la caché del navegador.
+
+    Sin esto, un dashboard.js corregido no llega al usuario hasta que acierta
+    con un Ctrl+F5: el navegador reutiliza el suyo y el panel sigue con los
+    fallos ya arreglados en disco, sin señal de que está ejecutando otra
+    versión que la del servidor.
+    """
+    digest = hashlib.sha256()
+    for name in ("dashboard.js", "dashboard.css"):
+        try:
+            digest.update((Path(__file__).parent / "static" / name).read_bytes())
+        except OSError:
+            digest.update(name.encode())
+    return digest.hexdigest()[:12]
+
+
+templates.env.globals["asset_version"] = _asset_version()
+
+logger = logging.getLogger("ai_broker.dashboard")
+
 PROBE_PROGRESS: dict[str, dict[str, Any]] = {}
 PROBE_PROGRESS_TTL_SECONDS = 60 * 60
+
+
+def _log_config_rejected(action: str, errors: list[str]) -> None:
+    """Deja en el log por qué se rechazó un guardado.
+
+    El motivo viaja dentro del HTML de respuesta, que es donde el usuario
+    debería verlo; pero si su navegador ejecuta un JS antiguo que se lo come,
+    el rechazo queda indistinguible de un guardado bueno —mismo 200— y no hay
+    forma de diagnosticarlo desde el servidor.
+    """
+    # El motivo va también en el mensaje: es lo único que sobrevive con
+    # cualquier formateador, y pasa por el redactor de secretos.
+    logger.warning(
+        "config.rejected (%s): %s", action, "; ".join(errors),
+        extra={"event": "config.rejected", "action": action, "errors": errors},
+    )
 
 
 def _purge_stale_probe_progress(now: datetime) -> None:
@@ -567,6 +606,7 @@ def create_dashboard_router(
         # Validar no escribe, así que se permite sobre base obsoleta; guardar no.
         conflict = _config_conflict_error(form)
         if conflict and form.get("config_action") != "validate":
+            _log_config_rejected("save", [conflict])
             return _template_response(request, "config.html", _config_page_context(config_errors=[conflict]))
         try:
             updated = _build_dashboard_config(config, form)
@@ -585,6 +625,7 @@ def create_dashboard_router(
         except ValidationError as error:
             errors.extend(_validation_messages(error))
         if errors:
+            _log_config_rejected("save", errors)
             return _template_response(request, "config.html", _config_page_context(config_errors=errors))
         return RedirectResponse("/dashboard/config?config_saved=true", status_code=303)
 
@@ -664,6 +705,7 @@ def create_dashboard_router(
                 "updated_at": _utc_now().isoformat(),
             }
         if errors:
+            _log_config_rejected(f"probe:{provider_id}", errors)
             return _template_response(request, "config.html", _config_page_context(config_errors=errors))
         return RedirectResponse("/dashboard/config?config_saved=true", status_code=303)
 
