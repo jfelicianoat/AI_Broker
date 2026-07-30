@@ -207,6 +207,8 @@ La comparación es sobre un hash canónico del cuerpo completo, así que un camb
 
 Con `format: "json"` el broker avisa si el modelo elegido tiene verificado por sondeo que **no** soporta salida estructurada.
 
+`language` solo manda donde el broker ya escribe un system prompt propio: `agent` y `mixture_of_agents` (proponentes y árbitro), donde se añade la instrucción de redactar la respuesta final en ese idioma sea cual sea el de la petición o el de las fuentes consultadas. En `single` sigue siendo **metadata inerte**: esa inferencia es transparente por contrato —no recibe system prompt— y el broker no reescribe tu prompt, así que si necesitas fijar el idioma en `single`, dilo en el texto. El valor debe ser una etiqueta de idioma (`es`, `pt-BR`, `zh_Hans`); cualquier otra cosa se ignora entera en vez de sanearse.
+
 ### 5.5 `model_requirements`
 
 | Campo | Tipo | Default | Notas |

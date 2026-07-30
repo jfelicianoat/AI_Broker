@@ -68,6 +68,59 @@ def role_system_prompt(role: str | None) -> str | None:
     return ROLE_SYSTEM_PROMPTS.get(role.lower())
 
 
+# El código de idioma viaja al system prompt: es texto del cliente entrando en
+# el canal de instrucciones, así que solo pasan letras, dígitos y separadores
+# de etiqueta BCP 47 ("es", "pt-BR", "zh_Hans"). Un valor con cualquier otra
+# cosa se ignora entero en vez de sanearse a medias.
+_LANGUAGE_TAG_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$")
+
+
+def output_language_directive(request: TaskCreateRequest) -> str | None:
+    """Instrucción de idioma para `output.language`, o None si no aplica.
+
+    Solo la usan las estrategias que YA llevan system prompt propio del broker
+    (agent y mixture_of_agents). La inferencia `single` sigue siendo
+    transparente por contrato: no recibe system prompt, así que ahí
+    `output.language` continúa siendo metadata inerte.
+    """
+    language = (request.output.language or "").strip()
+    if not language or not _LANGUAGE_TAG_PATTERN.match(language):
+        return None
+    return (
+        f"Redacta la respuesta final íntegramente en el idioma cuyo código es «{language}», "
+        "sea cual sea el idioma de la petición o de las fuentes que consultes."
+    )
+
+
+def with_output_language(system: str, request: TaskCreateRequest) -> str:
+    """Añade la instrucción de idioma a un system prompt ya existente."""
+    directive = output_language_directive(request)
+    return f"{system}\n\n{directive}" if directive else system
+
+
+def decoded_json(response: httpx.Response, provider_id: str) -> Any:
+    """Cuerpo JSON de una respuesta, o ProviderError si no lo es.
+
+    Una base_url que apunta al sitio equivocado —falta el `/v1`, hay un proxy
+    delante, contesta un portal— devuelve 200 con HTML, y entonces
+    `response.json()` lanza json.JSONDecodeError. Eso es un ValueError, NO un
+    httpx.HTTPError, así que se escapa de los `except` de los adapters y sube
+    hasta el handler: el panel entero responde 500 porque un proveedor
+    cualquiera está mal configurado. Convertirlo en ProviderError lo devuelve
+    al carril que ya existe para proveedores caídos, donde el sondeo de salud
+    lo marca y el resto del panel sigue en pie.
+    """
+    try:
+        return response.json()
+    except ValueError as error:
+        excerpt = " ".join((response.text or "").split())[:120]
+        raise ProviderError(
+            "INVALID_PROVIDER_RESPONSE",
+            f"{provider_id} respondió {response.status_code} sin JSON en {response.url.path}: "
+            f"{excerpt or '(cuerpo vacío)'}",
+        ) from error
+
+
 def _estimation_text(prompt: str, system: str | None) -> str:
     return prompt if not system else f"{system}\n\n{prompt}"
 

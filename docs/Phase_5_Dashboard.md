@@ -66,7 +66,7 @@ La selección exacta está implementada mediante la referencia opcional `target_
 - Repetir crea una nueva `idempotency_key`; reenviar accidentalmente la misma operación conserva la semántica idempotente normal.
 - El timeout visible gobierna la operación completa mediante `execution.timeout_seconds`, acotado por el límite administrativo del Broker. Al vencer, se cancelan las operaciones provider y se persiste `TASK_TIMEOUT`.
 
-`output.language` es metadata contractual, no una garantía de idioma: el Broker no reescribe el prompt. La interfaz no debe presentarlo como una instrucción que el modelo vaya a obedecer.
+`output.language` no se implementa reescribiendo el prompt del usuario, que sigue viajando intacto. Manda solo donde el Broker ya escribe un system prompt propio —`agent` y `mixture_of_agents`—, ahí como instrucción de redactar la respuesta final en ese idioma. En `single` sigue siendo metadata contractual y la interfaz no debe presentarlo como una orden que el modelo vaya a obedecer.
 
 ## Pantalla 3 — Comparación de modelos
 

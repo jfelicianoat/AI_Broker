@@ -36,6 +36,7 @@ Esos proyectos actúan por instrucciones de estilo sobre la **salida** del model
 |-------|---------------|
 | Prompt de chat en estrategia `single` | Sí |
 | Prompt original en `mixture_of_agents` (proponentes y `<original_request>` del árbitro) | Sí |
+| Prompt que entra en un loop de tools (`agent`, `auto`, mixture con `proposer_skills`) | Sí, pero nunca por encima de `medium` (ver abajo) |
 | Candidatos de los proponentes dentro de la síntesis del árbitro | No |
 | Embeddings (`inference_kind = embedding`) | Nunca: alterar el texto altera el vector |
 | System prompts de roles | No |
@@ -48,6 +49,8 @@ El punto de aplicación es `RoutedModelProvider.user_prompt` (`app/providers/rou
 ## Override por tarea
 
 Cada tarea puede fijar su propia compresión con el campo opcional `prompt_compression` del contrato (`POST /api/v1/tasks`): `"off"` envía el prompt tal cual aunque el servicio global esté activo, y `"light"`/`"medium"`/`"aggressive"` sustituyen al nivel global solo para esa tarea. Ausente = configuración global. `min_chars` es siempre el global: el override cambia cuánto se comprime, no la regla de prompts cortos. El probador del dashboard expone esta elección en el selector "Compresión del prompt para esta prueba", y su vista previa replica exactamente lo que hará el router. El flag `prompt_compression_override: true` de `GET /api/v1/capabilities` anuncia el soporte.
+
+**Tope en las estrategias agénticas:** cuando el prompt va a entrar en un loop de tools (`agent`, `auto`, o `mixture_of_agents` con `proposer_skills`), el nivel **global** se acota a `medium`: `aggressive` degrada a `medium` y el resto se respeta. En una generación de un solo turno quitar artículos ahorra tokens sin cambiar lo que se pide; en un loop agéntico ese mismo texto es la instrucción que el modelo relee en cada iteración mientras interpreta lo que devuelven las herramientas, y llega telegrafiado justo cuando más tiene que razonar sobre él. El ahorro además es marginal: el prompt es una fracción del contexto que acaban ocupando los resultados de las tools. Un override explícito de la tarea (`prompt_compression: "aggressive"`) **no** queda acotado: la petición manda sobre la política del broker. El punto único es `RoutedModelProvider._effective_global_level`.
 
 **Interacción con ficheros adjuntos (fase 7):** cuando una tarea lleva adjuntos `broker_file`, la expansión del prompt fija la compresión a `off` salvo que la tarea traiga un override explícito. Motivo: el Markdown de un documento contiene tablas, cifras y código que la poda léxica corrompería. El prompt original del cliente se conserva en `request_json` en cualquier caso.
 

@@ -983,6 +983,32 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "CREDENTIALS_UNAVAILABLE")
         await provider.close()
 
+    async def test_sync_models_with_non_json_body_does_not_escape_as_valueerror(self) -> None:
+        """Una base_url que apunta al sitio equivocado (sin /v1, un proxy, un
+        portal) contesta 200 con HTML. json.JSONDecodeError es un ValueError,
+        no un httpx.HTTPError: sin convertirlo se escapaba de los except del
+        adapter y tumbaba con un 500 la página entera del panel, que solo
+        estaba pidiendo el estado de salud."""
+        def html_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<!doctype html><html><body>Not found</body></html>")
+
+        config = OpenAICompatibleProviderConfig(
+            id="mal-configurado", enabled=True, base_url="https://api.ejemplo.test", sync_models=True,
+            api_key_env=None,
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(html_handler))
+        with self.assertRaises(ProviderError) as raised:
+            await provider.models()
+        self.assertEqual(raised.exception.code, "INVALID_PROVIDER_RESPONSE")
+        self.assertIn("sin JSON", str(raised.exception))
+
+        # Y el sondeo de salud lo traduce a "unavailable" en vez de propagarlo:
+        # el resto del panel sigue en pie.
+        health = await RoutedModelProvider._provider_health(provider)
+        self.assertEqual(health["status"], "unavailable")
+        self.assertIn("INVALID_PROVIDER_RESPONSE", health["detail"])
+        await provider.close()
+
     async def test_sync_models_maps_http_error_and_reraises_credential_error(self) -> None:
         def server_error_handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500)
@@ -1462,6 +1488,51 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
         compressed = router.user_prompt(aggressive)
         self.assertNotEqual(compressed, prompt)
         self.assertLess(len(compressed), len(prompt))
+        await router.close()
+
+    async def test_user_prompt_caps_aggressive_compression_in_tool_loops(self) -> None:
+        """El nivel aggressive borra artículos; en un loop de tools el prompt es
+        la instrucción que el modelo relee en cada iteración, así que ahí se
+        acota a medium (ver RoutedModelProvider._effective_global_level)."""
+        from app.config import PromptCompressionConfig
+
+        class Stub:
+            async def models(self):
+                return []
+
+            async def close(self):
+                return None
+
+        config = BrokerConfig(
+            prompt_compression=PromptCompressionConfig(enabled=True, level="aggressive", min_chars=0),
+        )
+        router = RoutedModelProvider(config, ollama=Stub(), deepseek=Stub(), custom={})
+        prompt = (
+            "Por favor, contrasta las fuentes independientes y redacta el informe "
+            "distinguiendo los hechos de las incertidumbres."
+        )
+        agent_execution = {
+            "strategy": "agent",
+            "agent": {"skills": ["web_search"], "max_iterations": 4},
+        }
+        single = TaskCreateRequest(idempotency_key="cap:single", content={"prompt": prompt})
+        agent = TaskCreateRequest(
+            idempotency_key="cap:agent", content={"prompt": prompt}, execution=agent_execution,
+        )
+        agent_override = TaskCreateRequest(
+            idempotency_key="cap:agent-override", content={"prompt": prompt},
+            execution=agent_execution, prompt_compression="aggressive",
+        )
+
+        # single conserva el comportamiento clásico: aggressive de verdad.
+        self.assertNotIn(" las ", router.user_prompt(single))
+        # agent mantiene los determinantes, pero sigue quitando la cortesía.
+        agent_prompt = router.user_prompt(agent)
+        self.assertIn("las fuentes independientes", agent_prompt)
+        self.assertIn("los hechos", agent_prompt)
+        self.assertNotIn("Por favor", agent_prompt)
+        # Un nivel pedido explícitamente por la tarea manda sobre el tope.
+        self.assertNotIn(" las ", router.user_prompt(agent_override))
         await router.close()
 
     async def test_honours_preferred_model_and_fallback_policy(self) -> None:
@@ -1975,8 +2046,11 @@ class RoleSystemPromptTests(unittest.IsolatedAsyncioTestCase):
         await router.propose(request, skeptic, 1)
         await router.propose(request, unknown_role, 2)
         await router.close()
-        self.assertEqual(stub.calls[0][2], ROLE_SYSTEM_PROMPTS["skeptic"])
-        self.assertEqual(stub.calls[1][2], ROLE_SYSTEM_PROMPTS["proposer"])
+        # El rol encabeza el system prompt; detrás va la instrucción de idioma
+        # de output.language (ver base.with_output_language).
+        self.assertTrue(stub.calls[0][2].startswith(ROLE_SYSTEM_PROMPTS["skeptic"]))
+        self.assertTrue(stub.calls[1][2].startswith(ROLE_SYSTEM_PROMPTS["proposer"]))
+        self.assertIn("«es»", stub.calls[0][2])
 
     async def test_synthesize_uses_arbiter_system_and_delimits_candidates(self) -> None:
         from app.providers import ROLE_SYSTEM_PROMPTS, ModelOutput
@@ -1993,7 +2067,7 @@ class RoleSystemPromptTests(unittest.IsolatedAsyncioTestCase):
         await router.synthesize(request, arbiter, proposals)
         await router.close()
         model_name, prompt, system = stub.calls[0]
-        self.assertEqual(system, ROLE_SYSTEM_PROMPTS["arbiter"])
+        self.assertTrue(system.startswith(ROLE_SYSTEM_PROMPTS["arbiter"]))
         self.assertIn("<original_request>\npregunta original\n</original_request>", prompt)
         self.assertIn("<candidate_1>\nrespuesta A\n</candidate_1>", prompt)
         self.assertIn("<candidate_2>\nrespuesta B\n</candidate_2>", prompt)

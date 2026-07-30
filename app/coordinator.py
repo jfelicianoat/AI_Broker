@@ -18,6 +18,7 @@ from app.providers.base import (
     ROLE_SYSTEM_PROMPTS,
     estimate_tokens_upper_bound,
     role_system_prompt,
+    with_output_language,
 )
 from app.repository import _utc_now_iso
 from app.resource_scheduler import ResourcePlanningError, ResourceScheduler
@@ -1173,7 +1174,7 @@ class ConsensusCoordinator:
             prior = saved_state.get("accumulated") or {}
         else:
             messages = [
-                {"role": "system", "content": self._AGENT_SYSTEM_PROMPT},
+                {"role": "system", "content": with_output_language(self._AGENT_SYSTEM_PROMPT, request)},
                 {"role": "user", "content": self.provider_user_prompt(request)},
             ]
             iteration_offset = 0
@@ -1543,7 +1544,9 @@ class ConsensusCoordinator:
             role = model.role or "proposer"
             system = role_system_prompt(role) or ROLE_SYSTEM_PROMPTS["proposer"]
             messages = [
-                {"role": "system", "content": f"{system}\n\n{self._AGENT_SYSTEM_PROMPT}"},
+                {"role": "system", "content": with_output_language(
+                    f"{system}\n\n{self._AGENT_SYSTEM_PROMPT}", invocation_request,
+                )},
                 {"role": "user", "content": self.provider_user_prompt(invocation_request)},
             ]
             try:
