@@ -898,13 +898,32 @@ class TaskRepository:
             state["messages"] = messages
             state["pending_tool_calls"] = []
             state["resumed"] = True
-            queue_row = connection.execute(
-                "SELECT COALESCE(MAX(queue_position), -1) + 1 AS pos FROM tasks WHERE status = 'queued'"
+            # Reentra por ORDEN DE LLEGADA, no por el final de la cola. Es la
+            # misma regla que ya rige para quien cede el turno esperando memoria
+            # (ver CLAIMABLE_INFERENCE_STATUSES): ceder el turno no degrada a la
+            # tarea. Mandarla al final penalizaba justo al trabajo que ya está
+            # en vuelo —una investigación de diez pasos pagaba diez veces la
+            # espera de la cola entera— y ninguna prioridad podía rescatarla,
+            # porque `queue_position` manda sobre `priority` en el reclamo.
+            # Se cuela delante de lo que llegó después de ella; los empates los
+            # rompe `created_at`, que es el desempate final del ORDER BY.
+            newer = connection.execute(
+                "SELECT MIN(queue_position) AS pos FROM tasks "
+                "WHERE status = 'queued' AND queue_position IS NOT NULL "
+                "AND created_at > (SELECT created_at FROM tasks WHERE id = ?)",
+                (task_id,),
             ).fetchone()
+            if newer is not None and newer["pos"] is not None:
+                position = int(newer["pos"]) - 1
+            else:
+                queue_row = connection.execute(
+                    "SELECT COALESCE(MAX(queue_position), -1) + 1 AS pos FROM tasks WHERE status = 'queued'"
+                ).fetchone()
+                position = int(queue_row["pos"])
             connection.execute(
                 "UPDATE tasks SET status = 'queued', agent_state_json = ?, result_json = NULL, "
                 "queue_position = ?, updated_at = ? WHERE id = ?",
-                (dumps_json(state), int(queue_row["pos"]), now, task_id),
+                (dumps_json(state), position, now, task_id),
             )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",

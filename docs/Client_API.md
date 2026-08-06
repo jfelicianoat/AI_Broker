@@ -92,6 +92,10 @@ X-Admin-Token: <token>
 
 Un broker en loopback sin token configurado acepta peticiones sin cabecera. Un broker que escucha fuera de loopback **no arranca** sin token, salvo opt-out explícito. Si recibes `401`/`403`, es esto.
 
+**El token cambia en cada arranque del broker** salvo que se fije `AI_BROKER_ADMIN_TOKEN` desde fuera. Para una app de larga vida eso significa que un `403` a mitad de trabajo casi nunca es un fallo de integración: es que el broker se ha reiniciado. Trátalo como "hay que renovar credencial y reintentar", no como tarea fallida — **tus tareas siguen ahí**. En particular, una tarea en `waiting_for_tools` sobrevive intacta al reinicio, con su conversación congelada, y te espera. Lo que sí se toca en el arranque son las tareas que estaban ejecutándose: se reencolan, o fallan con `RECOVERY_AMBIGUOUS_REMOTE_CALL` si tenían una llamada remota en vuelo que pudo facturarse.
+
+Distingue `403 ADMIN_AUTH_REQUIRED` (credencial: renuévala) de `503 ADMIN_AUTH_BACKEND_UNAVAILABLE` (el llavero del sistema falla: pedir otro token no arregla nada).
+
 ---
 
 ## 4. La decisión más importante: la clasificación de datos
@@ -405,6 +409,19 @@ El caso contrario sí es terminal: si el modelo pedido no cabe **ni con la máqu
 
 Ritmo de sondeo recomendado: cada 2–5 s. `progress.phase` e `invocations_completed`/`invocations_total` sirven para pintar avance.
 
+### El esquema de esta respuesta
+
+`progress` y `result` son objetos abiertos, así que conviene decir qué parte es promesa y qué parte es información. El **núcleo garantizado** está publicado como JSON Schema en `tests/fixtures/broker_task_state_response.schema.json`, y un test de contrato valida contra él las respuestas reales del endpoint: no puede quedarse obsoleto en silencio. Cópialo a tu repo si quieres validar en tu lado.
+
+Lo que fija:
+
+- Siempre: `task_id`, `kind`, `status`, `request_id`, `created_at`, `updated_at`, `progress.phase`.
+- Con `kind: "inference"`: además `progress.invocations_completed` y `progress.invocations_total`.
+- Con `status: "waiting_for_tools"`: `result.pending_tool_calls`, cada una con `id`, `name` y `arguments` (ver §9); y en la estrategia `agent`, `progress.agent_iteration` y `progress.agent_max_iterations`.
+- Con `status: "failed"`: `error` con `code`, `message` y `retryable`.
+
+**Cualquier otra clave de `progress` es informativa** —existe, puede ser útil para pintar, y puede cambiar o desaparecer sin subir versión de contrato—. Los contadores son un **agregado**: te dicen cuántas invocaciones van, no cuáles. El detalle por invocación del broker (modelo, coste, latencia, llamadas a skills) vive en el panel de operación, `GET /api/v1/dashboard/tasks/{id}`, que es un contrato de administración y no de cliente. Si lo que quieres es el detalle de *tus* pasos, la vía es §9.
+
 ### El resultado
 
 Para `chat`:
@@ -476,7 +493,15 @@ POST /api/v1/tasks/{task_id}/tool_results
 
 4. La tarea vuelve a `queued` y el bucle continúa donde estaba.
 
-Reglas: hasta 16 herramientas, nombres `^[A-Za-z0-9_-]+$` únicos, y **no pueden llamarse igual que una skill integrada**. Debes responder a **todas** las llamadas pendientes en la misma petición o recibes `409`. `waiting_for_tools` no consume el slot de inferencia: la tarea puede esperarte indefinidamente sin bloquear la cola.
+Reglas: hasta 16 herramientas, nombres `^[A-Za-z0-9_-]+$` únicos, y **no pueden llamarse igual que una skill habilitada en esa misma tarea** — dos definiciones del mismo nombre en una llamada al modelo son ambiguas. Con `skills: []` la lista de nombres queda libre: puedes llamar `web_search` a tu propia búsqueda, que es el nombre con el que los modelos vienen entrenados. Debes responder a **todas** las llamadas pendientes en la misma petición o recibes `409`. `waiting_for_tools` no consume el slot de inferencia: la tarea puede esperarte indefinidamente sin bloquear la cola.
+
+### Cuando la orquestación es tuya
+
+Si tu aplicación quiere conservar el control del bucle —decidir qué se busca, con qué fuentes y cuándo parar— declara **todas** las herramientas como `client_tools` y deja `skills: []`. El broker aporta el razonamiento del modelo y tú ejecutas cada paso, así que ves cada subtarea con su nombre y sus argumentos en `result.pending_tool_calls` antes de resolverla. Es el punto medio entre pedir una inferencia suelta por paso (control total, sin agente) y entregar el bucle entero al broker con sus skills integradas (sin visibilidad del detalle: solo el agregado de `progress`).
+
+`progress.agent_iteration` y `progress.agent_max_iterations` te dicen por qué vuelta del bucle vas. Ojo: **el tope de `max_iterations` cuenta el bucle entero**, pausas incluidas — al reanudar se sigue contando donde se quedó, no se reinicia. Con un máximo de 20, esa es la profundidad total de la investigación.
+
+Reanudar **no te manda al final de la cola**: la tarea vuelve al sitio que le da su hora de llegada, por delante de lo que entró mientras tú ejecutabas la herramienta. Pausar para pedirte algo no degrada tu tarea, igual que no la degrada esperar memoria.
 
 ---
 

@@ -30,6 +30,10 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
+    # Valida las respuestas reales contra el esquema publicado del estado de
+    # tarea (tests/fixtures/broker_task_state_response.schema.json): sin esto
+    # el contrato con las apps cliente seria un documento sin guardia.
+    "jsonschema>=4.22.0",
 ]
 # Sin esta lista setuptools intenta auto-descubrir paquetes y aborta porque la
 # raíz tiene varios directorios candidatos (graphify-out, state, logs, docs...):
