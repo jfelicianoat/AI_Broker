@@ -314,9 +314,17 @@ class AgentExecutionConfig(StrictBaseModel):
         names = [tool.name for tool in self.client_tools]
         if len(names) != len(set(names)):
             raise ValueError("client_tools names must be unique")
-        reserved = set(AGENT_SKILLS)
-        if reserved.intersection(names):
-            raise ValueError("client_tools cannot reuse built-in skill names")
+        # La colisión real es con las skills HABILITADAS en esta tarea: dos
+        # definiciones del mismo nombre en la misma llamada al modelo. Si la
+        # skill no está activa el nombre queda libre — una app que orquesta su
+        # propia investigación necesita poder llamar `web_search` a su
+        # herramienta, que es el nombre con el que los modelos vienen
+        # entrenados, sin heredar la búsqueda que ejecuta el broker.
+        shadowed = sorted(set(self.skills).intersection(names))
+        if shadowed:
+            raise ValueError(
+                "client_tools cannot reuse an enabled skill name: " + ", ".join(shadowed)
+            )
         return self
 
 

@@ -400,6 +400,87 @@ providers:
         json_mode: false
         tools: true
       features_checked_at: '2026-07-25T20:05:01.061431+00:00'
+    - name: laguna-s-2.1-heretic-i1
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T21:30:22.247441+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-06T21:31:12.490439+00:00'
+    - name: essentialai/rnj-1
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T21:31:12.490472+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-06T21:36:07.816750+00:00'
+    - name: laguna-s-2.1-uncensored
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-08-06T21:36:07.816823+00:00'
+      compatibility_error: ''
+      features: {}
+      features_checked_at: null
+    - name: allenai/olmo-3-32b-think
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T21:41:09.891921+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-06T21:43:04.659698+00:00'
+    - name: mistralai/devstral-small-2-2512
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T21:43:04.659729+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-06T21:43:49.569618+00:00'
+    - name: prism-ml/bonsai-27b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T21:43:49.569998+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-06T21:44:28.357231+00:00'
   - id: nvidia
     enabled: true
     adapter: openai_compatible
@@ -493,7 +574,7 @@ providers:
       capabilities:
       - embedding
       compatibility: error
-      compatibility_checked_at: '2026-07-30T20:31:21.769816+00:00'
+      compatibility_checked_at: '2026-08-06T17:04:27.342303+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/embeddings:
         {"error":"Something went wrong with the request."}'
       features: {}
@@ -1142,7 +1223,7 @@ providers:
       capabilities:
       - completion
       compatibility: error
-      compatibility_checked_at: '2026-07-30T20:31:50.801150+00:00'
+      compatibility_checked_at: '2026-08-06T17:04:29.530423+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
         Server Error","status":500,"detail":"Internal error while making inference
@@ -2037,11 +2118,13 @@ providers:
       output_cost_per_million: 70.0
       capabilities:
       - completion
-      compatibility: error
-      compatibility_checked_at: '2026-07-30T20:13:54.153484+00:00'
-      compatibility_error: ''
-      features: {}
-      features_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T17:04:40.245282+00:00'
+      compatibility_error: null
+      features:
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-06T17:19:22.904812+00:00'
     - name: kat-coder-pro-v2.5
       context_window: 128000
       input_cost_per_million: 70.0
@@ -2241,7 +2324,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-07-30T20:26:12.477148+00:00'
+      compatibility_checked_at: '2026-08-06T20:03:53.464090+00:00'
       compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
         {"error":{"message":"The model \"stepaudio-2.5-realtime\" does not exist or
         you do not have access to it.","type":"model_invalid","param":"","code":null}}'
@@ -2260,3 +2343,17 @@ providers:
         do not have access to it.","type":"model_invalid","param":"","code":null}}'
       features: {}
       features_checked_at: null
+    - name: step-explore
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-06T17:19:23.168908+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-06T17:24:31.057697+00:00'

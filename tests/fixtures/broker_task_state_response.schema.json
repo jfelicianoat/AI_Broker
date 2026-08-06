@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-broker.local/contracts/broker/2.7/task-state.response.json",
+  "title": "AI Broker 2.7 — GET /api/v1/tasks/{task_id}",
+  "description": "Nucleo garantizado del estado de tarea. Lo declarado aqui no cambia sin subir la version de contrato. `progress` y `result` admiten claves adicionales: son informativas y NO son contrato, no construyas logica sobre ellas.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "kind",
+    "status",
+    "request_id",
+    "created_at",
+    "updated_at",
+    "progress"
+  ],
+  "properties": {
+    "task_id": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["inference", "ingestion"]},
+    "status": {
+      "description": "Solo los terminales son contrato. Cualquier estado no terminal significa 'sigue trabajando' y puede cambiar sin aviso, salvo waiting_for_tools y waiting_for_memory, que si son contrato porque el cliente tiene que reaccionar a ellos.",
+      "enum": [
+        "queued",
+        "routing",
+        "planning",
+        "resource_planning",
+        "chunking",
+        "generating",
+        "proposing",
+        "evaluating",
+        "debating",
+        "synthesizing",
+        "verifying",
+        "converting",
+        "waiting_for_tools",
+        "waiting_for_memory",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "request_id": {"type": ["string", "null"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "execution_strategy": {
+      "description": "null en el carril de ingesta: una conversion no tiene ejecucion que describir.",
+      "enum": ["single", "mixture_of_agents", "agent", "auto", null]
+    },
+    "execution_preset": {
+      "enum": ["fast", "slow", "standard", "verified", "high_stakes", null]
+    },
+    "selection_mode": {"enum": ["auto", "manual", "hybrid", null]},
+    "progress": {
+      "type": "object",
+      "required": ["phase"],
+      "properties": {
+        "phase": {"type": "string"},
+        "invocations_completed": {"type": "integer", "minimum": 0},
+        "invocations_total": {"type": "integer", "minimum": 0},
+        "agent_iteration": {"type": "integer", "minimum": 0},
+        "agent_max_iterations": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "result": {"type": ["object", "null"]},
+    "error": {"type": ["object", "null"]}
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "title": "Inferencia: los contadores de invocacion siempre estan",
+      "if": {"properties": {"kind": {"const": "inference"}}, "required": ["kind"]},
+      "then": {
+        "properties": {
+          "progress": {
+            "required": ["phase", "invocations_completed", "invocations_total"]
+          }
+        }
+      }
+    },
+    {
+      "title": "Agente pausado: las llamadas pendientes son el detalle por subtarea",
+      "if": {
+        "properties": {"status": {"const": "waiting_for_tools"}},
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["result"],
+        "properties": {
+          "result": {
+            "type": "object",
+            "required": ["status", "pending_tool_calls"],
+            "properties": {
+              "status": {"const": "waiting_for_tools"},
+              "pending_tool_calls": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "name", "arguments"],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "tool_call_id que hay que devolver en POST /tasks/{id}/tool_results."
+                    },
+                    "name": {"type": "string", "minLength": 1},
+                    "arguments": {
+                      "type": "object",
+                      "description": "Argumentos ya deserializados con los que el modelo llamo a la herramienta.",
+                      "additionalProperties": true
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "title": "Agente pausado: el progreso trae la iteracion del bucle",
+      "if": {
+        "properties": {
+          "status": {"const": "waiting_for_tools"},
+          "execution_strategy": {"const": "agent"}
+        },
+        "required": ["status", "execution_strategy"]
+      },
+      "then": {
+        "properties": {
+          "progress": {"required": ["agent_iteration", "agent_max_iterations"]}
+        }
+      }
+    },
+    {
+      "title": "Fallo: el error dice si reintentar tiene sentido",
+      "if": {"properties": {"status": {"const": "failed"}}, "required": ["status"]},
+      "then": {
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable"],
+            "properties": {
+              "code": {"type": "string", "minLength": 1},
+              "message": {"type": "string"},
+              "retryable": {"type": "boolean"}
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  ]
+}

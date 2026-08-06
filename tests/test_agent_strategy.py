@@ -356,6 +356,50 @@ def test_client_tool_passthrough_pause_and_resume(tmp_path: Path) -> None:
         assert done["result"]["usage"]["invocations"] >= 2
 
 
+def test_resumed_agent_keeps_its_place_in_the_queue(tmp_path: Path) -> None:
+    """Resolver las tools del cliente no manda la tarea al final de la cola.
+
+    Una app que orquesta su bucle pausa y reanuda una vez por paso. Si cada
+    reanudación fuese al final, una investigación de diez pasos pagaría diez
+    veces la espera de la cola entera, y `priority` no podría rescatarla porque
+    el reclamo ordena antes por `queue_position`. La tarea vuelve al sitio que
+    le da su hora de llegada: por delante de lo que entró después que ella.
+    """
+    client_tools = [{"name": "web_search", "description": "Búsqueda de la app",
+                     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}]
+    with _client(tmp_path) as client:
+        first = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:queue-order",
+            "content": {"prompt": "Investiga"},
+            "execution": {"strategy": "agent", "agent": {"skills": [], "client_tools": client_tools}},
+        })
+        agent_id = first.json()["task_id"]
+
+        # Se pausa esperando a la app.
+        client.post("/api/v1/dispatcher/tick")
+        paused = client.get(f"/api/v1/tasks/{agent_id}").json()
+        assert paused["status"] == "waiting_for_tools"
+        call_id = paused["result"]["pending_tool_calls"][0]["id"]
+
+        # Mientras la app trabaja, entra una tarea nueva DETRÁS de ella.
+        latecomer = client.post("/api/v1/tasks", json={
+            "idempotency_key": "single:latecomer",
+            "content": {"prompt": "Resume esto"},
+            "execution": {"strategy": "single"},
+        })
+        latecomer_id = latecomer.json()["task_id"]
+
+        client.post(f"/api/v1/tasks/{agent_id}/tool_results", json={
+            "tool_results": [{"tool_call_id": call_id, "content": "3 fuentes"}],
+        })
+
+        # El siguiente turno es de la investigación, no de la recién llegada.
+        claimed = client.post("/api/v1/dispatcher/tick").json()
+        assert claimed["task_id"] == agent_id
+        assert client.get(f"/api/v1/tasks/{agent_id}").json()["status"] == "completed"
+        assert client.get(f"/api/v1/tasks/{latecomer_id}").json()["status"] == "queued"
+
+
 def test_tool_results_rejected_when_ids_mismatch(tmp_path: Path) -> None:
     client_tools = [{"name": "consulta_crm", "description": "CRM",
                      "parameters": {"type": "object", "properties": {}}}]
