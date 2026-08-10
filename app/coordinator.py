@@ -1130,7 +1130,10 @@ class ConsensusCoordinator:
 
             if on_iteration is not None:
                 on_iteration(iteration, outputs)
-            if budget is not None and sum(o.cost_usd for o in outputs) >= budget:
+            # Mismo criterio que _with_remaining_budget: un techo de 0 USD con
+            # gasto 0 (todo local) no agota nada y no debe cortar el bucle.
+            spent = sum(o.cost_usd for o in outputs)
+            if budget is not None and spent > 0 and spent >= budget:
                 return AgentLoopResult(
                     "Se agotó el presupuesto (max_cost_usd) antes de concluir.",
                     outputs, "budget_exhausted", tool_calls, last_invocation_id,
@@ -1740,8 +1743,12 @@ class ConsensusCoordinator:
         maximum = request.model_requirements.max_cost_usd
         if maximum is None:
             return request
-        remaining = maximum - sum(output.cost_usd for output in outputs)
-        if remaining <= 0:
+        spent = sum(output.cost_usd for output in outputs)
+        remaining = maximum - spent
+        # Un techo de 0 USD no es presupuesto agotado: significa "solo modelos
+        # gratuitos". Mientras no se haya gastado nada quedan invocaciones
+        # posibles (locales), así que solo se corta habiendo gasto real.
+        if spent > 0 and remaining <= 0:
             raise ProviderError("BUDGET_EXCEEDED", "No queda presupuesto para otra invocación")
         requirements = request.model_requirements.model_copy(update={"max_cost_usd": remaining})
         return request.model_copy(update={"model_requirements": requirements})

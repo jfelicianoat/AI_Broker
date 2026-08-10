@@ -64,6 +64,9 @@ sandbox:
   work_volume_mb: 256
 resources:
   local_vram_budget_gb: 64.0
+  # APU Strix Halo: los 128 GB son un solo pool y la VRAM es una porción de él.
+  # 112 deja ~16 GB para Windows y el resto de programas.
+  unified_memory_budget_gb: 112.0
   vram_safety_margin_gb: 2.0
   max_loaded_local_models: auto
   scheduling_policy: adaptive
@@ -93,17 +96,6 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    code: []
-    long_context:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
     prose:
     - '*-coder*'
     - '*_coder*'
@@ -114,6 +106,17 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    code: []
 strategy_router:
   enabled: false
   heuristic_classifier: true
@@ -434,11 +437,14 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: error
-      compatibility_checked_at: '2026-08-06T21:36:07.816823+00:00'
-      compatibility_error: ''
-      features: {}
-      features_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-10T20:55:40.994649+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: false
+      features_checked_at: '2026-08-10T20:57:52.733415+00:00'
     - name: allenai/olmo-3-32b-think
       context_window: 32768
       input_cost_per_million: 0.0

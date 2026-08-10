@@ -106,6 +106,7 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'task_affinity_exclude_long_context': ('Apartar en contexto largo', 'Idoneidad por tipo de tarea'),
     'task_affinity_exclude_prose': ('Apartar en prosa', 'Idoneidad por tipo de tarea'),
     'task_timeout_seconds': ('Timeout global por tarea (segundos)', 'Configuración'),
+    'unified_memory_budget_gb': ('Presupuesto memoria unificada (GB)', 'Configuración'),
     'vram_safety_margin_gb': ('Margen seguridad VRAM (GB)', 'Configuración'),
 }
 
@@ -181,6 +182,7 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("processing.queue_max_size", "Tamaño máximo de cola"),
         ("processing.max_parallel_invocations", "Máx. invocaciones paralelas slow"),
         ("resources.local_vram_budget_gb", "Presupuesto VRAM local"),
+        ("resources.unified_memory_budget_gb", "Presupuesto memoria unificada"),
         ("resources.vram_safety_margin_gb", "Margen seguridad VRAM"),
         ("resources.max_loaded_local_models", "Máx. modelos locales cargados"),
         ("resources.allow_execution_waves", "Permitir waves"),
@@ -366,6 +368,12 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
     resources["vram_safety_margin_gb"] = _float_range_field(
         form, "vram_safety_margin_gb", minimum=0.0, maximum=512.0
     )
+    # Vacío = GPU discreta. Guard de presencia como el de más abajo: un
+    # formulario parcial no debe desactivar la memoria unificada al guardar.
+    if form.get("unified_memory_budget_gb") is not None:
+        resources["unified_memory_budget_gb"] = _optional_float_range(
+            form, "unified_memory_budget_gb", minimum=1.0, maximum=4096.0
+        )
     resources["max_loaded_local_models"] = _auto_or_int_field(
         form, "max_loaded_local_models", minimum=1, maximum=64
     )
@@ -392,6 +400,12 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         processing["auto_dispatch"] = _checked(form, "auto_dispatch")
     if resources["vram_safety_margin_gb"] >= resources["local_vram_budget_gb"]:
         raise PromptTesterError("El margen de VRAM debe ser menor que el presupuesto total de VRAM.")
+    unified = resources.get("unified_memory_budget_gb")
+    if unified is not None and unified < resources["local_vram_budget_gb"]:
+        raise PromptTesterError(
+            "El presupuesto de memoria unificada no puede ser menor que el de VRAM: "
+            "el pool unificado incluye la VRAM."
+        )
     level = form.get("prompt_compression_level", "medium").strip().lower() or "medium"
     if level not in {"light", "medium", "aggressive"}:
         raise PromptTesterError("prompt_compression_level debe ser light, medium o aggressive.")
@@ -1249,6 +1263,15 @@ def _optional_float(form: dict[str, str], key: str) -> float | None:
     if not raw:
         return None
     return _float_field(form, key, 0.0)
+
+
+def _optional_float_range(
+    form: dict[str, str], key: str, *, minimum: float, maximum: float
+) -> float | None:
+    """Como _float_range_field pero el vacío es un valor: "no aplica"."""
+    if not form.get(key, "").strip():
+        return None
+    return _float_range_field(form, key, minimum=minimum, maximum=maximum)
 
 
 def _validation_messages(error: ValidationError) -> list[str]:

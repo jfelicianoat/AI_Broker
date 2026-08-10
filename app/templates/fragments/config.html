@@ -57,6 +57,11 @@
       <input name="local_vram_budget_gb" value="{{ config.resources.local_vram_budget_gb }}" inputmode="decimal">
     </label>
     <label class="field">
+      <span>Presupuesto memoria unificada (GB)</span>
+      <input name="unified_memory_budget_gb" value="{{ config.resources.unified_memory_budget_gb if config.resources.unified_memory_budget_gb is not none else '' }}" inputmode="decimal" placeholder="vacío = GPU discreta">
+      <small>Solo en máquinas de memoria unificada (APU, Apple Silicon), donde la VRAM sale de la misma RAM física. Pon aquí el pool completo utilizable y pasa a mandar sobre el presupuesto de VRAM: un modelo mayor que la VRAM deja de ser un fallo terminal y se reparte con la RAM compartida.</small>
+    </label>
+    <label class="field">
       <span>Margen seguridad VRAM (GB)</span>
       <input name="vram_safety_margin_gb" value="{{ config.resources.vram_safety_margin_gb }}" inputmode="decimal">
     </label>

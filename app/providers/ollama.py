@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from app.config import BrokerConfig
+from app.config import BrokerConfig, local_memory_budget_bytes
 from app.providers.base import (
     AgentTurn,
     ModelOutput,
@@ -67,12 +67,27 @@ class OllamaLifecycleManager:
                     finally:
                         self._reserved_sizes.pop(model, None)
 
+    @property
+    def _unified(self) -> bool:
+        return self.config.resources.unified_memory_budget_gb is not None
+
+    def _footprint(self, item: dict[str, Any]) -> int:
+        """Lo que un modelo cargado le quita al pool que gobierna la admisión.
+
+        Con memoria unificada hay que mirar el tamaño total: lo que el runtime
+        deja fuera de la VRAM sale igualmente del mismo pool, y `size_vram` no
+        lo ve. Contarlo por VRAM ahí abajo sería admitir trabajo contra memoria
+        que en realidad ya está gastada.
+        """
+        return int(item.get("size" if self._unified else "size_vram") or 0)
+
+    def _occupied(self, running: list[dict[str, Any]], names: set[str]) -> int:
+        occupied = sum(self._footprint(item) for item in running)
+        return occupied + sum(size for name, size in self._reserved_sizes.items() if name not in names)
+
     async def _ensure_capacity(self, model: str, estimated_size: int) -> None:
         running = await self.running()
-        budget = int(
-            (self.config.resources.local_vram_budget_gb - self.config.resources.vram_safety_margin_gb)
-            * 1024**3
-        )
+        budget = local_memory_budget_bytes(self.config)
         # Distinción que antes no se hacía y que decide el destino de la tarea:
         # un modelo más grande que TODO el presupuesto no cabrá por mucho que
         # se espere, así que esperar sería mentirle al usuario. Los demás casos
@@ -80,12 +95,10 @@ class OllamaLifecycleManager:
         if estimated_size > budget:
             raise ProviderError(
                 "VRAM_MODEL_TOO_LARGE",
-                f"{model} necesita {_gib(estimated_size)} y el presupuesto completo es "
-                f"{_gib(budget)}: no cabe ni con la máquina vacía",
+                self._too_large_message(model, estimated_size, budget),
             )
         running_names = {str(item.get("name") or item.get("model") or "") for item in running}
-        occupied = sum(int(item.get("size_vram") or 0) for item in running)
-        occupied += sum(size for name, size in self._reserved_sizes.items() if name not in running_names)
+        occupied = self._occupied(running, running_names)
         if any(item.get("name") == model for item in running):
             return
         if occupied + estimated_size <= budget:
@@ -96,8 +109,7 @@ class OllamaLifecycleManager:
                 await self.unload(name)
         refreshed = await self.running()
         refreshed_names = {str(item.get("name") or item.get("model") or "") for item in refreshed}
-        occupied = sum(int(item.get("size_vram") or 0) for item in refreshed)
-        occupied += sum(size for name, size in self._reserved_sizes.items() if name not in refreshed_names)
+        occupied = self._occupied(refreshed, refreshed_names)
         if occupied + estimated_size > budget:
             # Retryable y con el detalle de quién ocupa: el coordinador lo
             # traduce en un aplazamiento con turno cedido, y el panel puede
@@ -106,9 +118,10 @@ class OllamaLifecycleManager:
                 {name for name in refreshed_names if name}
                 | {name for name in self._reserved_sizes if name not in refreshed_names}
             )
+            pool = "memoria unificada" if self._unified else "VRAM"
             error = ProviderError(
                 "VRAM_INSUFFICIENT",
-                f"No hay VRAM segura para cargar {model}: necesita {_gib(estimated_size)}, "
+                f"No hay {pool} segura para cargar {model}: necesita {_gib(estimated_size)}, "
                 f"hay {_gib(occupied)} ocupados de {_gib(budget)}",
                 retryable=True,
             )
@@ -120,6 +133,37 @@ class OllamaLifecycleManager:
                 "holders": holders,
             }
             raise error
+
+    def _too_large_message(self, model: str, estimated_size: int, budget: int) -> str:
+        """El mensaje tiene que dejar claro qué NO es: quien lo lee acaba de ver
+        el modelo funcionar en Ollama o LM Studio y buscará culpables (otro
+        proceso, otro modelo cargado) que aquí no pintan nada. Este corte solo
+        compara el peso del modelo con el presupuesto configurado."""
+        resources = self.config.resources
+        if resources.unified_memory_budget_gb is not None:
+            techo = (
+                f"el presupuesto de memoria unificada configurado, {_gib(budget)} "
+                f"(unified_memory_budget_gb {resources.unified_memory_budget_gb:g} menos "
+                f"{resources.vram_safety_margin_gb:g} de margen)"
+            )
+            salida = "Usa una cuantización menor o sube unified_memory_budget_gb."
+        else:
+            techo = (
+                f"el presupuesto de VRAM configurado, {_gib(budget)} "
+                f"(local_vram_budget_gb {resources.local_vram_budget_gb:g} menos "
+                f"{resources.vram_safety_margin_gb:g} de margen)"
+            )
+            salida = (
+                "El broker solo cuenta VRAM y no reparte capas a RAM aunque Ollama sepa "
+                "hacerlo, de ahí que el mismo modelo sí corra suelto. Si esta máquina tiene "
+                "memoria unificada (APU), declara resources.unified_memory_budget_gb con el "
+                "pool completo; si no, usa una cuantización menor o sube local_vram_budget_gb."
+            )
+        return (
+            f"{model} pesa {_gib(estimated_size)} y no cabe en {techo}. No es ocupación ajena: "
+            f"el peso del modelo ya supera el presupuesto entero, así que no lo arregla esperar "
+            f"ni descargar otros modelos. {salida}"
+        )
 
     async def unload(self, model: str) -> None:
         try:
@@ -142,7 +186,10 @@ class OllamaLifecycleManager:
         loaded = [
             {
                 "model": str(item.get("name") or item.get("model") or "unknown"),
-                "size_vram_bytes": int(item.get("size_vram") or 0),
+                # Misma vara que la admisión (_footprint): si el panel midiera
+                # solo VRAM en una máquina unificada, enseñaría un depósito más
+                # vacío que el que de verdad decide si la siguiente tarea entra.
+                "size_vram_bytes": self._footprint(item),
                 "context_length": int(item["context_length"]) if item.get("context_length") is not None else None,
                 "lease_count": leases.get(str(item.get("name") or item.get("model") or ""), 0),
             }

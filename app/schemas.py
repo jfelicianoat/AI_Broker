@@ -788,8 +788,12 @@ class DashboardResourcesResponse(StrictBaseModel):
     provider: str
     status: Literal["healthy", "unavailable"] = "healthy"
     detail: str | None = None
+    # Presupuesto que gobierna la admisión local, ya sea VRAM o pool unificado
+    # (ver config.local_memory_budget_bytes). `memory_pool` dice cuál es, para
+    # que el panel no etiquete como VRAM lo que es memoria compartida.
     vram_budget_bytes: int
     vram_safety_margin_bytes: int
+    memory_pool: Literal["vram", "unified"] = "vram"
     used_vram_bytes: int
     reserved_vram_bytes: int
     max_parallel_invocations: int

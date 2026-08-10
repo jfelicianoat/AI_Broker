@@ -174,6 +174,16 @@ class SandboxConfig(BaseModel):
 class ResourceConfig(BaseModel):
     local_vram_budget_gb: float = 64.0
     vram_safety_margin_gb: float = 6.0
+    # Máquinas de memoria unificada (APU tipo Strix Halo, Apple Silicon): la
+    # VRAM no es un depósito aparte, es una porción reservada de la MISMA RAM
+    # física. Un modelo mayor que esa porción no es imposible —el runtime
+    # reparte capas y el resto sale del mismo silicio—, así que tratarlo como
+    # terminal deja fuera modelos que la máquina ejecuta sin despeinarse.
+    # Declarado aquí, este techo (pool completo utilizable: VRAM + RAM
+    # compartida) sustituye a local_vram_budget_gb para admitir trabajo local.
+    # Vacío = GPU discreta, donde salir de la VRAM sí es caer por el barranco
+    # del bus PCIe y el presupuesto de VRAM sigue mandando.
+    unified_memory_budget_gb: float | None = Field(default=None, ge=1.0, le=4096.0)
     max_loaded_local_models: int | str = "auto"
     scheduling_policy: str = "adaptive"
     allow_execution_waves: bool = True
@@ -193,6 +203,26 @@ class ResourceConfig(BaseModel):
     # vuelve a fluir: si la memoria no se libera jamás, la reserva no puede
     # convertirse en un bloqueo permanente de todo lo demás.
     memory_reserve_window_seconds: float = Field(default=300.0, ge=10.0, le=86400.0)
+
+    @model_validator(mode="after")
+    def validate_unified_pool_contains_vram(self) -> ResourceConfig:
+        """El pool unificado incluye la VRAM: declararlo más pequeño no describe
+        ninguna máquina y dejaría un techo de admisión por debajo del que ya
+        tenías, que es justo lo contrario de para qué se activa."""
+        unified = self.unified_memory_budget_gb
+        if unified is None:
+            return self
+        if unified < self.local_vram_budget_gb:
+            raise ValueError(
+                "resources.unified_memory_budget_gb no puede ser menor que "
+                "resources.local_vram_budget_gb: el pool unificado incluye la VRAM"
+            )
+        if self.vram_safety_margin_gb >= unified:
+            raise ValueError(
+                "resources.vram_safety_margin_gb debe ser menor que "
+                "resources.unified_memory_budget_gb"
+            )
+        return self
 
 
 class ModelEnrichmentConfig(BaseModel):
@@ -495,6 +525,28 @@ class BrokerConfig(BaseModel):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
 
 
+def local_memory_pool(config: BrokerConfig) -> Literal["vram", "unified"]:
+    """Qué recurso gobierna la admisión local: "unified" o "vram"."""
+    return "unified" if config.resources.unified_memory_budget_gb is not None else "vram"
+
+
+def local_memory_budget_gb(config: BrokerConfig) -> float:
+    """Pool local bruto, sin restar el margen de seguridad."""
+    resources = config.resources
+    return resources.unified_memory_budget_gb or resources.local_vram_budget_gb
+
+
+def local_memory_budget_bytes(config: BrokerConfig) -> int:
+    """Techo de memoria para admitir un modelo local, ya con el margen restado.
+
+    Fórmula única: la usan el control de admisión de Ollama y el panel de
+    recursos. Si divergieran, el panel pintaría un depósito distinto del que
+    decide si tu tarea entra o se queda esperando.
+    """
+    usable = local_memory_budget_gb(config) - config.resources.vram_safety_margin_gb
+    return int(max(0.0, usable) * 1024**3)
+
+
 def effective_max_parallel_invocations(config: BrokerConfig) -> int:
     """Capacidad paralela efectiva de inferencia.
 
@@ -505,6 +557,9 @@ def effective_max_parallel_invocations(config: BrokerConfig) -> int:
     configured = config.processing.max_parallel_invocations
     if isinstance(configured, int):
         return configured
+    # A propósito sobre la VRAM y no sobre el pool unificado: caber repartiendo
+    # capas a RAM permite EJECUTAR un modelo grande, no ejecutar más a la vez.
+    # Dos modelos desbordados compiten por el mismo bus y van peor que en serie.
     usable_vram = max(
         1.0,
         config.resources.local_vram_budget_gb - config.resources.vram_safety_margin_gb,

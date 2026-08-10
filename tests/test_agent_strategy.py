@@ -299,6 +299,90 @@ def test_mixture_proposers_use_skills_and_record_tool_events(tmp_path: Path) -> 
     assert detail["result"]["assistant_content"]
 
 
+def test_zero_budget_runs_mixture_on_free_local_models(tmp_path: Path) -> None:
+    """max_cost_usd=0 es "solo modelos gratuitos", no "presupuesto agotado".
+
+    Regresión: la ola de proponentes pedía presupuesto restante antes de la
+    primera invocación y un techo de 0 USD con gasto 0 tumbaba la tarea con
+    BUDGET_EXCEEDED sin haber llamado a ningún modelo."""
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "mix:zero-budget",
+            "content": {"prompt": "Divide la tarea en subtareas"},
+            "execution": {
+                "strategy": "mixture_of_agents", "preset": "fast",
+                "selection": {
+                    "mode": "manual", "allow_substitution": False, "proposer_count": 2,
+                    "proposers": [
+                        {"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single", "role": "generalist"},
+                        {"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single", "role": "skeptic"},
+                    ],
+                    "arbiter": {"provider": "ollama", "deployment": "bootstrap", "model": "bootstrap-single"},
+                },
+            },
+            "model_requirements": {
+                "allowed_providers": ["ollama"], "cloud_allowed": False, "max_cost_usd": 0,
+            },
+        })
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    assert detail["task"]["status"] == "completed", detail["task"].get("error")
+    assert detail["result"]["assistant_content"]
+
+
+def test_zero_budget_does_not_cut_the_agent_loop(tmp_path: Path) -> None:
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:zero-budget",
+            "content": {"prompt": "¿Qué tiempo hace hoy?"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 4}},
+            "model_requirements": {"cloud_allowed": False, "max_cost_usd": 0},
+        })
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    assert detail["task"]["status"] == "completed"
+    # Sin el arreglo, la primera iteración (coste 0) ya cortaba el bucle.
+    assert detail["result"]["agent"]["stop_reason"] == "completed"
+    assert detail["result"]["agent"]["iterations"] == 2
+
+
+def test_exhausted_budget_still_stops_further_invocations(tmp_path: Path) -> None:
+    """La otra cara: con gasto real que llega al techo, el corte se mantiene."""
+    from app.coordinator import ConsensusCoordinator
+    from app.db import Database
+    from app.providers import ModelOutput, ProviderError
+    from app.resource_scheduler import ResourceScheduler
+    from app.schemas import TaskCreateRequest
+
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "budget.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    db = Database(tmp_path / "budget.db")
+    db.init_schema()
+    coordinator = ConsensusCoordinator(db, ResourceScheduler(config), provider=None)
+    request = TaskCreateRequest.model_validate({
+        "idempotency_key": "budget:spent",
+        "content": {"prompt": "x"},
+        "model_requirements": {"max_cost_usd": 0.05},
+    })
+    spent = [ModelOutput("parcial", 10, 10, 0.05, 1.0)]
+
+    with pytest.raises(ProviderError) as raised:
+        coordinator._with_remaining_budget(request, spent)
+    assert raised.value.code == "BUDGET_EXCEEDED"
+
+    # Y con gasto por debajo del techo, se propaga el resto disponible.
+    partial = coordinator._with_remaining_budget(request, [ModelOutput("p", 1, 1, 0.02, 1.0)])
+    assert partial.model_requirements.max_cost_usd == pytest.approx(0.03)
+
+
 def test_proposer_skills_rejected_outside_mixture(tmp_path: Path) -> None:
     with _client(tmp_path) as client:
         response = client.post("/api/v1/tasks", json={

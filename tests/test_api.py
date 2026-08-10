@@ -19,6 +19,7 @@ from app.config import (
     PersistenceConfig,
     ProcessingConfig,
     ProvidersConfig,
+    ResourceConfig,
     ServerConfig,
     load_config,
 )
@@ -770,6 +771,70 @@ def test_dashboard_configuration_form_errors_are_rendered(tmp_path: Path) -> Non
     # Nada se guardó: la config en memoria y el YAML quedan intactos.
     assert config.resources.local_vram_budget_gb != 8
     assert not config_path.exists()
+
+
+def test_resources_panel_reports_the_pool_that_gates_admission(tmp_path: Path) -> None:
+    """El panel tiene que pintar el mismo depósito que decide si una tarea entra:
+    con memoria unificada, el pool entero y con su nombre."""
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-pool.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        resources=ResourceConfig(
+            local_vram_budget_gb=64.0, unified_memory_budget_gb=112.0, vram_safety_margin_gb=2.0
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        payload = client.get("/api/v1/dashboard/resources").json()
+        fragment = client.get("/dashboard/fragments/resources")
+
+    assert payload["memory_pool"] == "unified"
+    assert payload["vram_budget_bytes"] == int(112.0 * 1024**3)
+    assert fragment.status_code == 200
+    assert "Memoria unificada observada" in fragment.text
+    assert "VRAM observada" not in fragment.text
+
+
+def test_dashboard_configuration_saves_unified_memory_budget(tmp_path: Path) -> None:
+    """Memoria unificada (APU): el campo se guarda, y vaciarlo vuelve a dejar
+    mandando al presupuesto de VRAM."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-unified.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    base = {
+        "task_timeout_seconds": "900",
+        "max_parallel_invocations": "3",
+        "queue_max_size": "250",
+        "local_vram_budget_gb": "64",
+        "vram_safety_margin_gb": "2",
+        "max_loaded_local_models": "auto",
+    }
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        saved_ok = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, **base, "unified_memory_budget_gb": "112"},
+        )
+        assert saved_ok.status_code == 200
+        assert config.resources.unified_memory_budget_gb == 112
+        assert load_config(config_path).resources.unified_memory_budget_gb == 112
+
+        # Pool menor que la VRAM: no describe ninguna máquina.
+        rejected = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, **base, "unified_memory_budget_gb": "32"},
+        )
+        assert rejected.status_code == 200
+        assert "memoria unificada" in rejected.text
+        assert config.resources.unified_memory_budget_gb == 112
+
+        cleared = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, **base, "unified_memory_budget_gb": ""},
+        )
+        assert cleared.status_code == 200
+        assert config.resources.unified_memory_budget_gb is None
 
 
 def test_dashboard_views_render_and_validate_task_kind(tmp_path: Path) -> None:
