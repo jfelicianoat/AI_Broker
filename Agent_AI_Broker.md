@@ -577,7 +577,9 @@ Para que ceder el turno no se convierta en no correr nunca, tras `resources.memo
 
 La espera **no caduca** por decisión de producto: no se descarta trabajo por un pico de memoria. La tarea queda visible en el panel con quién le ocupa la memoria y se cancela a mano si estorba.
 
-Distinto es que el modelo no quepa **ni con la máquina vacía**: eso no se arregla esperando, así que falla al momento con `VRAM_MODEL_TOO_LARGE` (no reintentable). `VRAM_INSUFFICIENT` pasa a significar solo "ahora mismo no, vuelve luego" y viaja con `retryable: true`.
+Distinto es que el modelo pese más que **todo el presupuesto de memoria local configurado** (menos el margen): eso no se arregla esperando, así que falla al momento con `VRAM_MODEL_TOO_LARGE` (no reintentable). El corte compara peso contra presupuesto y nada más —ni memoria libre real, ni otros procesos—, y el mensaje debe decirlo para que no se busque un culpable que no existe.
+
+Qué presupuesto gobierna la admisión local lo decide `resources.unified_memory_budget_gb` (`app.config.local_memory_budget_bytes`, fórmula única compartida con el panel de recursos). Vacío significa GPU discreta y manda `local_vram_budget_gb`: salir de la VRAM es caer al bus PCIe, así que no caber es terminal. Declarado, describe una máquina de memoria unificada (APU, Apple Silicon) donde la VRAM es una porción reservada de la misma RAM: el techo pasa a ser el pool entero, un modelo mayor que la VRAM se reparte en vez de rechazarse, y la ocupación se contabiliza por huella total (`size`) y no por `size_vram`, porque lo que el runtime deja fuera de la VRAM sale del mismo sitio. El paralelismo (`effective_max_parallel_invocations`) sigue calculándose sobre la VRAM a propósito: repartir capas permite ejecutar un modelo grande, no ejecutar más a la vez. `VRAM_INSUFFICIENT` pasa a significar solo "ahora mismo no, vuelve luego" y viaja con `retryable: true`.
 
 **Qué cambia para una app cliente:** trata `waiting_for_memory` como un estado no terminal más — sigue sondeando y no hagas nada. Si tu cliente asumía que todo lo que no fuese `queued` ni una etapa conocida era un error, es el único punto a revisar.
 

@@ -29,6 +29,8 @@ from app.config import (
     BrokerConfig,
     OpenAICompatibleProviderConfig,
     TaskAffinityConfig,
+    local_memory_budget_gb,
+    local_memory_pool,
     save_config,
 )
 from app.coordinator import ConsensusCoordinator
@@ -1469,8 +1471,9 @@ async def load_dashboard_resources(
         provider=snapshot["provider"],
         status=status,
         detail=detail,
-        vram_budget_bytes=int(config.resources.local_vram_budget_gb * 1024**3),
+        vram_budget_bytes=int(local_memory_budget_gb(config) * 1024**3),
         vram_safety_margin_bytes=int(config.resources.vram_safety_margin_gb * 1024**3),
+        memory_pool=local_memory_pool(config),
         used_vram_bytes=int(snapshot["used_vram_bytes"]),
         reserved_vram_bytes=int(snapshot["reserved_vram_bytes"]),
         max_parallel_invocations=scheduler.max_parallel_invocations(),

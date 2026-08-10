@@ -405,7 +405,9 @@ GET /api/v1/tasks/{task_id}
 
 `waiting_for_memory` (contrato 2.7) merece una nota porque **no es un fallo y no requiere que hagas nada**: la máquina no tiene memoria libre ahora mismo, así que la tarea ha cedido el turno conservando su sitio en la cola y volverá sola. Mientras espera, el broker adelanta a las tareas que sí quepan. Sigue sondeando igual que en `queued`. Si quieres explicarlo en tu interfaz, `GET /api/v1/queue` trae en esa tarea qué modelo pedía y quién ocupa la memoria. La espera no caduca: si algo ajeno al broker retiene la memoria para siempre, la tarea seguirá esperando hasta que la canceles con `POST /api/v1/tasks/{id}/cancel`.
 
-El caso contrario sí es terminal: si el modelo pedido no cabe **ni con la máquina vacía**, la tarea falla al momento con `VRAM_MODEL_TOO_LARGE` en vez de esperar un turno que no llegaría nunca.
+El caso contrario sí es terminal: si el modelo pedido **pesa más que todo el presupuesto de memoria local configurado** (menos el margen de seguridad), la tarea falla al momento con `VRAM_MODEL_TOO_LARGE` en vez de esperar un turno que no llegaría nunca. Ojo con lo que este error no dice: no habla de la memoria libre real ni de otros procesos, solo compara el peso del modelo con el presupuesto.
+
+Cuál es ese presupuesto depende de la máquina donde corra el broker. En GPU discreta es `resources.local_vram_budget_gb`, y un modelo mayor que la VRAM es terminal aunque Ollama supiera repartirlo a RAM. En máquinas de memoria unificada (APU, Apple Silicon) el operador declara `resources.unified_memory_budget_gb` con el pool completo, y entonces manda ese: ahí la VRAM es una porción de la misma RAM física, así que un modelo mayor que la VRAM se reparte y sigue siendo ejecutable. El mensaje de error dice siempre cuál de los dos techos ha cortado.
 
 Ritmo de sondeo recomendado: cada 2–5 s. `progress.phase` e `invocations_completed`/`invocations_total` sirven para pintar avance.
 

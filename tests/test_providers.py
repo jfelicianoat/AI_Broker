@@ -259,6 +259,90 @@ class OllamaProviderTests(unittest.IsolatedAsyncioTestCase):
                 pass
         self.assertEqual(raised.exception.code, "VRAM_MODEL_TOO_LARGE")
         self.assertFalse(raised.exception.retryable)
+        # El mensaje debe señalar el presupuesto configurado —el único dato que
+        # ha decidido el corte—, desmentir la ocupación, que aquí ni se mira, y
+        # ofrecer la salida de la memoria unificada.
+        message = str(raised.exception)
+        self.assertIn("local_vram_budget_gb", message)
+        self.assertIn("No es ocupación ajena", message)
+        self.assertIn("unified_memory_budget_gb", message)
+        await provider.close()
+
+    async def test_unified_memory_admits_a_model_bigger_than_the_vram_budget(self) -> None:
+        """APU: la VRAM es una porción de la misma RAM, así que un modelo que no
+        cabe en ella se reparte en vez de ser imposible. Declarado el pool, el
+        techo de admisión es el pool, no la VRAM."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": []})
+            return httpx.Response(404)
+
+        config = BrokerConfig(
+            processing=ProcessingConfig(unload_after_task=False),
+            resources=ResourceConfig(
+                local_vram_budget_gb=64.0,
+                unified_memory_budget_gb=112.0,
+                vram_safety_margin_gb=2.0,
+            ),
+        )
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        # 89.4 GB: por encima de la VRAM (62 usables) y por debajo del pool (110).
+        async with provider.lifecycle.lease("laguna", estimated_size=int(89.4 * 1024**3)):
+            pass
+        await provider.close()
+
+    async def test_unified_memory_still_rejects_what_exceeds_the_whole_pool(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": []})
+            return httpx.Response(404)
+
+        config = BrokerConfig(
+            resources=ResourceConfig(
+                local_vram_budget_gb=64.0,
+                unified_memory_budget_gb=112.0,
+                vram_safety_margin_gb=2.0,
+            ),
+        )
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        with self.assertRaises(ProviderError) as raised:
+            async with provider.lifecycle.lease("gigante", estimated_size=int(120 * 1024**3)):
+                pass
+        self.assertEqual(raised.exception.code, "VRAM_MODEL_TOO_LARGE")
+        # Y el mensaje nombra el techo que de verdad ha cortado.
+        message = str(raised.exception)
+        self.assertIn("unified_memory_budget_gb", message)
+        self.assertNotIn("local_vram_budget_gb", message)
+        await provider.close()
+
+    async def test_unified_memory_counts_the_whole_footprint_of_loaded_models(self) -> None:
+        """Lo que un modelo desbordado deja en RAM sale del mismo pool: contar
+        solo `size_vram` admitiría trabajo contra memoria ya gastada."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": [
+                    # Desbordado: 80 GB en total, de los que solo 60 están en VRAM.
+                    {"name": "grande", "size": 80 * 1024**3, "size_vram": 60 * 1024**3},
+                ]})
+            return httpx.Response(404)
+
+        config = BrokerConfig(
+            resources=ResourceConfig(
+                local_vram_budget_gb=64.0,
+                unified_memory_budget_gb=112.0,
+                vram_safety_margin_gb=2.0,
+            ),
+        )
+        provider = OllamaProvider(config, transport=httpx.MockTransport(handler))
+        provider.lifecycle._leases["grande"] = 1  # arrendado: no se puede desalojar
+        with self.assertRaises(ProviderError) as raised:
+            # 80 + 40 = 120 > 110 usables. Mirando solo VRAM (60 + 40) habría entrado.
+            async with provider.lifecycle.lease("otro", estimated_size=40 * 1024**3):
+                pass
+        self.assertEqual(raised.exception.code, "VRAM_INSUFFICIENT")
+        self.assertTrue(raised.exception.retryable)
+        self.assertIn("memoria unificada", str(raised.exception))
+        self.assertEqual(raised.exception.memory_block["occupied_bytes"], 80 * 1024**3)
         await provider.close()
 
     async def test_unload_maps_http_error_to_retryable_failure(self) -> None:

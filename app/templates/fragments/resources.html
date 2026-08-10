@@ -17,12 +17,13 @@
   {% endif %}
   {% set usable = resources.vram_budget_bytes - resources.vram_safety_margin_bytes %}
   {% set percent = ((resources.used_vram_bytes / usable) * 100) if usable > 0 else 0 %}
+  {% set pool_label = 'Memoria unificada observada' if resources.memory_pool == 'unified' else 'VRAM observada' %}
   <div class="resource-summary">
     <div>
-      <span>VRAM observada</span>
+      <span>{{ pool_label }}</span>
       <strong>{{ (resources.used_vram_bytes|gb) ~ ' / ' ~ (usable|gb) if resources.status == 'healthy' else 'N/D' }}</strong>
     </div>
-    <div class="meter" aria-label="Uso de VRAM"><span style="width: {{ [percent, 100]|min }}%"></span></div>
+    <div class="meter" aria-label="{{ 'Uso de memoria unificada' if resources.memory_pool == 'unified' else 'Uso de VRAM' }}"><span style="width: {{ [percent, 100]|min }}%"></span></div>
     <small>Margen de seguridad: {{ resources.vram_safety_margin_bytes|gb }} - Reservada: {{ resources.reserved_vram_bytes|gb }}</small>
   </div>
   {% if resources.loaded_models %}
