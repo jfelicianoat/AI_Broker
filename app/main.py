@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -466,10 +466,24 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             markdown_url=(
                 f"/api/v1/files/{record.id}/markdown" if record.status == "ready" else None
             ),
+            describe_images=record.describe_images,
         )
 
     @app.post("/api/v1/files", response_model=FileAcceptedResponse, status_code=202)
-    async def upload_file(request: Request, file: UploadFile) -> FileAcceptedResponse:
+    async def upload_file(
+        request: Request,
+        file: UploadFile,
+        describe_images: bool | None = Form(default=None),
+    ) -> FileAcceptedResponse:
+        """Sube un fichero y lo pone en cola de conversión a Markdown.
+
+        `describe_images` decide si las figuras del documento se extraen y se
+        describen con el modelo de visión. Omitirlo hereda la configuración del
+        broker; describir imágenes es con diferencia la parte más cara de la
+        conversión, y en documentos donde las figuras no aportan nada (sellos,
+        logotipos, decoración) desactivarlo es la diferencia entre segundos y
+        una espera larguísima.
+        """
         verify_admin_access(request, broker_config)
         if not broker_config.ingestion.enabled:
             raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
@@ -482,7 +496,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             raise HTTPException(status_code=413, detail="INGEST_TOO_LARGE") from exc
         try:
             record, created = await asyncio.to_thread(
-                ingestion.store_upload_from_file, file.filename or "fichero", temp_path,
+                ingestion.store_upload_from_file,
+                file.filename or "fichero",
+                temp_path,
+                describe_images,
             )
         except (IngestionError, UnsupportedFormat) as exc:
             status = 415 if exc.code in {"INGEST_UNSUPPORTED_FORMAT", "INGEST_CONTENT_MISMATCH"} else 422
@@ -499,6 +516,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             sha256=record.sha256,
             created=created,
             status_url=f"/api/v1/files/{record.id}",
+            describe_images=record.describe_images,
         )
 
     @app.get("/api/v1/files/{file_id}", response_model=FileStateResponse)

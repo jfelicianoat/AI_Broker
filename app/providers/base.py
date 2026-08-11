@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -128,6 +129,39 @@ def _estimation_text(prompt: str, system: str | None) -> str:
 _CONSENSUS_DELIMITER_PATTERN = re.compile(
     r"<(/?)(candidate(?:s|_\d+)?|original_request)\b", re.IGNORECASE
 )
+
+
+# Una respuesta corta puede citar el prompt de forma legítima ("como dices en
+# X…"); el eco que interesa es el del modelo que reproduce su entrada entera en
+# lugar de responder, y ese siempre es largo.
+_ECHO_MIN_CHARS = 400
+# Fragmentos por debajo de esto son frases sueltas compartidas, no copia.
+_ECHO_MIN_BLOCK = 120
+_ECHO_RATIO = 0.6
+
+
+def prompt_echo_ratio(prompt: str, content: str) -> float:
+    """Fracción de la respuesta que es copia literal y larga del prompt."""
+    if not prompt or not content:
+        return 0.0
+    matcher = difflib.SequenceMatcher(None, prompt, content, autojunk=False)
+    copied = sum(
+        block.size for block in matcher.get_matching_blocks() if block.size >= _ECHO_MIN_BLOCK
+    )
+    return copied / len(content)
+
+
+def looks_like_prompt_echo(prompt: str, content: str) -> bool:
+    """¿El modelo ha devuelto su propio prompt en vez de una respuesta?
+
+    Pasa de verdad: un modelo fuera de su terreno reproduce la entrada —a veces
+    reescribiéndola y estropeándola de paso— y el resultado llega al usuario
+    como si fuera la respuesta, porque formalmente no falló nada. Sin esta
+    comprobación no hay forma de distinguirlo de un trabajo bien hecho.
+    """
+    if len(content) < _ECHO_MIN_CHARS:
+        return False
+    return prompt_echo_ratio(prompt, content) >= _ECHO_RATIO
 
 
 def neutralize_consensus_delimiters(text: str) -> str:

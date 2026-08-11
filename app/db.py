@@ -255,6 +255,19 @@ class Database:
                 # apartarlo, el segundo solo esperar. NULL en filas previas y
                 # en las que terminaron bien.
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN error_code TEXT")
+            file_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(ingested_files)").fetchall()
+            }
+            if "describe_images" not in file_columns:
+                # Política de imágenes CON LA QUE SE CONVIRTIÓ este fichero, ya
+                # resuelta (0/1, nunca "heredar"). Es lo que decide si el
+                # Markdown guardado lleva descripciones de las figuras, así que
+                # también participa en la deduplicación por sha256: reutilizar
+                # una conversión sin descripciones cuando se piden con ellas
+                # devolvería un documento distinto del pedido. NULL en filas
+                # anteriores a la columna; se asumen convertidas con la
+                # política global vigente (ver IngestionService._reusable_row).
+                self._conn.execute("ALTER TABLE ingested_files ADD COLUMN describe_images INTEGER")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"

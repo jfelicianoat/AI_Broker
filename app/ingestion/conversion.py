@@ -44,6 +44,12 @@ class ConversionInput:
     extension: str
     kind: str
     original_path: str
+    # Política de imágenes YA resuelta para este fichero (ver
+    # IngestionService.store_upload_from_file). Viaja con la conversión porque
+    # el hijo no lee la configuración del broker, y porque decidirlo por
+    # fichero es justo el punto: extraer las figuras de un PDF grande cuesta
+    # tanto como describirlas, y hay documentos donde no aportan nada.
+    describe_images: bool = False
 
     @classmethod
     def from_record(cls, record: Any) -> ConversionInput:
@@ -53,6 +59,7 @@ class ConversionInput:
             extension=record.extension,
             kind=record.kind,
             original_path=record.original_path,
+            describe_images=bool(getattr(record, "describe_images", False)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -62,6 +69,7 @@ class ConversionInput:
             "extension": self.extension,
             "kind": self.kind,
             "original_path": self.original_path,
+            "describe_images": self.describe_images,
         }
 
 
@@ -109,7 +117,7 @@ def convert_file(
     if source.kind == "text":
         return _convert_text(source, path)
     if source.kind == "image":
-        return _convert_image(path, settings)
+        return _convert_image(source, path, settings)
     if source.kind == "audio":
         return _transcribe(path, settings, on_progress)
     if source.kind == "video":
@@ -125,7 +133,7 @@ def _convert_pdf(
         ocr_enabled=settings.ocr_enabled,
         ocr_languages=settings.ocr_languages,
         max_pages=settings.max_pdf_pages,
-        extract_images=settings.images.enabled,
+        extract_images=source.describe_images,
     )
     figures = _write_figures(path.parent, result.pictures)
     meta: dict[str, Any] = {
@@ -173,7 +181,9 @@ def _convert_text(source: ConversionInput, path: Path) -> ConversionResult:
     return ConversionResult(text, {"engine": "passthrough"})
 
 
-def _convert_image(path: Path, settings: IngestionConfig) -> ConversionResult:
+def _convert_image(
+    source: ConversionInput, path: Path, settings: IngestionConfig
+) -> ConversionResult:
     """Solo el OCR. La descripción con visión la añade el padre, que es quien
     tiene proveedor: aquí se deja anotado que hay una imagen que describir."""
     meta: dict[str, Any] = {"engine": "docling", "ocr": settings.ocr_enabled}
@@ -182,7 +192,9 @@ def _convert_image(path: Path, settings: IngestionConfig) -> ConversionResult:
         ocr_text = engines.convert_image_docling(path, ocr_languages=settings.ocr_languages)
         if ocr_text.strip():
             parts.append(f"**Texto reconocido (OCR):**\n\n{ocr_text}")
-    return ConversionResult("\n\n".join(parts), meta, [str(path)] if settings.images.enabled else [])
+    return ConversionResult(
+        "\n\n".join(parts), meta, [str(path)] if source.describe_images else []
+    )
 
 
 def _probe_duration(

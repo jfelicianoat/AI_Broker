@@ -1608,8 +1608,10 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
             execution=agent_execution, prompt_compression="aggressive",
         )
 
-        # single conserva el comportamiento clásico: aggressive de verdad.
-        self.assertNotIn(" las ", router.user_prompt(single))
+        # single también conserva los determinantes: output.language tiene
+        # default "es", y borrar artículos mientras se exige un idioma concreto
+        # es lo que hizo derivar una respuesta al portuñol.
+        self.assertIn("las fuentes independientes", router.user_prompt(single))
         # agent mantiene los determinantes, pero sigue quitando la cortesía.
         agent_prompt = router.user_prompt(agent)
         self.assertIn("las fuentes independientes", agent_prompt)

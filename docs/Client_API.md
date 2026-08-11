@@ -320,6 +320,7 @@ POST /api/v1/files
 Content-Type: multipart/form-data
 
 file=@informe.pdf
+describe_images=false        # opcional
 ```
 
 ```json
@@ -327,11 +328,28 @@ file=@informe.pdf
   "file_id": "file_abc123",
   "status": "received",
   "created": true,
-  "status_url": "/api/v1/files/file_abc123"
+  "status_url": "/api/v1/files/file_abc123",
+  "describe_images": false
 }
 ```
 
 `created: false` significa que ese fichero ya estaba ingerido (dedupe por SHA-256) y no se vuelve a convertir.
+
+#### `describe_images` — el interruptor de las figuras
+
+Decide si las imágenes del documento se extraen y se describen con un modelo de visión para que su contenido acabe en el Markdown.
+
+| valor | efecto |
+|---|---|
+| omitido | hereda `ingestion.images.enabled` del broker |
+| `true` | describe las figuras |
+| `false` | las ignora: la conversión va **mucho** más rápida |
+
+Es la parte cara de la ingesta —una llamada a un modelo por figura, además del renderizado de cada imagen—, y en un documento grande puede tardar más que todo lo demás junto. Cuando las imágenes son sellos, logotipos o decoración, `false` no pierde nada de información útil.
+
+La respuesta y el estado del fichero devuelven siempre la política **ya resuelta**, así que sabes qué vas a recibir sin consultar la configuración del broker. En el Markdown de un fichero convertido sin descripciones, `meta.images_described` vale `false`: un documento sin descripciones no es lo mismo que un documento sin figuras.
+
+**Efecto sobre la deduplicación**: la política forma parte de la identidad de la conversión. Una conversión *con* descripciones se reutiliza para quien las pide *sin* ellas —contiene todo lo que tendría la otra y algo más—, pero pedirlas cuando lo guardado no las tiene genera una conversión nueva, con su propio `file_id`.
 
 ### Paso 2 — esperar a que esté listo
 

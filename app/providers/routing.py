@@ -23,7 +23,10 @@ from app.providers.base import (
     context_fits_with_capped_output,
     estimate_input_tokens,
     estimate_required_context,
+    looks_like_prompt_echo,
     neutralize_consensus_delimiters,
+    output_language_directive,
+    prompt_echo_ratio,
     role_system_prompt,
     with_output_language,
 )
@@ -172,7 +175,7 @@ class RoutedModelProvider:
         ).compress_text(request.content.prompt)
 
     def _effective_global_level(self, request: TaskCreateRequest) -> str:
-        """Nivel de compresión global, acotado a `medium` en tareas agénticas.
+        """Nivel de compresión global, acotado a `medium` en dos casos.
 
         `aggressive` borra artículos y determinantes (estilo caveman). En una
         generación de un solo turno eso ahorra tokens sin cambiar lo que se
@@ -182,9 +185,26 @@ class RoutedModelProvider:
         ahorro es marginal porque el prompt es una fracción del contexto que
         acaban ocupando los resultados de las tools. `medium` sigue quitando
         cortesías, envoltorios y muletillas, que no instruyen nada.
+
+        El segundo caso es el idioma. Con `output.language` fijado se le pide al
+        modelo que redacte en una lengua concreta mientras se le da de ejemplo
+        un texto sin artículos, que en español no es español: se le suelta el
+        anclaje justo cuando más se le está exigiendo sobre el idioma, y un
+        modelo multilingüe deriva a la lengua vecina. El ahorro medido rondaba
+        el 4%; no compensa una respuesta en portuñol.
+
+        Conviene decirlo sin rodeos: `output.language` tiene default "es", así
+        que este segundo caso cubre TODAS las peticiones y el modo caveman deja
+        de aplicarse por política global. La vía para pedirlo sigue abierta y
+        ahora es explícita: `prompt_compression: "aggressive"` en la petición,
+        que se respeta tal cual sin pasar por aquí.
         """
         level = self.prompt_compressor.level
-        if level == "aggressive" and uses_tool_loop(request.execution):
+        if level != "aggressive":
+            return level
+        if uses_tool_loop(request.execution):
+            return "medium"
+        if output_language_directive(request) is not None:
             return "medium"
         return level
 
@@ -917,6 +937,33 @@ class RoutedModelProvider:
             )
 
     async def _generate(
+        self,
+        request: TaskCreateRequest,
+        model: ModelReference,
+        prompt: str,
+        system: str | None = None,
+        *,
+        background: bool = False,
+    ) -> ModelOutput:
+        output = await self._generate_raw(
+            request, model, prompt, system, background=background
+        )
+        # Un modelo que reproduce su prompt no ha respondido, pero tampoco ha
+        # fallado de ninguna forma que el broker pudiera notar: sin esta
+        # comprobación la copia llega al usuario como si fuera la respuesta.
+        # Los embeddings quedan fuera: su salida es un vector, no texto.
+        if request.inference_kind != InferenceKind.embedding and looks_like_prompt_echo(
+            prompt, output.content or ""
+        ):
+            raise ProviderError(
+                "PROMPT_ECHOED",
+                f"{model.provider}/{model.model} devolvió su propio prompt en lugar de "
+                f"una respuesta ({prompt_echo_ratio(prompt, output.content or ''):.0%} "
+                "de la salida es copia literal de la entrada)",
+            )
+        return output
+
+    async def _generate_raw(
         self,
         request: TaskCreateRequest,
         model: ModelReference,

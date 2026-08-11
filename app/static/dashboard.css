@@ -261,6 +261,9 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 
 .upload-form { display: flex; gap: 14px; align-items: end; padding: 4px 16px 16px; flex-wrap: wrap; }
 .upload-form .field { min-width: 320px; }
+/* Pista bajo un campo. En --text-body y no en --text-label: es prosa que hay
+   que leer para decidir, no una unidad de medida al margen. */
+.field-hint { margin: 0; max-width: 42ch; color: var(--muted); font-size: var(--text-body); line-height: 1.45; }
 .formats-details { padding: 0 16px 14px; color: var(--muted); font-size: var(--text-body); }
 .formats-details summary { cursor: pointer; }
 .formats-list { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }

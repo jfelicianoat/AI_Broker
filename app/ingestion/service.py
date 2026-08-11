@@ -180,6 +180,9 @@ class FileRecord:
     meta: dict[str, Any]
     created_at: str
     updated_at: str
+    # Política de imágenes con la que se convirtió (ya resuelta, nunca
+    # "heredar"): decide si el Markdown lleva descripciones de las figuras.
+    describe_images: bool = False
 
 
 def staged_attachment_name(record: FileRecord) -> str:
@@ -214,7 +217,16 @@ def _record_from_row(row: Any) -> FileRecord:
         meta=loads_json(row["meta_json"], default={}) or {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        describe_images=bool(_row_value(row, "describe_images") or False),
     )
+
+
+def _row_value(row: Any, column: str) -> Any:
+    """Valor de una columna que puede no existir en bases antiguas."""
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
 
 
 class IngestionService:
@@ -277,13 +289,53 @@ class IngestionService:
         temp_path.write_bytes(data)
         return self.store_upload_from_file(filename, temp_path)
 
-    def store_upload_from_file(self, filename: str, temp_path: Path) -> tuple[FileRecord, bool]:
+    def resolve_describe_images(self, requested: bool | None) -> bool:
+        """Política efectiva de imágenes para una subida.
+
+        Tri-estado deliberado, como `cloud_allowed` en las tareas: None = "no
+        me pronuncio" y manda la configuración del broker; True/False es una
+        decisión del cliente para ESE fichero. Se resuelve aquí, al subir, y se
+        guarda ya resuelta: si se guardara el "heredar", un cambio posterior en
+        la configuración global reescribiría el significado de una conversión
+        que ya está hecha.
+        """
+        if requested is None:
+            return self.config.ingestion.images.enabled
+        return requested
+
+    def _reusable_row(self, sha256: str, describe_images: bool) -> Any:
+        """Conversión previa que sirve para lo que se pide ahora.
+
+        Una conversión CON descripciones sirve para quien las pide sin ellas
+        —contiene todo lo que tendría la otra y algo más—, pero no al revés: de
+        ahí el `>=` en vez de un `=`. Las filas anteriores a la columna se
+        asumen convertidas con la política global vigente, que es la mejor
+        aproximación disponible: no queda registro de cuál se usó entonces.
+        """
+        return self.db.query_one(
+            "SELECT * FROM ingested_files WHERE sha256 = ? AND status != ? "
+            "AND COALESCE(describe_images, ?) >= ? ORDER BY created_at DESC LIMIT 1",
+            (
+                sha256,
+                FAILED,
+                int(self.config.ingestion.images.enabled),
+                int(describe_images),
+            ),
+        )
+
+    def store_upload_from_file(
+        self, filename: str, temp_path: Path, describe_images: bool | None = None,
+    ) -> tuple[FileRecord, bool]:
         """Valida, deduplica y persiste una subida ya volcada a disco.
 
         Consume temp_path SIEMPRE (movido al almacén o borrado): el llamante
         no debe reutilizarlo. El hash se calcula en streaming: nunca se carga
         el fichero completo en memoria.
+
+        `describe_images` decide si las figuras del documento se extraen y se
+        describen con el modelo de visión. None hereda la configuración global.
         """
+        describe = self.resolve_describe_images(describe_images)
         settings = self.config.ingestion
         max_bytes = settings.max_file_mb * 1024 * 1024
         try:
@@ -306,11 +358,7 @@ class IngestionService:
             detection = detect(name, head)
             sha256 = digest.hexdigest()
 
-            existing = self.db.query_one(
-                "SELECT * FROM ingested_files WHERE sha256 = ? AND status != ? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (sha256, FAILED),
-            )
+            existing = self._reusable_row(sha256, describe)
             if existing is not None:
                 return _record_from_row(existing), False
 
@@ -327,12 +375,14 @@ class IngestionService:
             """
             INSERT INTO ingested_files (
                 id, sha256, filename, extension, kind, engine, size_bytes, status,
-                error_json, original_path, markdown_path, meta_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, '{}', ?, ?)
+                error_json, original_path, markdown_path, meta_json, created_at, updated_at,
+                describe_images
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, '{}', ?, ?, ?)
             """,
             (
                 file_id, sha256, name, detection.extension, detection.kind,
                 detection.engine, size, RECEIVED, str(original_path), now, now,
+                int(describe),
             ),
         )
         record = self.get(file_id)
@@ -467,7 +517,10 @@ class IngestionService:
             return
         self._set_status(file_id, CONVERTING)
         timeout = self.config.ingestion.conversion_timeout_seconds
-        vision = await self._resolve_vision_target()
+        # Sin descripción de imágenes no hace falta buscar modelo de visión: la
+        # resolución sondea el catálogo y es trabajo tirado si nadie va a mirar
+        # una figura.
+        vision = await self._resolve_vision_target() if record.describe_images else None
         try:
             # Fase 1, la pesada y matable: fichero → Markdown con marcadores.
             result = await self._run_conversion(record, timeout)
@@ -658,6 +711,13 @@ class IngestionService:
         debe escribir en la base de datos."""
         markdown = result.markdown
         meta = dict(result.meta)
+        if not record.describe_images:
+            # Se deja constancia en el meta: un Markdown sin descripciones no
+            # es lo mismo que un documento sin figuras, y quien lea el
+            # resultado tiene que poder distinguirlo.
+            meta["images_described"] = False
+            self._cleanup_figures(record)
+            return markdown, meta
         described = 0
         errors = 0
         recorder = _VisionRecorder(repository, task_id, vision)

@@ -652,9 +652,14 @@ class FileAcceptedResponse(StrictBaseModel):
     filename: str
     size_bytes: int
     sha256: str
-    # False cuando la subida dedujo a un fichero ya ingerido (mismo SHA-256).
+    # False cuando la subida dedujo a un fichero ya ingerido (mismo SHA-256 y
+    # una política de imágenes que sirve para la pedida).
     created: bool
     status_url: str
+    # Política con la que se convierte (o se convirtió, si se reutilizó): ya
+    # resuelta, para que el cliente sepa qué va a recibir sin consultar la
+    # configuración del broker.
+    describe_images: bool = False
 
 
 class FileStateResponse(StrictBaseModel):
@@ -671,6 +676,8 @@ class FileStateResponse(StrictBaseModel):
     updated_at: datetime
     # Solo presente cuando status=ready.
     markdown_url: str | None = None
+    # Si el Markdown lleva descripciones de las figuras del documento.
+    describe_images: bool = False
 
 
 class LaneOccupancy(StrictBaseModel):
