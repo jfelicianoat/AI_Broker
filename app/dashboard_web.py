@@ -368,6 +368,14 @@ def create_dashboard_router(
             })
         return views
 
+    def _describe_images_choice(value: str | None) -> bool | None:
+        """"" (heredar la configuración) | "yes" | "no" del formulario."""
+        if value == "yes":
+            return True
+        if value == "no":
+            return False
+        return None
+
     def _files_page_context(*, upload_error: str | None = None) -> dict[str, Any]:
         return {
             "files": _file_views(),
@@ -375,6 +383,7 @@ def create_dashboard_router(
             "ingestion_config": config.ingestion,
             "formats": ALLOWED_FORMATS,
             "upload_error": upload_error,
+            "images_default_on": config.ingestion.images.enabled,
             "nav_active": "ficheros",
         }
 
@@ -422,7 +431,10 @@ def create_dashboard_router(
         try:
             temp_path = await stream_upload_to_temp(upload, max_bytes, ingestion.incoming_dir)
             record, created = await run_in_threadpool(
-                ingestion.store_upload_from_file, upload.filename or "fichero", temp_path,
+                ingestion.store_upload_from_file,
+                upload.filename or "fichero",
+                temp_path,
+                _describe_images_choice(form_fields.get("describe_images")),
             )
         except ValueError as error:  # IngestionError / UnsupportedFormat
             return _template_response(

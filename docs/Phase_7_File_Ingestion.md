@@ -68,6 +68,20 @@ sustituye al marcador en su posición original:
 Figuras por encima de `max_images` o con error de descripción quedan marcadas
 como `[Figura N: imagen no descrita]` sin abortar la conversión.
 
+`ingestion.images.enabled` es solo el **valor por defecto**: cada subida puede
+decidirlo con `describe_images` (campo del formulario en `POST /api/v1/files`,
+desplegable en el panel de Ficheros). Omitirlo hereda la configuración; `true` y
+`false` mandan sobre ella para ese fichero. Con `false` no se paga nada de esto:
+Docling no renderiza las imágenes (`extract_images=false`), no se busca modelo de
+visión y no se hace ninguna llamada — que es donde está el ahorro en documentos
+grandes cuyas figuras no aportan información.
+
+La política se guarda **ya resuelta** en `ingested_files.describe_images` y entra
+en la deduplicación por SHA-256: una conversión con descripciones sirve para
+quien las pide sin ellas, pero no al revés. En `meta.images_described` queda
+constancia de que un Markdown se generó sin describir las figuras, que no es lo
+mismo que un documento que no tenía ninguna.
+
 ## Seguridad
 
 - Magic bytes verificados contra la extensión declarada (`INGEST_CONTENT_MISMATCH`).

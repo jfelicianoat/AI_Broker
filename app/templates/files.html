@@ -39,6 +39,15 @@
           <span>Fichero</span>
           <input type="file" name="file" required>
         </label>
+        <label class="field">
+          <span>Imágenes del documento</span>
+          <select name="describe_images">
+            <option value="">Usar la configuración del broker (ahora: {{ 'describir' if images_default_on else 'omitir' }})</option>
+            <option value="yes">Describirlas con el modelo de visión</option>
+            <option value="no">Omitirlas — conversión mucho más rápida</option>
+          </select>
+          <p class="field-hint">Describirlas es, con diferencia, la parte más lenta de la conversión.</p>
+        </label>
         <button class="button" type="submit">Subir y convertir</button>
       </form>
       <details class="formats-details">

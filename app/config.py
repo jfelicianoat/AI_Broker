@@ -529,6 +529,7 @@ class ModelQuarantineConfig(BaseModel):
     definitive_codes: list[str] = Field(
         default_factory=lambda: [
             "INVALID_PROVIDER_RESPONSE",
+            "PROMPT_ECHOED",
             "MODEL_COMPATIBILITY_MISMATCH",
             "MODEL_UNAVAILABLE",
             "MODEL_DEPLOYMENT_MISMATCH",
