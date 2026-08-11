@@ -507,6 +507,35 @@ class ProvidersConfig(BaseModel):
         return self
 
 
+class ModelQuarantineConfig(BaseModel):
+    """Apartado automático de modelos que ya no producen salida usable.
+
+    La selección adaptativa ordena por tiempo esperado, no por acierto: un
+    modelo que falla rápido y siempre puede seguir puntuando bien. Esto lo saca
+    de la rotación por evidencia, sin tocar el ranking.
+    """
+
+    enabled: bool = True
+    # Fallos definitivos seguidos, sin ningún acierto entre medias, para
+    # apartar el modelo. Con uno solo, un tropiezo puntual apartaría un modelo
+    # sano; dos seguidos ya no son casualidad.
+    consecutive_failures: int = Field(default=2, ge=1, le=20)
+    # La cuarentena caduca sola: pasada la ventana sin invocaciones el modelo
+    # vuelve a la rotación. Si sigue roto, vuelve a caer tras dos intentos; si
+    # lo han reinstalado, nadie tiene que acordarse de rehabilitarlo.
+    window_hours: float = Field(default=24.0, gt=0, le=8760)
+    # Códigos que significan "este modelo no sirve", no "ahora no se puede".
+    # Quedarse sin memoria o un proveedor caído son circunstancias y no cuentan.
+    definitive_codes: list[str] = Field(
+        default_factory=lambda: [
+            "INVALID_PROVIDER_RESPONSE",
+            "MODEL_COMPATIBILITY_MISMATCH",
+            "MODEL_UNAVAILABLE",
+            "MODEL_DEPLOYMENT_MISMATCH",
+        ]
+    )
+
+
 class BrokerConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
@@ -516,6 +545,7 @@ class BrokerConfig(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    model_quarantine: ModelQuarantineConfig = Field(default_factory=ModelQuarantineConfig)
     shadow_probe: ShadowProbeConfig = Field(default_factory=ShadowProbeConfig)
     task_affinity: TaskAffinityConfig = Field(default_factory=TaskAffinityConfig)
     strategy_router: StrategyRouterConfig = Field(default_factory=StrategyRouterConfig)

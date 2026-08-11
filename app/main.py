@@ -47,6 +47,7 @@ from app.maintenance import (
     prune_terminal_task_events,
 )
 from app.model_catalog import model_availability_item, model_feature_profile
+from app.model_quarantine import load_quarantine
 from app.model_stats import load_model_stats
 from app.providers import build_provider
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
@@ -111,6 +112,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     provider = build_provider(
         broker_config,
         stats_loader=lambda: load_model_stats(db, window_days=broker_config.routing.stats_window_days),
+        # Misma BD y mismo diferido: la cuarentena caduca sola, así que hay que
+        # releerla en cada selección y no cachearla al arrancar.
+        quarantine_loader=lambda: load_quarantine(db, broker_config.model_quarantine),
     )
     # El proveedor enrutado permite que la descripción de figuras elija entre
     # todos los modelos con visión en vez de usar siempre un endpoint fijo.

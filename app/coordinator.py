@@ -21,7 +21,7 @@ from app.providers.base import (
     with_output_language,
 )
 from app.repository import _utc_now_iso
-from app.resource_scheduler import ResourcePlanningError, ResourceScheduler
+from app.resource_scheduler import ModelFootprint, ResourcePlanningError, ResourceScheduler
 from app.schemas import (
     ExecutionPreset,
     ExecutionStrategy,
@@ -49,6 +49,16 @@ logger = logging.getLogger("ai_broker.coordinator")
 # Estados de los que ya no se sale: la tarea no volverá a pedir turno.
 _TERMINAL_STATUSES = frozenset({
     TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled,
+})
+
+# Errores que hablan de la TAREA, no del modelo que los encontró: cambiar de
+# proposer no arregla ninguno, así que seguir con los demás solo gastaría
+# máquina para llegar al mismo sitio. Todo lo demás es una baja del proposer y
+# lo resuelve el quorum.
+_TASK_FATAL_ERRORS = frozenset({
+    "TASK_CANCELLED",
+    "BUDGET_EXCEEDED",
+    "CONTEXT_LIMIT_EXCEEDED",
 })
 
 
@@ -1299,7 +1309,9 @@ class ConsensusCoordinator:
         plan_execution = request.execution.model_copy(update={"max_proposers": len(proposers)})
         plan_request = request.model_copy(update={"execution": plan_execution})
         try:
-            resource_plan = self.scheduler.plan(plan_request)
+            resource_plan = self.scheduler.plan(
+                plan_request, await self._proposer_footprints(proposers)
+            )
         except ResourcePlanningError as error:
             repository.set_stage_status(task_id, run_id, "resource_planning", "failed")
             raise ProviderError("PARALLEL_CAPACITY_INSUFFICIENT", str(error)) from error
@@ -1418,7 +1430,15 @@ class ConsensusCoordinator:
                 task_id,
                 TaskStatus.failed,
                 progress={**progress, "phase": TaskStatus.failed.value},
-                error={"code": "CONSENSUS_QUORUM_NOT_REACHED", "completed": len(proposals), "required": quorum},
+                error={
+                    "code": "CONSENSUS_QUORUM_NOT_REACHED",
+                    "completed": len(proposals),
+                    "required": quorum,
+                    # Sin esto, una tarea en la que fallaron TODOS los
+                    # proposers solo diría "0 de 2": el porqué de cada baja se
+                    # quedaba en el log de eventos.
+                    "skipped_proposers": skipped_proposers,
+                },
             )
             return
 
@@ -1606,7 +1626,12 @@ class ConsensusCoordinator:
         skipped: list[dict[str, Any]] = []
         for model, output, invocation_id, error in results:
             if error is not None:
-                if not error.retryable:
+                # Un proposer caído es una baja, no el final del consenso: el
+                # quorum de más abajo decide si con los que quedan se puede
+                # seguir. Antes cualquier error definitivo (un modelo que
+                # devuelve basura, sin ir más lejos) tumbaba la tarea entera
+                # aunque las otras propuestas ya estuvieran cobradas.
+                if error.code in _TASK_FATAL_ERRORS:
                     raise error
                 skipped_item = self._skipped_proposer_detail(model, error)
                 repository.add_event(task_id, "proposer.skipped", skipped_item)
@@ -1717,6 +1742,33 @@ class ConsensusCoordinator:
         if missing > 0:
             selected.extend(await self.provider.select(request, missing, roles[len(selected):target_count]))
         return selected[:target_count]
+
+    async def _proposer_footprints(
+        self, proposers: list[ModelReference]
+    ) -> list[ModelFootprint] | None:
+        """Tamaño real de cada proposer para que el plan reparta por memoria.
+
+        El árbitro queda fuera a propósito: corre en una fase posterior, cuando
+        los proposers ya han liberado, así que reservarle sitio ahora quitaría
+        capacidad justo donde hace falta.
+        """
+        loader = getattr(self.provider, "local_footprints", None)
+        if loader is None:
+            return None
+        try:
+            sizes = list(await loader(proposers))
+        except Exception:
+            # Sin tamaños se sigue con el reparto por conteo de siempre: peor
+            # plan, pero nunca una tarea caída por no saber cuánto pesa algo.
+            return None
+        if len(sizes) != len(proposers):
+            return None
+        return [
+            ModelFootprint(
+                label=f"proposer_{index}", model=proposer.model, size_bytes=int(size or 0)
+            )
+            for index, (proposer, size) in enumerate(zip(proposers, sizes, strict=True), start=1)
+        ]
 
     async def _select_arbiter(self, request: TaskCreateRequest) -> ModelReference:
         selection = request.execution.selection

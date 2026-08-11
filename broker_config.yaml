@@ -64,10 +64,8 @@ sandbox:
   work_volume_mb: 256
 resources:
   local_vram_budget_gb: 64.0
-  # APU Strix Halo: los 128 GB son un solo pool y la VRAM es una porción de él.
-  # 112 deja ~16 GB para Windows y el resto de programas.
-  unified_memory_budget_gb: 112.0
   vram_safety_margin_gb: 2.0
+  unified_memory_budget_gb: 112.0
   max_loaded_local_models: auto
   scheduling_policy: adaptive
   allow_execution_waves: true
@@ -79,6 +77,15 @@ routing:
   stats_window_days: 7
   min_invocations: 3
   exploration_rate: 0.15
+model_quarantine:
+  enabled: true
+  consecutive_failures: 2
+  window_hours: 24.0
+  definitive_codes:
+  - INVALID_PROVIDER_RESPONSE
+  - MODEL_COMPATIBILITY_MISMATCH
+  - MODEL_UNAVAILABLE
+  - MODEL_DEPLOYMENT_MISMATCH
 shadow_probe:
   enabled: true
   probe_local_models: true
@@ -96,16 +103,7 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    prose:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
+    code: []
     long_context:
     - '*-coder*'
     - '*_coder*'
@@ -116,7 +114,16 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
-    code: []
+    prose:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
 strategy_router:
   enabled: false
   heuristic_classifier: true
@@ -580,7 +587,7 @@ providers:
       capabilities:
       - embedding
       compatibility: error
-      compatibility_checked_at: '2026-08-06T17:04:27.342303+00:00'
+      compatibility_checked_at: '2026-08-11T17:36:25.839576+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/embeddings:
         {"error":"Something went wrong with the request."}'
       features: {}
@@ -1229,7 +1236,7 @@ providers:
       capabilities:
       - completion
       compatibility: error
-      compatibility_checked_at: '2026-08-06T17:04:29.530423+00:00'
+      compatibility_checked_at: '2026-08-11T17:36:57.741896+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
         Server Error","status":500,"detail":"Internal error while making inference
@@ -2020,7 +2027,7 @@ providers:
       capabilities:
       - specialized
       compatibility: unknown
-      compatibility_checked_at: '2026-07-30T20:31:58.821613+00:00'
+      compatibility_checked_at: '2026-08-11T17:37:14.182299+00:00'
       compatibility_error: Capacidad no-chat catalogada; endpoint de ejecucion aun
         no soportado.
       features: {}
@@ -2039,6 +2046,48 @@ providers:
         json_mode: true
         tools: false
       features_checked_at: '2026-07-28T16:43:30.760297+00:00'
+    - name: deepseek-ai/deepseek-v4-flash-0731
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-11T17:33:04.694007+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-11T17:33:43.048705+00:00'
+    - name: meta/muse-glimmer-30b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-11T17:33:45.055333+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-11T17:33:54.491052+00:00'
+    - name: nvidia/nemotron-3.5-lightning-30b-a3b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-11T17:33:58.648579+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-11T17:34:06.573062+00:00'
   - id: HCNSEC
     enabled: true
     adapter: openai_compatible
@@ -2363,3 +2412,28 @@ providers:
         json_mode: true
         tools: true
       features_checked_at: '2026-08-06T17:24:31.057697+00:00'
+    - name: Qwen3-Embedding-8B
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - embedding
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-11T17:36:03.813100+00:00'
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: Qwen3.6-27B
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-11T17:36:04.819657+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-11T17:36:12.024551+00:00'

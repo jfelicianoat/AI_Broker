@@ -534,8 +534,9 @@ class TaskRepository:
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             connection.execute(
-                "UPDATE model_invocations SET completed_at = ?, status = 'failed', updated_at = ? WHERE id = ?",
-                (now, now, invocation_id),
+                "UPDATE model_invocations SET completed_at = ?, status = 'failed', "
+                "error_code = ?, updated_at = ? WHERE id = ?",
+                (now, code, now, invocation_id),
             )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",

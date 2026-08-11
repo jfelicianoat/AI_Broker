@@ -29,6 +29,41 @@ def _gib(value: float) -> str:
     return f"{value / 1024**3:.1f} GB"
 
 
+# Presupuesto por debajo del cual un modelo con capacidad "thinking" corre
+# riesgo real de gastar todo num_predict razonando y devolver content vacío.
+# Ollama activa el razonamiento por defecto en esos modelos.
+THINKING_MIN_OUTPUT_TOKENS = 512
+
+
+def _thinking_disabled(capabilities: Any, max_output_tokens: int) -> bool:
+    """True si hay que mandar think=false. Con presupuesto corto el modelo
+    agota num_predict en message.thinking y message.content llega vacío; por
+    encima del umbral se deja razonar, que es donde aporta calidad."""
+    declared = {str(item).lower() for item in (capabilities or [])}
+    return "thinking" in declared and max_output_tokens < THINKING_MIN_OUTPUT_TOKENS
+
+
+def _empty_content_error(payload: dict[str, Any], think_disabled: bool) -> ProviderError:
+    """El "no devolvió message.content" a secas es un callejón sin salida al
+    depurar desde fuera: se añade por qué paró y si el razonamiento se comió
+    el presupuesto."""
+    message = payload.get("message") or {}
+    thinking = message.get("thinking")
+    thinking_chars = len(thinking) if isinstance(thinking, str) else 0
+    done_reason = str(payload.get("done_reason") or "desconocido")
+    detail = f"done_reason={done_reason}, eval_count={int(payload.get('eval_count') or 0)}"
+    if thinking_chars:
+        detail += f", thinking={thinking_chars} caracteres"
+        if done_reason == "length":
+            detail += (
+                "; el razonamiento agotó max_output_tokens antes de responder"
+                f" (think{'=false ya aplicado' if think_disabled else ' activo'})"
+            )
+    return ProviderError(
+        "INVALID_PROVIDER_RESPONSE", f"Ollama no devolvió message.content ({detail})"
+    )
+
+
 class OllamaLifecycleManager:
     def __init__(self, client: httpx.AsyncClient, config: BrokerConfig) -> None:
         self.client = client
@@ -307,6 +342,9 @@ class OllamaProvider:
             request, entry.get("context_window"), _estimation_text(prompt, system)
         )
         started = datetime.now(timezone.utc)
+        think_disabled = _thinking_disabled(
+            entry.get("capabilities"), inference_request.generation.max_output_tokens
+        )
         messages = [{"role": "user", "content": prompt}]
         if system:
             messages.insert(0, {"role": "system", "content": system})
@@ -322,6 +360,8 @@ class OllamaProvider:
                         "num_predict": inference_request.generation.max_output_tokens,
                     },
                 }
+                if think_disabled:
+                    payload_request["think"] = False
                 if inference_request.output.format == OutputFormat.json:
                     payload_request["format"] = inference_request.output.json_schema
                 response = await self.client.post("/api/chat", json=payload_request)
@@ -339,7 +379,7 @@ class OllamaProvider:
             ) from error
         content = (payload.get("message") or {}).get("content")
         if not isinstance(content, str) or not content.strip():
-            raise ProviderError("INVALID_PROVIDER_RESPONSE", "Ollama no devolvió message.content")
+            raise _empty_content_error(payload, think_disabled)
         return ModelOutput(
             content=content, tokens_input=int(payload.get("prompt_eval_count") or 0),
             tokens_output=int(payload.get("eval_count") or 0), cost_usd=0.0,
@@ -361,19 +401,22 @@ class OllamaProvider:
         if entry is None:
             raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model}")
         started = datetime.now(timezone.utc)
+        payload_request: dict[str, Any] = {
+            "model": model,
+            "messages": self._to_ollama_messages(messages),
+            "tools": tools,
+            "stream": False,
+            "keep_alive": -1,
+            "options": {
+                "temperature": request.generation.temperature,
+                "num_predict": request.generation.max_output_tokens,
+            },
+        }
+        if _thinking_disabled(entry.get("capabilities"), request.generation.max_output_tokens):
+            payload_request["think"] = False
         try:
             async with self.lifecycle.lease(model, int(entry.get("size_bytes") or 0)):
-                response = await self.client.post("/api/chat", json={
-                    "model": model,
-                    "messages": self._to_ollama_messages(messages),
-                    "tools": tools,
-                    "stream": False,
-                    "keep_alive": -1,
-                    "options": {
-                        "temperature": request.generation.temperature,
-                        "num_predict": request.generation.max_output_tokens,
-                    },
-                })
+                response = await self.client.post("/api/chat", json=payload_request)
                 response.raise_for_status()
                 payload = response.json()
         except ProviderError:
