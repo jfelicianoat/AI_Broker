@@ -247,6 +247,14 @@ class Database:
                 # sirve para decidir AHORA. NULL = desconocido (filas previas y
                 # proveedores cloud, que no cargan nada).
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN was_loaded INTEGER")
+            if "error_code" not in invocation_columns:
+                # Código del fallo (app.providers.base.ProviderError). Hasta
+                # ahora solo vivía en el log de eventos, así que las métricas
+                # veían "failed" sin poder distinguir un modelo que devuelve
+                # basura de uno que se quedó sin memoria: el primero hay que
+                # apartarlo, el segundo solo esperar. NULL en filas previas y
+                # en las que terminaron bien.
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN error_code TEXT")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"

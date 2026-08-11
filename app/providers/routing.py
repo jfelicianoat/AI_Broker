@@ -11,6 +11,7 @@ from typing import Any
 
 from app.config import BrokerConfig, TaskAffinityConfig, effective_max_parallel_invocations
 from app.model_enrichment import ModelEnrichment
+from app.model_quarantine import QuarantineEntry, QuarantineKey, quarantine_key
 from app.model_stats import ModelKey, ModelStats
 from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
@@ -100,7 +101,9 @@ class RoutedModelProvider:
     def __init__(self, config: BrokerConfig, *, ollama: OllamaProvider | None = None,
                  deepseek: DeepSeekProvider | None = None,
                  custom: dict[str, OpenAICompatibleProvider] | None = None,
-                 stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None) -> None:
+                 stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
+                 quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
+                 ) -> None:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
@@ -108,6 +111,10 @@ class RoutedModelProvider:
         # Evidencia operativa para la selección adaptativa (app.model_stats);
         # sin loader el router mantiene el orden del catálogo.
         self._stats_loader = stats_loader
+        # Modelos apartados por fallar de forma definitiva y repetida
+        # (app.model_quarantine). Se consulta en cada selección: la cuarentena
+        # caduca sola y un modelo reinstalado debe volver sin reiniciar nada.
+        self._quarantine_loader = quarantine_loader
         self._parallel_limit = effective_max_parallel_invocations(config)
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(self._parallel_limit)
@@ -246,7 +253,15 @@ class RoutedModelProvider:
             except ProviderError:
                 pass
         await self.model_enrichment.ensure_loaded()
-        return [self.model_enrichment.enrich_entry(item) for item in result]
+        quarantine = self.load_quarantine()
+        entries = [self.model_enrichment.enrich_entry(item) for item in result]
+        for entry in entries:
+            # El motivo viaja con el catálogo para que el panel pueda decir por
+            # qué un modelo no se está eligiendo, en vez de que desaparezca.
+            apartado = quarantine.get(quarantine_key(entry))
+            entry["quarantined"] = apartado is not None
+            entry["quarantine_reason"] = apartado.reason if apartado else None
+        return entries
 
     async def health(self) -> dict[str, dict[str, Any]]:
         """Sondas de salud concurrentes, con deadline corto y caché por proveedor.
@@ -305,6 +320,33 @@ class RoutedModelProvider:
                 "latency_ms": timeout * 1000,
             }
 
+    async def local_footprints(self, models: list[ModelReference]) -> list[int]:
+        """Bytes de memoria local que reservará cada modelo, en el mismo orden.
+
+        Los cloud devuelven 0 porque no tocan el pool de la máquina, y un modelo
+        que no esté en el catálogo también: la ausencia la diagnostica luego la
+        propia invocación con su código de error, no el planificador.
+        """
+        try:
+            catalog = await self.models()
+        except ProviderError:
+            return [0] * len(models)
+        sizes: list[int] = []
+        for model in models:
+            entry = next(
+                (
+                    item for item in catalog
+                    if item["name"] == model.model
+                    and str(item.get("deployment") or "").lower() == model.deployment.lower()
+                ),
+                None,
+            )
+            if entry is None or not is_local_deployment(entry.get("deployment")):
+                sizes.append(0)
+                continue
+            sizes.append(int(entry.get("size_bytes") or 0))
+        return sizes
+
     async def resource_snapshot(self) -> dict[str, Any]:
         if not self.config.providers.ollama.enabled:
             return {
@@ -339,6 +381,17 @@ class RoutedModelProvider:
         """Evidencia operativa actual. La usa el sondeo en sombra para saber a
         quién le falta medida; la selección la consume por la vía interna."""
         return self._load_stats()
+
+    def load_quarantine(self) -> dict[QuarantineKey, QuarantineEntry]:
+        """Modelos apartados, o vacío si no hay loader o falla la lectura: un
+        problema leyendo la evidencia no puede dejar al broker sin catálogo."""
+        if self._quarantine_loader is None:
+            return {}
+        try:
+            return self._quarantine_loader() or {}
+        except Exception:
+            logger.warning("routing.quarantine_unavailable", exc_info=True)
+            return {}
 
     def _load_stats(self) -> dict[ModelKey, ModelStats]:
         """Evidencia operativa, o vacío si no hay loader o falla la lectura.
@@ -616,6 +669,7 @@ class RoutedModelProvider:
             # "api" o valores desconocidos se tratan como externos.
             catalog = [item for item in catalog if is_local_deployment(item.get("deployment"))]
         catalog = [item for item in catalog if item.get("compatibility") != "incompatible"]
+        catalog = self._without_quarantined(catalog)
         required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
         capability_catalog = [
             item for item in catalog
@@ -626,6 +680,22 @@ class RoutedModelProvider:
             if context_fits_with_capped_output(request, item.get("context_window"))
         ]
         return catalog, capability_catalog, context_catalog
+
+    def _without_quarantined(self, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Aparta los modelos en cuarentena, salvo que no quede ninguno.
+
+        Fail-open a propósito: dejar el broker sin un solo modelo elegible es
+        peor que intentarlo con uno sospechoso, que además tiene su fallo
+        registrado y explica lo que pase después.
+        """
+        quarantine = self.load_quarantine()
+        if not quarantine:
+            return catalog
+        survivors = [item for item in catalog if quarantine_key(item) not in quarantine]
+        if not survivors:
+            logger.warning("routing.quarantine_bypassed", extra={"apartados": len(catalog)})
+            return catalog
+        return survivors
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         catalog, capability_catalog, context_catalog = await self.eligible_catalog(request)
@@ -912,7 +982,10 @@ class RoutedModelProvider:
 def build_provider(
     config: BrokerConfig,
     stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
+    quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
 ):
     if config.processing.provider_mode == "bootstrap":
         return BootstrapModelProvider()
-    return RoutedModelProvider(config, stats_loader=stats_loader)
+    return RoutedModelProvider(
+        config, stats_loader=stats_loader, quarantine_loader=quarantine_loader
+    )
