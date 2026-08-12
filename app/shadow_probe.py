@@ -248,7 +248,8 @@ class ShadowProbe:
             # candidato, y eso debe verse en su tasa de éxito.
             code = getattr(error, "code", type(error).__name__)
             await asyncio.to_thread(
-                repository.fail_invocation, invocation_id, task_id, str(code), str(error)[:2000],
+                repository.fail_invocation, invocation_id, task_id, str(code),
+                str(error)[:2000], getattr(error, "output", None),
             )
             return
         await asyncio.to_thread(repository.complete_invocation, invocation_id, task_id, output)

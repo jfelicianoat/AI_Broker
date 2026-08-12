@@ -1424,9 +1424,16 @@ def _task_result_view(detail: DashboardTaskDetail) -> dict[str, Any]:
         skipped_proposers = detail.progress.get("skipped_proposers")
     if not isinstance(skipped_proposers, list):
         skipped_proposers = []
-    warnings = (result.get("consensus") or {}).get("warnings") if isinstance(result.get("consensus"), dict) else []
+    consensus = result.get("consensus") if isinstance(result.get("consensus"), dict) else {}
+    warnings = consensus.get("warnings") if isinstance(consensus, dict) else []
     if not isinstance(warnings, list):
         warnings = []
+    arbiter_failures = result.get("arbiter_failures")
+    if not isinstance(arbiter_failures, list):
+        arbiter_failures = []
+    # Tareas anteriores a la degradación del árbitro no llevan la marca y
+    # siempre fueron sintetizadas: sin el default aparecerían como degradadas.
+    synthesized = consensus.get("synthesized", True) if isinstance(consensus, dict) else True
     expected_total = detail.progress.get("invocations_total")
     if not isinstance(expected_total, int):
         expected_total = _expected_invocations(detail)
@@ -1442,6 +1449,8 @@ def _task_result_view(detail: DashboardTaskDetail) -> dict[str, Any]:
         "active_invocations": active,
         "skipped_proposers": skipped_proposers,
         "warnings": warnings,
+        "arbiter_failures": arbiter_failures,
+        "synthesized": bool(synthesized),
         "expected_invocations": expected_total,
     }
 

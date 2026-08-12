@@ -530,14 +530,49 @@ class TaskRepository:
                 (task_id, "model_invocation.completed", dumps_json({"invocation_id": invocation_id}), now),
             )
 
-    def fail_invocation(self, invocation_id: str, task_id: str, code: str, message: str) -> None:
+    def fail_invocation(
+        self,
+        invocation_id: str,
+        task_id: str,
+        code: str,
+        message: str,
+        output: ModelOutput | None = None,
+    ) -> None:
+        """Cierra el checkpoint como fallido.
+
+        output es lo que el modelo llegó a devolver cuando quien declara el
+        fallo es el broker DESPUÉS de recibir la respuesta (PROMPT_ECHOED es el
+        caso vivo). Sin él la fila quedaba a cero tokens, sin coste y sin
+        texto: el gasto real desaparecía de las métricas y de la respuesta que
+        rompió la tarea no quedaba nada que auditar, justo la que más falta
+        hace ver. Un fallo de transporte no trae output y la fila se queda como
+        siempre.
+        """
         now = _utc_now_iso()
         with self.db.transaction() as connection:
-            connection.execute(
-                "UPDATE model_invocations SET completed_at = ?, status = 'failed', "
-                "error_code = ?, updated_at = ? WHERE id = ?",
-                (now, code, now, invocation_id),
-            )
+            if output is None:
+                connection.execute(
+                    "UPDATE model_invocations SET completed_at = ?, status = 'failed', "
+                    "error_code = ?, updated_at = ? WHERE id = ?",
+                    (now, code, now, invocation_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE model_invocations SET output_json = ?, tokens_input = ?, "
+                    "tokens_output = ?, cost_usd = ?, latency_ms = ?, completed_at = ?, "
+                    "status = 'failed', error_code = ?, updated_at = ? WHERE id = ?",
+                    (
+                        dumps_json(output.technical_output()),
+                        output.tokens_input,
+                        output.tokens_output,
+                        output.cost_usd,
+                        output.latency_ms,
+                        now,
+                        code,
+                        now,
+                        invocation_id,
+                    ),
+                )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (

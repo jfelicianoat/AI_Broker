@@ -79,6 +79,19 @@ class AgentLoopResult:
     messages: list[dict[str, Any]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _Synthesis:
+    """Lo que cierra un consenso: la síntesis del árbitro o, si no la hubo, la
+    propuesta que responde en su lugar."""
+    model: ModelReference
+    output: ModelOutput
+    # None cuando degraded: la salida es una propuesta con su invocación ya
+    # cerrada, no una inferencia nueva.
+    invocation_id: str | None
+    degraded: bool
+    failures: list[dict[str, Any]] = field(default_factory=list)
+
+
 class ConsensusCoordinator:
     algorithm_version = "fase-5-fast-slow-consensus-v2"
 
@@ -534,7 +547,7 @@ class ConsensusCoordinator:
                 break
             except ProviderError as error:
                 self._attach_error_context(error, "generating", model)
-                repository.fail_invocation(invocation_id, task_id, error.code, str(error))
+                repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
                 if (
                     not error.retryable
                     or error.code == "TASK_CANCELLED"
@@ -789,7 +802,7 @@ class ConsensusCoordinator:
             )
         except ProviderError as error:
             self._attach_error_context(error, "chunking", model)
-            repository.fail_invocation(invocation_id, task_id, error.code, str(error))
+            repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
             raise
         repository.complete_invocation(invocation_id, task_id, output)
         if repository.is_cancel_requested(task_id):
@@ -976,7 +989,7 @@ class ConsensusCoordinator:
             )
             repository.complete_invocation(invocation_id, task_id, output)
         except ProviderError as error:
-            repository.fail_invocation(invocation_id, task_id, error.code, str(error))
+            repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
             return 1.0, None
         match = re.search(r"(?<![\w.])(0(?:\.\d+)?|1(?:\.0+)?)(?![\w.])", output.content or "")
         if match is None:
@@ -1089,7 +1102,7 @@ class ConsensusCoordinator:
                 )
             except ProviderError as error:
                 self._attach_error_context(error, "proposing" if run_id else "generating", model)
-                repository.fail_invocation(invocation_id, task_id, error.code, str(error))
+                repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
                 raise
             turn_output = ModelOutput(
                 turn.content, turn.tokens_input, turn.tokens_output, turn.cost_usd, turn.latency_ms,
@@ -1463,44 +1476,44 @@ class ConsensusCoordinator:
             },
         )
         synthesis_request = self._with_remaining_budget(request, [output for _, output in proposals])
-        synthesis_invocation_id = repository.start_invocation(
-            task_id, run_id, "arbiter", arbiter, classify_task_type(request),
-            await self._model_loaded_state(arbiter),
+        synthesis = await self._synthesize_with_recovery(
+            repository, task_id, run_id, request, synthesis_request, arbiter, proposals,
         )
-        try:
-            synthesis = await self._run_cancellable(
-                repository,
-                task_id,
-                self.provider.synthesize(synthesis_request, arbiter, [output for _, output in proposals]),
-            )
-        except ProviderError as error:
-            self._attach_error_context(error, "synthesizing", arbiter, role="arbiter")
-            repository.fail_invocation(synthesis_invocation_id, task_id, error.code, str(error))
-            raise
-        # El checkpoint se cierra en cuanto hay respuesta: cancelación o
-        # presupuesto excedido no deben dejar la fila en 'started'.
-        repository.complete_invocation(synthesis_invocation_id, task_id, synthesis)
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
-        self._enforce_budget(request, [output for _, output in proposals] + [synthesis])
-        self._record_artifact_safely(
-            repository, task_id, run_id, synthesis_invocation_id, "synthesis_output",
-            lambda: self.artifacts.write_markdown(
-                task_id,
-                f"synthesis/arbiter_{self._safe_name(arbiter.model)}.md",
-                self._model_markdown(task_id, "arbiter", arbiter, synthesis),
-            ),
-        )
+        # Una propuesta degradada ya está contada entre las propuestas: sumarla
+        # otra vez inflaría tokens y coste con una inferencia que no existió.
+        all_outputs = [output for _, output in proposals]
+        if not synthesis.degraded:
+            all_outputs.append(synthesis.output)
+        self._enforce_budget(request, all_outputs)
+        if not synthesis.degraded:
+            self._record_artifact_safely(
+                repository, task_id, run_id, synthesis.invocation_id, "synthesis_output",
+                lambda: self.artifacts.write_markdown(
+                    task_id,
+                    f"synthesis/arbiter_{self._safe_name(synthesis.model.model)}.md",
+                    self._model_markdown(task_id, "arbiter", synthesis.model, synthesis.output),
+                ),
+            )
         self._record_artifact_safely(
             repository, task_id, run_id, None, "final_output",
-            lambda: self.artifacts.write_markdown(task_id, "synthesis/final.md", synthesis.content or ""),
+            lambda: self.artifacts.write_markdown(
+                task_id, "synthesis/final.md", synthesis.output.content or ""
+            ),
         )
 
-        all_outputs = [output for _, output in proposals] + [synthesis]
+        warnings = [self._skipped_proposer_warning(item) for item in skipped_proposers]
+        warnings.extend(self._arbiter_failure_warning(item) for item in synthesis.failures)
+        if synthesis.degraded:
+            warnings.append(
+                "sin síntesis: responde la propuesta de "
+                f"{synthesis.model.provider}/{synthesis.model.deployment}/{synthesis.model.model}"
+            )
         result: dict[str, Any] = {
-            "result_markdown": synthesis.content,
-            "assistant_content": synthesis.content,
+            "result_markdown": synthesis.output.content,
+            "assistant_content": synthesis.output.content,
             "inference_kind": "chat",
             "output_format": request.output.format.value,
             "consensus": {
@@ -1510,8 +1523,10 @@ class ConsensusCoordinator:
                 "proposers_failed": len(skipped_proposers),
                 "rounds": 1,
                 "remaining_disagreements": [],
-                "warnings": [self._skipped_proposer_warning(item) for item in skipped_proposers],
+                "warnings": warnings,
+                "synthesized": not synthesis.degraded,
             },
+            "arbiter_failures": synthesis.failures,
             "skipped_proposers": skipped_proposers,
             "scheduling": {
                 "requested": request.execution.scheduling.value,
@@ -1523,12 +1538,14 @@ class ConsensusCoordinator:
             },
             "usage": self._usage(all_outputs),
             "models_used": [model.model_dump(mode="json") for model, _ in proposals]
-            + [arbiter.model_dump(mode="json")],
-            "model_used": arbiter.model_dump(mode="json"),
-            "fallback_used": self._fallback_used(request, arbiter),
+            + ([] if synthesis.degraded else [synthesis.model.model_dump(mode="json")]),
+            "model_used": synthesis.model.model_dump(mode="json"),
+            "fallback_used": self._fallback_used(request, synthesis.model),
             "artifacts_root": str(self.artifacts.root / task_id),
         }
-        repository.set_stage_status(task_id, run_id, "synthesizing", "completed")
+        repository.set_stage_status(
+            task_id, run_id, "synthesizing", "degraded" if synthesis.degraded else "completed",
+        )
         repository.update_task(
             task_id,
             TaskStatus.completed,
@@ -1608,7 +1625,7 @@ class ConsensusCoordinator:
                 return model, output, invocation_id, None
             except ProviderError as error:
                 self._attach_error_context(error, "proposing", model)
-                repository.fail_invocation(invocation_id, task_id, error.code, str(error))
+                repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
                 return model, None, invocation_id, error
 
         invoke = invoke_agent if proposer_skills else invoke_single
@@ -1656,6 +1673,134 @@ class ConsensusCoordinator:
     def _skipped_proposer_warning(self, item: dict[str, Any]) -> str:
         model_name = f"{item.get('provider')}/{item.get('deployment')}/{item.get('model')}"
         return f"{item.get('role', 'proposer')} omitido ({model_name}): {item.get('code')}"
+
+    def _arbiter_failure_warning(self, item: dict[str, Any]) -> str:
+        model_name = f"{item.get('provider')}/{item.get('deployment')}/{item.get('model')}"
+        return f"árbitro descartado ({model_name}): {item.get('code')}"
+
+    async def _synthesize_with_recovery(
+        self,
+        repository,
+        task_id: str,
+        run_id: str | None,
+        request: TaskCreateRequest,
+        synthesis_request: TaskCreateRequest,
+        arbiter: ModelReference,
+        proposals: list[tuple[ModelReference, ModelOutput]],
+    ) -> _Synthesis:
+        """Sintetiza; y si el árbitro no responde, no tira la tarea.
+
+        Un árbitro caído mataba el consenso entero con las propuestas ya
+        hechas y cobradas: minutos de máquina y una respuesta válida en la mano
+        se iban a la basura por el último eslabón (task_c8da5dd6…, donde el
+        árbitro devolvió su propio prompt y las tres propuestas eran buenas).
+        Aquí se prueba un árbitro distinto y, si tampoco, responde la mejor
+        propuesta tal cual: todos los roles de proposer contestan al usuario,
+        no al árbitro, así que su salida es una respuesta completa —peor que
+        una síntesis, incomparablemente mejor que un error.
+
+        Los errores de _TASK_FATAL_ERRORS siguen tumbando la tarea: hablan de
+        la petición (cancelada, sin presupuesto, contexto imposible), no del
+        árbitro, y cambiar de modelo no arregla ninguno.
+        """
+        outputs = [output for _, output in proposals]
+        failures: list[dict[str, Any]] = []
+        attempted: list[ModelReference] = []
+        candidate: ModelReference | None = arbiter
+        while candidate is not None:
+            attempted.append(candidate)
+            invocation_id = repository.start_invocation(
+                task_id, run_id, "arbiter", candidate, classify_task_type(request),
+                await self._model_loaded_state(candidate),
+            )
+            try:
+                output = await self._run_cancellable(
+                    repository, task_id, self.provider.synthesize(synthesis_request, candidate, outputs),
+                )
+            except ProviderError as error:
+                self._attach_error_context(error, "synthesizing", candidate, role="arbiter")
+                repository.fail_invocation(
+                    invocation_id, task_id, error.code, str(error), error.output
+                )
+                if error.code in _TASK_FATAL_ERRORS or repository.is_cancel_requested(task_id):
+                    raise
+                detail = self._skipped_proposer_detail(candidate, error)
+                repository.add_event(task_id, "arbiter.failed", detail)
+                failures.append(detail)
+                candidate = await self._substitute_arbiter(request, attempted)
+                continue
+            # El checkpoint se cierra en cuanto hay respuesta: cancelación o
+            # presupuesto excedido no deben dejar la fila en 'started'.
+            repository.complete_invocation(invocation_id, task_id, output)
+            return _Synthesis(candidate, output, invocation_id, degraded=False, failures=failures)
+
+        model, output = self._fallback_proposal(proposals)
+        repository.add_event(task_id, "arbiter.fallback", {
+            "answered_by": model.model_dump(mode="json"),
+            "role": model.role or "proposer",
+            "attempts": [item["model"] for item in failures],
+            "code": failures[-1]["code"] if failures else None,
+        })
+        logger.warning(
+            "arbiter.fallback",
+            extra={
+                "event": "arbiter.fallback",
+                "task_id": task_id,
+                "answered_by": model.model,
+                "code": failures[-1]["code"] if failures else None,
+            },
+        )
+        return _Synthesis(model, output, None, degraded=True, failures=failures)
+
+    async def _substitute_arbiter(
+        self, request: TaskCreateRequest, attempted: list[ModelReference]
+    ) -> ModelReference | None:
+        """Otro árbitro, distinto de los ya intentados; None si no procede.
+
+        Un árbitro pedido a mano (selection.arbiter, preferred_arbiter,
+        target_model) no se cambia: ahí el modelo es parte de lo pedido y no
+        una decisión del broker. Solo se sustituye una vez, para que un
+        catálogo entero de modelos rotos no convierta una tarea en una ronda
+        interminable de intentos que el usuario paga en espera.
+        """
+        selection = request.execution.selection
+        if len(attempted) > 1 or not selection.allow_substitution:
+            return None
+        if selection.arbiter is not None or selection.preferred_arbiter is not None:
+            return None
+        requirements = request.model_requirements
+        if requirements.target_model is not None or requirements.preferred_model is not None:
+            return None
+        used = {self._model_identity(model) for model in attempted}
+        count = len(used) + 1
+        try:
+            ranked = await self.provider.select(request, count, ["arbiter"] * count)
+        except ProviderError:
+            # Quedarse sin árbitro de repuesto no es un fallo: la degradación
+            # de más abajo sigue teniendo respuesta que entregar.
+            return None
+        return next(
+            (model for model in ranked if self._model_identity(model) not in used), None
+        )
+
+    def _fallback_proposal(
+        self, proposals: list[tuple[ModelReference, ModelOutput]]
+    ) -> tuple[ModelReference, ModelOutput]:
+        """La propuesta que responde cuando no hay síntesis.
+
+        Las propuestas llegan en el orden del router (la primera es el modelo
+        mejor situado, y por posición el rol generalista, el que da la
+        respuesta más equilibrada). Se salta las vacías: un candidato sin texto
+        no es una respuesta.
+        """
+        return next(
+            ((model, output) for model, output in proposals if (output.content or "").strip()),
+            proposals[0],
+        )
+
+    @staticmethod
+    def _model_identity(model: ModelReference) -> tuple[str, str, str]:
+        return (model.provider.lower(), model.deployment.lower(), model.model)
 
     def _with_wave_budget(
         self,

@@ -21,6 +21,7 @@ from app.providers.base import (
     ModelOutput,
     ProviderError,
     context_fits_with_capped_output,
+    degenerate_loop_period,
     estimate_input_tokens,
     estimate_required_context,
     looks_like_prompt_echo,
@@ -948,19 +949,35 @@ class RoutedModelProvider:
         output = await self._generate_raw(
             request, model, prompt, system, background=background
         )
-        # Un modelo que reproduce su prompt no ha respondido, pero tampoco ha
-        # fallado de ninguna forma que el broker pudiera notar: sin esta
-        # comprobación la copia llega al usuario como si fuera la respuesta.
-        # Los embeddings quedan fuera: su salida es un vector, no texto.
-        if request.inference_kind != InferenceKind.embedding and looks_like_prompt_echo(
-            prompt, output.content or ""
-        ):
-            raise ProviderError(
+        # Dos formas de no responder que el broker no notaría solo: reproducir
+        # el prompt y quedarse repitiendo una frase. Ninguna falla de manera
+        # visible —la respuesta llega entera y con done_reason normal—, así que
+        # sin estas comprobaciones se entregan al usuario como si fueran
+        # trabajo hecho. Los embeddings quedan fuera: su salida es un vector.
+        if request.inference_kind == InferenceKind.embedding:
+            return output
+        content = output.content or ""
+        if looks_like_prompt_echo(prompt, content):
+            error = ProviderError(
                 "PROMPT_ECHOED",
                 f"{model.provider}/{model.model} devolvió su propio prompt en lugar de "
-                f"una respuesta ({prompt_echo_ratio(prompt, output.content or ''):.0%} "
+                f"una respuesta ({prompt_echo_ratio(prompt, content):.0%} "
                 "de la salida es copia literal de la entrada)",
             )
+            # La inferencia ocurrió y se pagó: la salida rechazada viaja con el
+            # error para que quede persistida y se pueda mirar después.
+            error.output = output
+            raise error
+        period = degenerate_loop_period(content)
+        if period is not None:
+            cycle = " ".join(content[-period:].split())
+            error = ProviderError(
+                "DEGENERATE_OUTPUT",
+                f"{model.provider}/{model.model} se quedó repitiendo «{cycle[:60]}» "
+                "hasta el final de la respuesta en lugar de terminarla",
+            )
+            error.output = output
+            raise error
         return output
 
     async def _generate_raw(
