@@ -507,6 +507,14 @@ class ProvidersConfig(BaseModel):
         return self
 
 
+# Salida que el broker ha inspeccionado y declarado inservible. No son
+# circunstancias del entorno: son pruebas de que ese modelo, ahora mismo, no
+# responde. Apartar un modelo por ellas es el único uso que tienen, así que un
+# `definitive_codes` que no las incluya deja el defecto sin consecuencia; hay
+# un test que lo vigila (tests/test_degenerate_output.py).
+UNUSABLE_OUTPUT_CODES = ("INVALID_PROVIDER_RESPONSE", "PROMPT_ECHOED", "DEGENERATE_OUTPUT")
+
+
 class ModelQuarantineConfig(BaseModel):
     """Apartado automático de modelos que ya no producen salida usable.
 
@@ -528,8 +536,7 @@ class ModelQuarantineConfig(BaseModel):
     # Quedarse sin memoria o un proveedor caído son circunstancias y no cuentan.
     definitive_codes: list[str] = Field(
         default_factory=lambda: [
-            "INVALID_PROVIDER_RESPONSE",
-            "PROMPT_ECHOED",
+            *UNUSABLE_OUTPUT_CODES,
             "MODEL_COMPATIBILITY_MISMATCH",
             "MODEL_UNAVAILABLE",
             "MODEL_DEPLOYMENT_MISMATCH",

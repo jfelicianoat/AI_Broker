@@ -171,6 +171,11 @@ class TestPromptEchoDetection:
         asyncio.run(provider.close())
         assert raised.value.code == "PROMPT_ECHOED"
         assert "copia literal" in str(raised.value)
+        # La inferencia se pagó: el eco viaja con el error para poder guardarlo
+        # en la invocación en vez de dejar la fila a cero y sin texto.
+        assert raised.value.output is not None
+        assert raised.value.output.content == prompt_largo.strip()
+        assert raised.value.output.tokens_output == 400
 
 
 class TestCompressionKeepsTheLanguageAnchor:

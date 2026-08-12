@@ -271,6 +271,7 @@ Sin más configuración. Es el default y cubre la mayoría de los casos.
 - `selection.mode`: `auto` (el broker elige), `manual` (exige `proposers` **y** `arbiter` explícitos) o `hybrid`.
 - `proposer_skills` da herramientas a los proponentes antes de proponer. **El árbitro nunca usa herramientas.** Solo válido en esta estrategia.
 - Se necesitan al menos 2 proponentes con éxito o la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`.
+- Si falla el árbitro, el broker prueba otro y si tampoco puede entrega la mejor propuesta (ver «El resultado»). Con `selection.arbiter`, `preferred_arbiter` o `allow_substitution: false` no se cambia de árbitro: solo se degrada.
 
 ### 6.3 `agent`
 
@@ -460,6 +461,15 @@ Para `embedding`: `result.embedding` con el vector.
 
 Según la estrategia aparecen además `result.agent` (iteraciones, skills usadas), `result.long_context` (fragmentos) o el detalle del consenso.
 
+**Un consenso puede llegar degradado.** Si el árbitro falla, el broker prueba otro y, si tampoco sintetiza, entrega la mejor propuesta en lugar de fallar: prefiere una respuesta sin contrastar a ninguna respuesta. Se ve en dos campos:
+
+| Campo | Contenido |
+|---|---|
+| `consensus.synthesized` | `false` si respondió una propuesta porque ningún árbitro sintetizó |
+| `arbiter_failures` | Los árbitros descartados, con `model`, `code` y `message` |
+
+Con `synthesized: false`, `model_used` es el proposer que respondió y `consensus.warnings` lo dice en texto. Si tu interfaz presenta la respuesta como «consenso de N modelos», mira este campo antes: en ese caso contestó uno solo.
+
 ### Cuando falla
 
 `status: "failed"` y `error` con `{code, message, retryable}`. **`retryable` te dice si tiene sentido reintentar**: un `PROVIDER_UNAVAILABLE` transitorio sí, un `CONTEXT_LIMIT_EXCEEDED` no.
@@ -561,6 +571,8 @@ Errores **durante la ejecución** no son HTTP: la petición ya se aceptó con `2
 | `PROVIDER_UNAVAILABLE` | Proveedor caído o apagado | **sí** |
 | `PROVIDER_NOT_ALLOWED` / `CLOUD_NOT_ALLOWED` | La frontera de datos bloqueó el modelo | no — revisa §4 |
 | `MODEL_CAPABILITY_MISMATCH` | El modelo no hace lo que pide la tarea (visión, JSON, tools) | no |
+| `PROMPT_ECHOED` | El modelo devolvió su prompt en vez de responder | no — el broker lo aparta tras dos veces |
+| `DEGENERATE_OUTPUT` | El modelo se quedó repitiendo una frase hasta el final | no — igual que el anterior |
 | `TASK_TIMEOUT` | Se agotó `execution.timeout_seconds` | según causa |
 | `ATTACHMENT_EXPANSION_FAILED` | No se pudo inyectar el documento adjunto | no |
 | `TASK_RETRY_LIMIT_EXCEEDED` | La tarea se reintentó tras varios reinicios del broker | no |

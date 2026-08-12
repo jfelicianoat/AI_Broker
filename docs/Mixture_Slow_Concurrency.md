@@ -15,7 +15,7 @@ Base funcional implementada el 24 de junio de 2026: `ExecutionPreset` acepta `sl
 5. Lanza concurrentemente los proponentes de esa wave.
 6. Persiste resultado o error por invocación y libera su reserva.
 7. Repite las waves necesarias.
-8. Comprueba quórum y ejecuta un único árbitro después de la barrera.
+8. Comprueba quórum y ejecuta el árbitro después de la barrera. Si falla y el árbitro no venía elegido a mano, prueba **uno** distinto; si tampoco sintetiza, responde la mejor propuesta —ya pagada— en vez de tirar la tarea. La degradación se marca en `consensus.synthesized` y `result.arbiter_failures`.
 
 Nunca se solapan invocaciones de dos tareas Broker diferentes.
 

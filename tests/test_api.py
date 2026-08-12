@@ -1509,6 +1509,9 @@ def test_dashboard_task_detail_renders_results_and_errors(tmp_path: Path) -> Non
 
 
 def test_dashboard_task_detail_identifies_failed_model(tmp_path: Path) -> None:
+    """Un árbitro caído ya no tumba la tarea, pero el panel sigue diciendo
+    quién falló: si la degradación fuese invisible, un consenso sin síntesis
+    pasaría por un consenso normal."""
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker-model-error.db")),
         processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
@@ -1533,12 +1536,14 @@ def test_dashboard_task_detail_identifies_failed_model(tmp_path: Path) -> None:
         detail = client.get(f"/api/v1/dashboard/tasks/{created['task_id']}").json()
         page = client.get(f"/dashboard/tasks/{created['task_id']}")
 
-    assert detail["task"]["status"] == "failed"
-    assert detail["error"]["stage"] == "synthesizing"
-    assert detail["error"]["role"] == "arbiter"
-    assert detail["error"]["model"] == "bootstrap-1"
+    assert detail["task"]["status"] == "completed"
+    failures = detail["result"]["arbiter_failures"]
+    assert [item["model"] for item in failures] == ["bootstrap-1", "bootstrap-2"]
+    assert {item["stage"] for item in failures} == {"synthesizing"}
+    assert {item["role"] for item in failures} == {"arbiter"}
+    assert detail["result"]["consensus"]["synthesized"] is False
     assert page.status_code == 200
-    assert "Modelo fallido" in page.text
+    assert "Consenso sin síntesis" in page.text
     assert "bootstrap/bootstrap-1" in page.text
 
 

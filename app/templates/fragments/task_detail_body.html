@@ -14,6 +14,27 @@
       <p>{{ task_result.error_message }}</p>
     </div>
   {% endif %}
+  {% if task_result.arbiter_failures %}
+    <div class="alert warning">
+      <strong>{% if task_result.synthesized %}Árbitro sustituido{% else %}Consenso sin síntesis{% endif %}</strong>
+      <p>
+        {% if task_result.synthesized %}
+          El primer árbitro falló y sintetizó otro modelo.
+        {% else %}
+          Ningún árbitro pudo sintetizar: la respuesta es la propuesta de un proposer, sin contrastar con las demás.
+        {% endif %}
+      </p>
+      <ul>
+        {% for item in task_result.arbiter_failures %}
+          <li>
+            {{ item.provider }}/{{ item.deployment }}/{{ item.model }}
+            {% if item.code %}- {{ item.code }}{% endif %}
+            {% if item.message %}: {{ item.message }}{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
   {% if task_result.skipped_proposers %}
     <div class="alert warning">
       <strong>Modelos omitidos durante el consenso</strong>

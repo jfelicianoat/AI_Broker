@@ -93,6 +93,27 @@ class TestQuarantineRule:
         _invocation(db, "roto:bf16", "failed", "INVALID_PROVIDER_RESPONSE", 5)
         assert load_quarantine(db, ModelQuarantineConfig(enabled=False)) == {}
 
+    def test_the_real_sequence_of_2026_08_11_is_now_evidence(self, tmp_path) -> None:
+        """qwen3-coder:30b se atascó repitiendo a las 20:39 y devolvió su prompt
+        a las 20:50, y siguió en rotación: el primero se guardaba como
+        'completed' —nadie miraba la salida— así que rompía su propia racha.
+        Con DEGENERATE_OUTPUT los dos cuentan y el modelo sale."""
+        db = _db(tmp_path)
+        _invocation(db, "qwen3-coder:30b", "failed", "DEGENERATE_OUTPUT", 20)
+        _invocation(db, "qwen3-coder:30b", "failed", "PROMPT_ECHOED", 9)
+        entry = load_quarantine(db, ModelQuarantineConfig())[("ollama", "local", "qwen3-coder:30b")]
+        assert entry.failures == 2
+        assert entry.last_code == "PROMPT_ECHOED"
+
+    def test_a_model_that_still_answers_between_loops_stays(self, tmp_path) -> None:
+        """Un tropiezo aislado no aparta a nadie: el bucle degenerativo entra en
+        la misma regla conservadora que el resto, no en una vía rápida."""
+        db = _db(tmp_path)
+        _invocation(db, "qwen3-coder:30b", "failed", "DEGENERATE_OUTPUT", 30)
+        _invocation(db, "qwen3-coder:30b", "completed", None, 20)
+        _invocation(db, "qwen3-coder:30b", "failed", "DEGENERATE_OUTPUT", 10)
+        assert load_quarantine(db, ModelQuarantineConfig()) == {}
+
 
 class TestQuarantinedModelsLeaveTheRotation:
     @staticmethod

@@ -164,6 +164,56 @@ def looks_like_prompt_echo(prompt: str, content: str) -> bool:
     return prompt_echo_ratio(prompt, content) >= _ECHO_RATIO
 
 
+# Un modelo atascado repite un ciclo corto hasta agotar el presupuesto de
+# salida. Se mira solo la COLA: un bucle del que el modelo sale y luego
+# responde no estropea la respuesta, y exigir que el texto termine dentro del
+# ciclo es lo que separa "se quedó enganchado" de "usa una estructura
+# repetitiva" (una tabla, una lista, un separador).
+_LOOP_TAIL_CHARS = 400
+# Por encima de esto ya no es un tic: es un párrafo que se repite, y eso pide
+# otra clase de comprobación que no se hace aquí.
+_LOOP_MAX_PERIOD = 120
+# Cuatro vueltas completas dentro de la cola. Con dos, un cierre simétrico
+# ("...uno; y dos. Uno; y dos.") entraría.
+_LOOP_MIN_REPEATS = 4
+
+
+def degenerate_loop_period(text: str) -> int | None:
+    """Longitud del ciclo en el que se quedó atascado el modelo, o None.
+
+    No se exige que la respuesta haya llegado al tope de tokens aunque el caso
+    real lo hiciera: eso solo estrecharía la comprobación y dejaría fuera los
+    bucles que paran antes.
+    """
+    tail = text[-_LOOP_TAIL_CHARS:]
+    if len(tail) < _LOOP_TAIL_CHARS:
+        return None
+    limit = min(_LOOP_MAX_PERIOD, len(tail) // _LOOP_MIN_REPEATS)
+    for period in range(1, limit + 1):
+        # Una cadena es periódica con periodo p si coincide consigo misma
+        # desplazada p posiciones.
+        if all(tail[index] == tail[index + period] for index in range(len(tail) - period)):
+            return period
+    return None
+
+
+def looks_like_degenerate_loop(text: str) -> bool:
+    """¿El modelo se quedó repitiendo una frase en vez de responder?
+
+    Pasa de verdad: un árbitro escribió dos frases correctas y siguió con
+    "fallo en " 1.297 veces hasta el tope de tokens. Formalmente no falló nada
+    —la respuesta llegó entera y con `done_reason` normal—, así que se guardó
+    como buena, se entregó al usuario y volvió al broker en el historial del
+    turno siguiente. El detector de eco no lo veía: aquella repetición era
+    NUEVA, no una copia del prompt.
+
+    Calibrado contra 18.319 salidas reales del histórico (456 de 400+
+    caracteres, las únicas que este umbral puede marcar): solo señala ese
+    incidente, y con el mismo resultado en todos los umbrales probados.
+    """
+    return degenerate_loop_period(text) is not None
+
+
 def neutralize_consensus_delimiters(text: str) -> str:
     """Impide que el contenido de un candidato cierre/abra los tags del árbitro.
 
@@ -226,6 +276,12 @@ class ProviderError(RuntimeError):
         self.code = code
         self.retryable = retryable
         self.details = details or {}
+        # Lo que el modelo devolvió, cuando el fallo lo declara el broker al
+        # inspeccionar una respuesta que sí llegó (PROMPT_ECHOED). Viaja con el
+        # error para que la invocación se cierre con su gasto real y con el
+        # texto rechazado, en vez de con una fila a cero que no se puede
+        # auditar. None cuando no hubo respuesta que guardar.
+        self.output: ModelOutput | None = None
         # Contexto de ejecución adjuntado por el coordinador al propagar el error.
         self.stage: str | None = None
         self.role: str | None = None
