@@ -9,7 +9,7 @@ Base funcional implementada el 24 de junio de 2026: `ExecutionPreset` acepta `sl
 `slow` prioriza una comparación más amplia y auditable. El nombre describe el perfil de mayor trabajo, no obliga a que cada invocación sea secuencial.
 
 1. El Broker reclama una única tarea y mantiene `max_active_workflows = 1`.
-2. Selecciona y valida todos los proponentes y el árbitro.
+2. Selecciona y valida todos los proponentes y el árbitro. Los proponentes salen del ranking por tiempo esperado; el árbitro, de `selection.arbiter_policy` (`strongest_available` por defecto: tamaño declarado, con el tiempo como desempate y los modelos que no caben al final).
 3. Construye un plan `parallel`, `waves` o `sequential` antes de invocar.
 4. Reserva atómicamente VRAM, coste y permisos de provider para la primera wave.
 5. Lanza concurrentemente los proponentes de esa wave.

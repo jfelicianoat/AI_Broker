@@ -269,6 +269,7 @@ Sin más configuración. Es el default y cubre la mayoría de los casos.
 
 - `preset: "fast"` ejecuta los proponentes en serie; `"slow"` los paraleliza según la VRAM disponible.
 - `selection.mode`: `auto` (el broker elige), `manual` (exige `proposers` **y** `arbiter` explícitos) o `hybrid`.
+- `selection.arbiter_policy`: `strongest_available` (por defecto) elige el árbitro por tamaño declarado, no por rapidez — el árbitro juzga, no responde. Incluye modelos cloud si la tarea los permite, así que puede no ser local. `fastest_available` lo elige con el mismo ranking por tiempo que a los proponentes. Cualquier otro valor se **rechaza** en la validación.
 - `proposer_skills` da herramientas a los proponentes antes de proponer. **El árbitro nunca usa herramientas.** Solo válido en esta estrategia.
 - Se necesitan al menos 2 proponentes con éxito o la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`.
 - Si falla el árbitro, el broker prueba otro y si tampoco puede entrega la mejor propuesta (ver «El resultado»). Con `selection.arbiter`, `preferred_arbiter` o `allow_substitution: false` no se cambia de árbitro: solo se degrada.

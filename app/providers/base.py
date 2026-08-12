@@ -214,6 +214,43 @@ def looks_like_degenerate_loop(text: str) -> bool:
     return degenerate_loop_period(text) is not None
 
 
+# "27.9B", "70.6B", "1.1B": lo que declara el runtime en los detalles del
+# modelo. Se admite M por si algún proveedor da modelos pequeños en millones.
+_PARAMETER_SIZE_PATTERN = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*([BM])\s*$", re.IGNORECASE)
+# Último recurso: el tamaño que el propio nombre anuncia ("gemma4:31b-cloud",
+# "deepseek-coder-33b-base"). Se exige que la cifra no venga pegada a otra
+# —"3.1" en "llama-3.1-8b" no es un tamaño— y que la b cierre la palabra.
+_PARAMETER_NAME_PATTERN = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*b(?![a-z0-9])", re.IGNORECASE)
+
+
+def declared_parameter_count(entry: dict[str, Any]) -> float | None:
+    """Miles de millones de parámetros del modelo, o None si no se sabe.
+
+    Misma jerarquía de evidencia que el resto del catálogo: primero lo que
+    declara el runtime (`parameter_size`), y solo si no hay nada, lo que
+    anuncia el nombre. No se deduce del peso en disco, que mide la
+    cuantización tanto como el modelo: un 30B en Q8 ocupa más que un 70B en Q4
+    y no por eso es más capaz.
+
+    Nunca se inventa un número. Un modelo sin tamaño conocido no compite por
+    ser el más grande, igual que uno sin medidas no compite por ser el más
+    rápido; en ninguno de los dos casos queda descalificado, solo detrás.
+    """
+    declared = str(entry.get("parameter_size") or "").strip()
+    match = _PARAMETER_SIZE_PATTERN.match(declared)
+    if match is not None:
+        value = float(match.group(1).replace(",", "."))
+        return value / 1000 if match.group(2).upper() == "M" else value
+    for field in ("name", "catalog_id"):
+        candidates = _PARAMETER_NAME_PATTERN.findall(str(entry.get(field) or ""))
+        if candidates:
+            # El mayor de los números que parecen tamaño: en "8x7b" la parte
+            # informativa es la grande, y en un nombre con varias cifras la
+            # pequeña suele ser una versión.
+            return max(float(item) for item in candidates)
+    return None
+
+
 def neutralize_consensus_delimiters(text: str) -> str:
     """Impide que el contenido de un candidato cierre/abra los tags del árbitro.
 

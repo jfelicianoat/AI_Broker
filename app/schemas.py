@@ -266,7 +266,12 @@ class ModelRequirements(StrictBaseModel):
 class SelectionPolicy(StrictBaseModel):
     mode: SelectionMode = SelectionMode.auto
     diversity_policy: str = "different_families"
-    arbiter_policy: str = "strongest_available"
+    # El árbitro no es un proposer más: no aporta una respuesta, decide cuál de
+    # las que hay es cierta. Ordenarlo por rapidez, como al resto, pone a
+    # juzgar al modelo que antes conteste; `strongest_available` ordena por
+    # tamaño declarado, que es el único indicio de capacidad que hay en el
+    # catálogo. `fastest_available` conserva el orden por tiempo esperado.
+    arbiter_policy: Literal["strongest_available", "fastest_available"] = "strongest_available"
     preferred_arbiter: ModelReference | None = None
     allow_substitution: bool = True
     proposers: list[ModelReference] = Field(default_factory=list)

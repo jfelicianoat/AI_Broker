@@ -9,7 +9,12 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from app.config import BrokerConfig, TaskAffinityConfig, effective_max_parallel_invocations
+from app.config import (
+    BrokerConfig,
+    TaskAffinityConfig,
+    effective_max_parallel_invocations,
+    local_memory_budget_bytes,
+)
 from app.model_enrichment import ModelEnrichment
 from app.model_quarantine import QuarantineEntry, QuarantineKey, quarantine_key
 from app.model_stats import ModelKey, ModelStats
@@ -21,6 +26,7 @@ from app.providers.base import (
     ModelOutput,
     ProviderError,
     context_fits_with_capped_output,
+    declared_parameter_count,
     degenerate_loop_period,
     estimate_input_tokens,
     estimate_required_context,
@@ -811,9 +817,54 @@ class RoutedModelProvider:
             )
         if not context_catalog:
             raise ProviderError("MODEL_UNAVAILABLE", "No hay modelos permitidos disponibles", retryable=True)
+        # El árbitro se elige con otro criterio que los proponentes, y solo
+        # cuando la petición no ha fijado ya un modelo: un target o un
+        # preferred mandan sobre cualquier política.
+        if all(role == "arbiter" for role in roles) and not preferred:
+            ranked_catalog = self._rank_arbiters(ranked_catalog, request)
         return [ModelReference(provider=ranked_catalog[i % len(ranked_catalog)]["provider"],
                                deployment=ranked_catalog[i % len(ranked_catalog)]["deployment"],
                                model=ranked_catalog[i % len(ranked_catalog)]["name"], role=roles[i]) for i in range(count)]
+
+    def _rank_arbiters(
+        self, catalog: list[dict[str, Any]], request: TaskCreateRequest
+    ) -> list[dict[str, Any]]:
+        """Ordena candidatos a árbitro por capacidad en vez de por rapidez.
+
+        El ranking general mide tiempo esperado, que es el criterio correcto
+        para quien tiene que responder: cuanto menos espera el usuario, mejor.
+        El árbitro hace otro trabajo —leer tres respuestas y quedarse con la
+        cierta— y ahí la rapidez no dice nada. Pasó de verdad
+        (task_14341781…): dos proponentes contestaron "no me has dado ningún
+        libro" y el tercero resumió el documento correctamente; el árbitro se
+        quedó con la negativa de los dos. Un árbitro más capaz no garantiza
+        acertar, pero elegirlo por lo rápido que escribe no lo hace nada
+        probable.
+
+        El tamaño declarado es un indicio pobre y es el único que hay: el
+        histórico mide tiempo y tasa de fallo, no acierto. Se ordena por él y
+        se deja el orden por tiempo como desempate, así que entre modelos de
+        tamaño desconocido o parecido sigue mandando lo medido.
+
+        Un modelo que no cabe en la máquina queda el último aunque sea el más
+        grande. Ponerlo primero sería elegir un árbitro que va a fallar seguro
+        con VRAM_MODEL_TOO_LARGE, y aunque la degradación lo sobreviva, cada
+        tarea pagaría el intento.
+        """
+        if request.execution.selection.arbiter_policy != "strongest_available":
+            return catalog
+        budget = local_memory_budget_bytes(self.config)
+
+        def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
+            index, entry = indexed
+            oversized = (
+                is_local_deployment(entry.get("deployment"))
+                and 0 < budget < int(entry.get("size_bytes") or 0)
+            )
+            parameters = declared_parameter_count(entry)
+            return (1 if oversized else 0, -(parameters or 0.0), index)
+
+        return [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
 
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         system = None
