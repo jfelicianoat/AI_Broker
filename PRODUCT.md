@@ -36,7 +36,7 @@ Un gateway de inferencia multi-LLM que **no depende de ninguna nube para funcion
 
 Lo que un producto vecino no podría copiar honestamente:
 
-- **Frontera de datos declarada en un solo punto y aplicada por contrato.** `risk.data_classification` es el único mando de privacidad: `confidential` y `local_only` desactivan los proveedores cloud a nivel de validación Pydantic, y de esa misma clasificación se derivan `cloud_allowed` y `allowed_providers` cuando el cliente no se pronuncia. No es una promesa de política de privacidad: es una restricción que hace fallar la petición. Y no hay tres campos que el cliente tenga que acertar a la vez para que la política sea la que cree.
+- **Frontera de datos declarada en un solo punto y aplicada por contrato.** `risk.data_classification` es el único mando de privacidad: `confidential` y `local_only` desactivan los proveedores cloud a nivel de validación Pydantic, y de esa misma clasificación se derivan `cloud_allowed` y `allowed_providers` cuando el cliente no se pronuncia. No es una promesa de política de privacidad: es una restricción que hace fallar la petición. Y no hay tres campos que el cliente tenga que acertar a la vez para que la política sea la que cree. **La frontera cubre las herramientas, no solo los modelos:** cada skill declara por dónde salen sus datos y las de salida a red (`web_search`, `fetch_url`) se rechazan bajo frontera local igual que un proveedor externo — elegir un modelo local no sirve de nada si la consulta acaba en un buscador. El meta-router lo respeta al enrutar: bajo frontera local no elige `agent` por señales de red, porque esa estrategia ya no puede cumplir ese motivo.
 - **Selección de modelo por tiempo esperado, medido en tu propia máquina.** El ranking no combina componentes sin unidades: estima **segundos hasta una respuesta correcta** = latencia medida, dividida por la tasa de éxito (el número esperado de intentos), reescalada al tamaño de la petición con el ritmo observado en tokens/segundo, y con la carga desde disco sumada aparte cuando el modelo no está en VRAM. Cada término sale de `model_invocations` reales, segmentados por tipo de tarea. **A un modelo sin evidencia no se le inventa un tiempo:** no compite hasta tenerla, y la consigue por sondeo en sombra —se le mide en paralelo a una respuesta ya entregada— sin que ningún usuario pague esa espera.
 - **Capacidades sondeadas, no declaradas.** Jerarquía explícita de evidencia: sondeo real contra el endpoint > capacidades del runtime > catálogo models.dev > heurística por nombre. El catálogo rellena huecos; nunca pisa un dato verificado.
 - **Deliberación multi-modelo con anti-inyección sistemática.** Candidatos, documentos adjuntos y resultados de herramientas viajan en sandboxes XML con delimitadores neutralizados: un candidato no puede inyectar instrucciones al árbitro, ni un PDF cerrar su propio tag.
@@ -58,10 +58,15 @@ Lo que un producto vecino no podría copiar honestamente:
 **Capacidades confirmadas:**
 
 - Cuatro estrategias: `single`, `mixture_of_agents` (presets `fast`/`slow`), `agent` (tool-calling con guardarraíles) y `auto` (meta-router con clasificador determinista, escalado por confianza y aprendizaje adaptativo persistido en `routing_cases`).
+- Consenso de hasta dos rondas (`max_rounds`): la segunda solo se paga si el juez de confianza no da por buena la síntesis de la primera, y no puede dejar la tarea peor que si no se hubiera intentado.
 - Ingesta de adjuntos a Markdown: PDF (con OCR por página), Office, eBook, imágenes, audio y vídeo. Dedupe por SHA-256, tokens estimados por fichero.
 - Sandbox Docker desechable para código generado por modelos.
+- Cliente MCP sobre stdio (off por defecto): herramientas de terceros para el bucle agéntico, con espacio de nombres propio y frontera de datos declarada por servidor y obligatoria.
+- Guardarraíles del bucle agéntico que no tiran trabajo pagado: turno de cierre sin herramientas al agotar iteraciones, recorte de resultados de herramienta antiguos cuando la conversación deja de caber en la ventana, y rescate de lo último dicho al agotar presupuesto o contexto.
+- Cotejo determinista de los enlaces que cita un agente contra los que consultó de verdad (`result.agent.citations`), sin invocar a ningún modelo para juzgarlo.
 - Compresión de prompts determinista por reglas, con vista previa fiel y evento `prompt.compressed` persistido.
 - Cola durable con reordenación, cancelación idempotente y recuperación al arranque.
+- Dependencias entre tareas (`depends_on` por identificador y `depends_on_group` por etiqueta) con estado `waiting_for_dependencies` que no consume el workflow único. La dependencia ordena, no condiciona: una dependencia rota o caducada nunca hace fallar la tarea, deja aviso en el resultado.
 - Edición del YAML en caliente desde el panel, con detección de edición concurrente por huella SHA-256 y revisión de cambios antes de aplicar.
 
 **Restricciones técnicas vinculantes:**

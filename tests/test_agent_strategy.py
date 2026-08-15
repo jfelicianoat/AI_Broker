@@ -90,6 +90,275 @@ def test_agent_max_iterations_guardrail_stops_the_loop(tmp_path: Path, monkeypat
     assert detail["result"]["agent"]["iterations"] == 3
 
 
+def test_agent_closes_with_a_final_turn_without_tools(tmp_path: Path, monkeypatch) -> None:
+    """Al agotar iteraciones se pide una última respuesta SIN tools en vez de
+    tirar el trabajo ya pagado. El turno de cierre es una invocación más, pero
+    no una ronda: `iterations` sigue respetando el tope declarado."""
+    from app.providers.base import AgentTurn, ToolCall
+    from app.providers.bootstrap import BootstrapModelProvider
+
+    seen_tools: list[int] = []
+
+    async def tool_hungry(self, request, model, messages, tools, *, allow_parallel=False):
+        seen_tools.append(len(tools))
+        if not tools:  # turno de cierre: ya no puede llamar a nada
+            return AgentTurn(
+                content="Con lo reunido: la respuesta es 42. Sin verificar: la fuente.",
+                tool_calls=(), tokens_input=2, tokens_output=2, cost_usd=0.0, latency_ms=1.0,
+                raw_assistant_message={"role": "assistant", "content": "Con lo reunido: 42."},
+            )
+        return AgentTurn(
+            content=None,
+            tool_calls=(ToolCall(id="c", name="web_search", arguments={"query": "loop"}),),
+            tokens_input=1, tokens_output=1, cost_usd=0.0, latency_ms=1.0,
+            raw_assistant_message={"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c", "type": "function",
+                 "function": {"name": "web_search", "arguments": '{"query": "loop"}'}},
+            ]},
+        )
+
+    async def fake_skill(name, arguments, **kwargs):
+        return "resultado simulado"
+
+    monkeypatch.setattr(BootstrapModelProvider, "agent_turn", tool_hungry)
+    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:rescue",
+            "content": {"prompt": "bucle"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 3}},
+        })
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    agent = detail["result"]["agent"]
+    assert agent["stop_reason"] == "max_iterations"
+    assert agent["final_turn"] is True
+    assert agent["iterations"] == 3  # el cierre no cuenta como ronda...
+    assert detail["result"]["usage"]["invocations"] == 4  # ...pero sí se cobra
+    assert "42" in detail["result"]["assistant_content"]
+    assert seen_tools == [1, 1, 1, 0]  # tres rondas con tool, el cierre sin ninguna
+    assert [e for e in detail["events"] if e["event_type"] == "agent.final_turn"]
+
+
+def test_agent_final_turn_failure_keeps_the_exhausted_message(tmp_path: Path, monkeypatch) -> None:
+    """Si el turno de cierre también falla, la tarea termina como antes: el
+    rescate no puede convertir un fin de iteraciones en un fallo nuevo."""
+    from app.providers.base import AgentTurn, ProviderError, ToolCall
+    from app.providers.bootstrap import BootstrapModelProvider
+
+    async def dies_on_close(self, request, model, messages, tools, *, allow_parallel=False):
+        if not tools:
+            raise ProviderError("PROVIDER_UNAVAILABLE", "el modelo se cayó al cerrar")
+        return AgentTurn(
+            content=None,
+            tool_calls=(ToolCall(id="c", name="web_search", arguments={"query": "loop"}),),
+            tokens_input=1, tokens_output=1, cost_usd=0.0, latency_ms=1.0,
+            raw_assistant_message={"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c", "type": "function",
+                 "function": {"name": "web_search", "arguments": '{"query": "loop"}'}},
+            ]},
+        )
+
+    async def fake_skill(name, arguments, **kwargs):
+        return "resultado simulado"
+
+    monkeypatch.setattr(BootstrapModelProvider, "agent_turn", dies_on_close)
+    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:rescue-fails",
+            "content": {"prompt": "bucle"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 2}},
+        })
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    assert detail["task"]["status"] == "completed"
+    agent = detail["result"]["agent"]
+    assert agent["stop_reason"] == "max_iterations"
+    assert agent["final_turn"] is False
+    assert agent["iterations"] == 2
+    assert "máximo de iteraciones" in detail["result"]["assistant_content"]
+    assert [e for e in detail["events"] if e["event_type"] == "agent.final_turn_failed"]
+
+
+def test_agent_compacts_old_tool_results_to_stay_in_the_window(tmp_path: Path, monkeypatch) -> None:
+    """La ventana se comprueba al elegir modelo y sobre el prompt inicial; dentro
+    del bucle la conversación crece sin techo. Los resultados de tool antiguos se
+    recortan para que quepa, sin borrar mensajes: cada tool_call conserva su
+    respuesta o la conversación deja de ser válida para el proveedor."""
+    from app.providers.base import AgentTurn, ToolCall
+    from app.providers.bootstrap import BootstrapModelProvider
+
+    sizes: list[int] = []
+
+    async def measure_then_answer(self, request, model, messages, tools, *, allow_parallel=False):
+        sizes.append(sum(len(str(m.get("content") or "")) for m in messages))
+        if len([m for m in messages if m.get("role") == "tool"]) >= 4:
+            return AgentTurn(
+                content="ya tengo bastante", tool_calls=(), tokens_input=1, tokens_output=1,
+                cost_usd=0.0, latency_ms=1.0,
+                raw_assistant_message={"role": "assistant", "content": "ya tengo bastante"},
+            )
+        return AgentTurn(
+            content=None,
+            tool_calls=(ToolCall(id=f"c{len(sizes)}", name="web_search", arguments={"query": "x"}),),
+            tokens_input=1, tokens_output=1, cost_usd=0.0, latency_ms=1.0,
+            raw_assistant_message={"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"c{len(sizes)}", "type": "function",
+                 "function": {"name": "web_search", "arguments": '{"query": "x"}'}},
+            ]},
+        )
+
+    async def huge_skill(name, arguments, **kwargs):
+        return "dato relevante. " + ("relleno " * 900)
+
+    monkeypatch.setattr(BootstrapModelProvider, "agent_turn", measure_then_answer)
+    monkeypatch.setattr("app.coordinator.run_skill", huge_skill)
+    _force_context_window(monkeypatch, 16384)
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:window",
+            "content": {"prompt": "investiga"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 6}},
+        })
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    assert detail["task"]["status"] == "completed"
+    assert detail["result"]["agent"]["stop_reason"] == "completed"
+    compacted = [e for e in detail["events"] if e["event_type"] == "agent.context_compacted"]
+    assert compacted, "la conversación creció por encima de la ventana y nadie la recortó"
+    payload = compacted[0]["payload"]
+    assert payload["tokens_after"] < payload["tokens_before"]
+    assert payload["results_compacted"] >= 1
+    # La última vuelta ya no lleva los cuatro resultados enteros.
+    assert sizes[-1] < 4 * 7200
+
+
+def test_agent_context_exhausted_salvages_instead_of_failing(tmp_path: Path, monkeypatch) -> None:
+    """Si ni recortando cabe, la tarea entrega lo último que dijo el modelo en
+    vez de morir con un error opaco del proveedor. Aquí lo que no cabe es el
+    propio mensaje del asistente, que nunca se compacta."""
+    from app.providers.base import AgentTurn, ToolCall
+    from app.providers.bootstrap import BootstrapModelProvider
+
+    verbose = "de momento la pista es 42. " + ("razonamiento en voz alta. " * 2400)
+
+    async def one_huge_call(self, request, model, messages, tools, *, allow_parallel=False):
+        return AgentTurn(
+            content=verbose,
+            tool_calls=(ToolCall(id="c", name="web_search", arguments={"query": "x"}),),
+            tokens_input=1, tokens_output=1, cost_usd=0.0, latency_ms=1.0,
+            raw_assistant_message={
+                "role": "assistant", "content": verbose,
+                "tool_calls": [{"id": "c", "type": "function",
+                                "function": {"name": "web_search", "arguments": '{"query": "x"}'}}],
+            },
+        )
+
+    async def small_skill(name, arguments, **kwargs):
+        return "resultado corto"
+
+    monkeypatch.setattr(BootstrapModelProvider, "agent_turn", one_huge_call)
+    monkeypatch.setattr("app.coordinator.run_skill", small_skill)
+    _force_context_window(monkeypatch, 16384)
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:no-window",
+            "content": {"prompt": "investiga"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 4}},
+        })
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    assert detail["task"]["status"] == "completed"
+    assert detail["result"]["agent"]["stop_reason"] == "context_exhausted"
+    content = detail["result"]["assistant_content"]
+    assert "42" in content  # lo que el modelo llegó a decir no se tira
+    assert "ventana de contexto" in content
+
+
+def test_agent_result_flags_citations_the_agent_never_consulted(tmp_path: Path, monkeypatch) -> None:
+    """El broker tiene delante qué URLs miró el agente; si la respuesta cita
+    otras, lo dice. No censura la respuesta: la acompaña del recuento."""
+    from app.providers.base import AgentTurn, ToolCall
+    from app.providers.bootstrap import BootstrapModelProvider
+
+    async def cites_more_than_it_read(self, request, model, messages, tools, *, allow_parallel=False):
+        if any(m.get("role") == "tool" for m in messages):
+            return AgentTurn(
+                content=(
+                    "Según https://real.com/dato el valor es 42, y lo confirma "
+                    "https://inventada.com/informe."
+                ),
+                tool_calls=(), tokens_input=1, tokens_output=1, cost_usd=0.0, latency_ms=1.0,
+                raw_assistant_message={"role": "assistant", "content": "respuesta"},
+            )
+        return AgentTurn(
+            content=None,
+            tool_calls=(ToolCall(id="c1", name="fetch_url", arguments={"url": "https://real.com/dato"}),),
+            tokens_input=1, tokens_output=1, cost_usd=0.0, latency_ms=1.0,
+            raw_assistant_message={"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "fetch_url", "arguments": '{"url": "https://real.com/dato"}'}},
+            ]},
+        )
+
+    async def fake_skill(name, arguments, **kwargs):
+        return "el valor es 42"
+
+    monkeypatch.setattr(BootstrapModelProvider, "agent_turn", cites_more_than_it_read)
+    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:citas",
+            "content": {"prompt": "investiga el valor"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["fetch_url"], "max_iterations": 4}},
+        })
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    citations = detail["result"]["agent"]["citations"]
+    assert citations["cited"] == 2
+    assert citations["unsupported"] == ["https://inventada.com/informe"]
+    assert [e for e in detail["events"] if e["event_type"] == "agent.unsupported_citations"]
+    # La respuesta se entrega íntegra: esto informa, no censura.
+    assert "inventada.com" in detail["result"]["assistant_content"]
+
+
+def test_agent_result_omits_citations_when_the_answer_has_no_links(tmp_path: Path) -> None:
+    """El caso normal no genera ruido: sin enlaces citados no hay nada que cotejar."""
+    with _client(tmp_path) as client:
+        created = client.post("/api/v1/tasks", json={
+            "idempotency_key": "agent:sin-citas",
+            "content": {"prompt": "¿Qué tiempo hace hoy?"},
+            "execution": {"strategy": "agent", "agent": {"skills": ["web_search"], "max_iterations": 4}},
+        })
+        task_id = created.json()["task_id"]
+        client.post("/api/v1/dispatcher/tick")
+        detail = client.get(f"/api/v1/dashboard/tasks/{task_id}").json()
+
+    assert "citations" not in detail["result"]["agent"]
+
+
+def _force_context_window(monkeypatch, tokens: int) -> None:
+    """El proveedor bootstrap declara 1M de ventana; para ejercitar el recorte
+    hace falta una ventana de tamaño realista."""
+    from app.coordinator import ConsensusCoordinator
+
+    async def fixed(self, model) -> int:
+        return tokens
+
+    monkeypatch.setattr(ConsensusCoordinator, "_context_window_for", fixed)
+
+
 def test_agent_system_prompt_carries_output_language(tmp_path: Path, monkeypatch) -> None:
     """El loop agéntico ya lleva system prompt del broker, así que output.language
     sí manda ahí (en single seguiría siendo metadata inerte)."""
@@ -209,6 +478,67 @@ def test_ollama_chat_tools_parses_native_tool_calls() -> None:
     assert turn.tool_calls[0].name == "web_search"
     assert turn.tool_calls[0].arguments == {"query": "clima"}
     assert turn.tokens_input == 10
+
+
+def test_chat_tools_omits_the_tools_key_when_there_are_none() -> None:
+    """El turno de cierre del bucle llega sin tools. Mandar `"tools": []` es un
+    400 en los servidores estrictos de la familia OpenAI, así que la clave se
+    omite entera (y con ella `tool_choice`)."""
+    import asyncio
+    import json as jsonlib
+
+    from app.config import BrokerConfig, OpenAICompatibleProviderConfig
+    from app.providers import OllamaProvider
+    from app.providers.openai_compatible import OpenAICompatibleProvider
+    from app.schemas import TaskCreateRequest
+
+    bodies: dict[str, dict] = {}
+
+    def ollama_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [
+                {"name": "qwen3:8b", "size": 1, "context_length": 8192,
+                 "capabilities": ["completion", "tools"]},
+            ]})
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": []})
+        if request.url.path == "/api/generate":
+            return httpx.Response(200, json={})
+        if request.url.path == "/api/chat":
+            bodies["ollama"] = jsonlib.loads(request.content)
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "respuesta con lo reunido"},
+                "prompt_eval_count": 10, "eval_count": 3,
+            })
+        return httpx.Response(404)
+
+    def openai_handler(request: httpx.Request) -> httpx.Response:
+        bodies["openai"] = jsonlib.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "respuesta con lo reunido"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        })
+
+    request = TaskCreateRequest(idempotency_key="close:no-tools", content={"prompt": "x"})
+    messages = [{"role": "user", "content": "x"}]
+
+    ollama = OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(ollama_handler))
+    asyncio.run(ollama.chat_tools(request, "qwen3:8b", messages, []))
+    asyncio.run(ollama.close())
+
+    compatible = OpenAICompatibleProvider(
+        OpenAICompatibleProviderConfig(
+            id="lmstudio", enabled=True, display_name="LM Studio",
+            base_url="http://127.0.0.1:1234/v1", api_key_env=None, deployment="local",
+        ),
+        transport=httpx.MockTransport(openai_handler),
+    )
+    asyncio.run(compatible.chat_tools(request, "modelo", messages, []))
+    asyncio.run(compatible.close())
+
+    assert "tools" not in bodies["ollama"]
+    assert "tools" not in bodies["openai"]
+    assert "tool_choice" not in bodies["openai"]
 
 
 def test_agent_precheck_blocks_model_without_tools_before_enqueue(tmp_path: Path, monkeypatch) -> None:

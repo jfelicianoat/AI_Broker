@@ -1,0 +1,33 @@
+{# Confirmación de borrado de un modelo local. Sustituye a la celda del botón
+   dentro de su propia fila: la pregunta aparece donde estaba el botón, junto
+   al modelo del que habla, y no en un diálogo aparte que hay que relacionar
+   mentalmente con la fila que se pulsó. #}
+<div class="model-delete-confirm" role="alertdialog" aria-label="Confirmar borrado de {{ model }}">
+  <p class="model-delete-question">
+    <strong>¿Borrar {{ model }} del disco?</strong>
+    {% if size_bytes %}<span>Libera {{ (size_bytes / 1024**3)|round(1) }} GB.</span>{% endif %}
+    <span>No se puede deshacer: habrá que descargarlo entero otra vez.</span>
+  </p>
+  {% if consequences %}
+    {# Lo que dejará de funcionar. Va ANTES de los botones y no plegado: es
+       información que cambia la decisión, no una nota al pie. #}
+    <div class="model-delete-consequences">
+      <strong>Esto además romperá:</strong>
+      <ul>
+        {% for consequence in consequences %}<li>{{ consequence }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+  <div class="model-delete-actions">
+    <form method="post" action="/dashboard/actions/models/delete">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="provider" value="{{ provider }}">
+      <input type="hidden" name="model" value="{{ model }}">
+      {# El nombre viaja también como `confirm`: sin él el endpoint solo
+         devuelve esta pregunta, nunca borra. #}
+      <input type="hidden" name="confirm" value="{{ model }}">
+      <button class="button danger compact" type="submit">Sí, borrar</button>
+    </form>
+    <a class="button secondary compact" href="/dashboard/models">Cancelar</a>
+  </div>
+</div>

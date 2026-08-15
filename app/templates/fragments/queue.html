@@ -58,6 +58,19 @@
                 {%- if task.memory_block.reserved_until %} · turno reservado{% endif %}
               </small>
             {% endif %}
+            {% if task.dependency_wait %}
+              {# Mismo criterio que la espera por memoria: "Esperando
+                 dependencias" a secas no deja decidir si cancelar. #}
+              <small class="memory-wait">
+                {%- if task.dependency_wait.group %}
+                  faltan {{ task.dependency_wait.group_pending }} del grupo «{{ task.dependency_wait.group }}»
+                {%- endif %}
+                {%- if task.dependency_wait.tasks %}
+                  {% if task.dependency_wait.group %}·{% endif %}
+                  {{ task.dependency_wait.tasks|length }} tarea(s) sin terminar
+                {%- endif %}
+              </small>
+            {% endif %}
           </td>
           <td class="align-right actions">
             <button class="link-button" type="button"

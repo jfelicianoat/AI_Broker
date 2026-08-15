@@ -146,6 +146,31 @@
       <p>La respuesta del modelo único puntuó {{ '%.2f'|format(escalated[0].payload.confidence) }} de confianza; el broker escaló al consenso.</p>
     </div>
   {% endif %}
+  {% set dependency_timeouts = (detail.events|selectattr('event_type', 'equalto', 'task.dependency_timeout')|list) %}
+  {% if dependency_timeouts %}
+    <div class="alert warning">
+      <strong>Se ejecutó sin esperar a sus dependencias</strong>
+      <p>Tras {{ dependency_timeouts[0].payload.waited_seconds }} s de espera (tope {{ dependency_timeouts[0].payload.timeout_seconds }} s) seguían sin terminar{% if dependency_timeouts[0].payload.group_pending %} {{ dependency_timeouts[0].payload.group_pending }} tarea(s) del grupo «{{ dependency_timeouts[0].payload.group }}»{% endif %}{% if dependency_timeouts[0].payload.tasks %} {{ dependency_timeouts[0].payload.tasks|length }} tarea(s) declarada(s){% endif %}. La respuesta puede estar construida sobre trabajo incompleto.</p>
+    </div>
+  {% endif %}
+  {% set round_gate = (detail.events|selectattr('event_type', 'equalto', 'consensus.round_gate')|list) %}
+  {% if round_gate and round_gate[0].payload.second_round %}
+    <div class="alert info">
+      <strong>Segunda ronda de consenso</strong>
+      {% if round_gate[0].payload.score is not none %}
+        <p>La síntesis de la primera ronda puntuó {{ '%.2f'|format(round_gate[0].payload.score) }} de confianza, por debajo del umbral {{ round_gate[0].payload.threshold }}; los proponentes la revisaron.</p>
+      {% else %}
+        <p>Segunda ronda sin juzgar la primera (<code>max_judges: 0</code>): los proponentes revisaron la síntesis anterior.</p>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% set round_failed = (detail.events|selectattr('event_type', 'equalto', 'consensus.round_failed')|list) %}
+  {% if round_failed %}
+    <div class="alert warning">
+      <strong>Segunda ronda descartada</strong>
+      <p>{{ round_failed[0].payload.code }}: se conserva la síntesis de la primera ronda{% if round_failed[0].payload.detail %} ({{ round_failed[0].payload.detail }}){% endif %}.</p>
+    </div>
+  {% endif %}
   {% if detail.task.status.value == 'waiting_for_tools' and detail.result and detail.result.get('pending_tool_calls') %}
     <div class="alert info">
       <strong>Esperando resultados de herramientas del cliente</strong>
@@ -164,7 +189,14 @@
         <div>
           <h2>Actividad del agente</h2>
           {% set agent_result = (detail.result or {}).get('agent') or {} %}
-          <p>{{ agent_result.get('iterations', tool_events|length) }} iteración(es){% if agent_result.get('stop_reason') %} · fin: {{ agent_result.stop_reason }}{% endif %}{% if agent_result.get('skills') %} · skills: {{ agent_result.skills|join(', ') }}{% endif %}</p>
+          <p>{{ agent_result.get('iterations', tool_events|length) }} iteración(es){% if agent_result.get('stop_reason') %} · fin: {{ agent_result.stop_reason }}{% endif %}{% if agent_result.get('final_turn') %} · turno de cierre sin tools{% endif %}{% if agent_result.get('skills') %} · skills: {{ agent_result.skills|join(', ') }}{% endif %}</p>
+          {% set citations = agent_result.get('citations') %}
+          {% if citations %}
+          <p class="muted">{{ citations.cited }} enlace(s) citado(s){% if citations.unsupported %} · <strong>{{ citations.unsupported|length }} sin respaldo en lo consultado</strong>{% else %} · todos consultados{% endif %}</p>
+          {% if citations.unsupported %}
+          <ul class="muted">{% for url in citations.unsupported[:5] %}<li>{{ url }}</li>{% endfor %}</ul>
+          {% endif %}
+          {% endif %}
         </div>
       </div>
       {% if tool_events %}

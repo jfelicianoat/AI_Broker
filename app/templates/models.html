@@ -28,6 +28,12 @@
             <p>{{ model_probe.message }}</p>
           </div>
         {% endif %}
+        {% if model_delete %}
+          <div class="alert {{ model_delete.kind }}">
+            <strong>{{ model_delete.title }}</strong>
+            <p>{{ model_delete.message }}</p>
+          </div>
+        {% endif %}
 
         <section class="metric-grid models-overview" aria-label="Resumen de modelos">
           <div class="metric-card"><span class="metric-label">Modelos catalogados</span><strong>{{ model_stats.total }}</strong><small>{{ model_stats.providers }} proveedor(es), {{ model_stats.deployments }} deployment(s)</small></div>
@@ -61,6 +67,7 @@
                 <table id="models-catalog-table">
                   <thead>
                     <tr>
+                      <th scope="col"><span class="visually-hidden">Acciones</span></th>
                       <th scope="col">Modelo</th>
                       <th scope="col">Proveedor</th>
                       <th scope="col">Deployment</th>
@@ -75,6 +82,23 @@
                     {% for model in models %}
                       <tr data-caps="{{ (model|model_effective_caps)|join(' ') }}"
                           data-compat="{{ model.compatibility or 'unknown' }}">
+                        <td class="model-actions">
+                          {# Solo Ollama local: es el único proveedor con API de
+                             borrado, y por tanto el único donde el runtime sabe
+                             qué blobs quedan sin referenciar. Un modelo de
+                             Ollama Cloud no ocupa disco aquí. #}
+                          {% if model.provider|lower == 'ollama' and model.deployment == 'local' %}
+                            <button class="button danger compact" type="button"
+                                    hx-post="/dashboard/actions/models/delete"
+                                    hx-vals='{"provider": {{ model.provider|tojson }}, "model": {{ model.name|tojson }}}'
+                                    hx-headers='{"X-CSRF-Token": {{ csrf_token|tojson }}}'
+                                    hx-target="closest td"
+                                    hx-swap="innerHTML"
+                                    title="Borrar {{ model.name }} del disco duro">
+                              Borrar
+                            </button>
+                          {% endif %}
+                        </td>
                         <td>
                           <strong>{{ model.name }}</strong>
                           <small class="compatibility-error" {% if not model.compatibility_error %}hidden{% endif %}>{{ model.compatibility_error or '' }}</small>

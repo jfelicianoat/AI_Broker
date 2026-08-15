@@ -144,13 +144,19 @@ class DeepSeekProvider:
     ) -> AgentTurn:
         """Una ronda de /chat/completions con tools (formato OpenAI)."""
         started = datetime.now(timezone.utc)
+        body: dict[str, Any] = {
+            "model": model, "messages": messages,
+            "temperature": request.generation.temperature,
+            "max_tokens": request.generation.max_output_tokens,
+            "stream": False,
+        }
+        # Sin tools se omiten ambas claves: `"tools": []` es un 400 en la API
+        # de DeepSeek, y el turno de cierre del bucle agéntico llega así.
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
         try:
-            response = await self.client.post("/chat/completions", headers=self._headers(), json={
-                "model": model, "messages": messages,
-                "temperature": request.generation.temperature,
-                "max_tokens": request.generation.max_output_tokens,
-                "stream": False, "tools": tools, "tool_choice": "auto",
-            })
+            response = await self.client.post("/chat/completions", headers=self._headers(), json=body)
             response.raise_for_status()
             payload = response.json()
         except ProviderError:

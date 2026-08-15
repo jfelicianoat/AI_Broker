@@ -567,6 +567,28 @@ En `single`, el progreso se limita a `queued`, `routing`, `generating` y un esta
 
 > **¿Solo quieres integrar una aplicación?** [`docs/Client_API.md`](docs/Client_API.md) es la especificación autocontenida y al día: qué enviar, qué recibir y qué errores esperar, sin tener que reconstruirlo leyendo este histórico de versiones.
 
+### Novedades del contrato 2.8 (14 de agosto de 2026)
+
+`GET /api/v1/capabilities` devuelve `contract_version: "2.8"`, dos flags nuevos (`task_dependencies: true` y `agent_skills_egress`) y un estado nuevo, `waiting_for_dependencies`.
+
+**Dependencias entre tareas.** Una tarea puede declarar que no debe correr hasta que otras hayan terminado, por identificador (`depends_on`) o por etiqueta (`group` en las que bloquean, `depends_on_group` en la que espera). El caso que lo motiva: un documento que se indexa en cientos de tareas de embedding y una pregunta sobre él que no debe responderse con el índice a medias; enviar esos cientos de identificadores en cada pregunta no es viable, de ahí el grupo.
+
+Mientras espera, la tarea pasa a `waiting_for_dependencies`, hermano de `waiting_for_memory`: no es un fallo, **no consume el workflow único** —lo cual es la condición para que su propia dependencia pueda correr— y conserva su posición en la cola.
+
+**La dependencia ordena, no condiciona.** Es una decisión de producto, no una limitación: si una dependencia falla, se cancela, no existe, o la espera supera `execution.timeout_seconds`, la tarea **se ejecuta igual** con un aviso en `result.warnings`. En ningún caso una dependencia incumplida hace fallar la tarea de quien esperaba. Un cliente que necesite lo contrario debe mirar `result.warnings` y decidir por su cuenta; por eso el aviso viaja en el resultado y no solo en los eventos, donde no lo vería nadie.
+
+El grupo se evalúa **en cada reclamo, sobre las tareas que existen en ese momento**. Las creadas después de que la dependiente haya sido reclamada no se esperan. En la práctica significa que el cliente debe encolar todas las tareas del grupo *antes* de encolar la que espera — requisito mucho más suave que esperar a que terminen, pero requisito.
+
+**La frontera de datos cubre las herramientas.** `web_search` y `fetch_url` sacan contenido de la máquina, así que bajo `confidential` o `local_only` se rechazan en validación (`422`) igual que un `target_model` cloud. Hasta 2.7 se aceptaban: el modelo se quedaba en local y la consulta salía igual a un buscador. Un default del broker no hace fallar la petición —si el cliente no elige skills, la lista se acota sola a las locales—, pero pedirlas por su nombre sí. Con `strategy: auto` y frontera local, el meta-router deja de elegir `agent` por señales de red: sin skills de red esa estrategia no puede cumplir su motivo.
+
+**Guardarraíles del bucle agéntico.** Agotar `max_iterations` deja de devolver un mensaje de error con el trabajo hecho tirado: se pide una última respuesta sin herramientas (`result.agent.final_turn`). La conversación se mide contra la ventana del modelo antes de cada vuelta y los resultados de herramienta antiguos se recortan; si aun así no cabe, `stop_reason: "context_exhausted"` con lo último que dijo el modelo. Los enlaces que cita un agente se cotejan contra los que consultó de verdad (`result.agent.citations`).
+
+**Segunda ronda de consenso.** `max_rounds: 2` deja de ser un campo que se acepta y se ignora. Es un techo, no una orden: con `max_judges >= 1` la segunda ronda solo se paga si el juez de confianza no da por buena la síntesis de la primera. Ninguna ronda 2 fallida puede dejar la tarea peor que si no se hubiera intentado.
+
+**Cliente MCP (stdio).** El broker puede lanzar servidores MCP como subprocesos y ofrecer sus herramientas al bucle agéntico (`execution.agent.mcp_servers`), con nombres cualificados `mcp__<servidor>__<tool>` para que un servidor no pueda suplantar una skill del broker ni una tool del cliente. Off por defecto. Sin transporte HTTP a propósito, y con la frontera de datos declarada por servidor y **obligatoria**: deducirla del transporte mentiría con un servidor stdio que por dentro llama a internet. Detalle en [`docs/MCP_Servers.md`](docs/MCP_Servers.md).
+
+**Qué cambia para una app cliente:** trata `waiting_for_dependencies` como estado no terminal más. Revisa si pides `web_search` o `fetch_url` en tareas `confidential`/`local_only`: ese es el único punto que puede empezar a dar `422`.
+
 ### Novedades del contrato 2.7 (28 de julio de 2026)
 
 `GET /api/v1/capabilities` devuelve `contract_version: "2.7"`. Un estado nuevo, `waiting_for_memory`, y un código de error nuevo, `VRAM_MODEL_TOO_LARGE`.

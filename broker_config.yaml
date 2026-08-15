@@ -23,6 +23,7 @@ processing:
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
   provider_mode: real
+  dependency_wait_seconds: 2.0
 prompt_compression:
   enabled: true
   level: aggressive
@@ -62,6 +63,10 @@ sandbox:
   pids_limit: 256
   max_output_chars: 8000
   work_volume_mb: 256
+mcp:
+  enabled: false
+  servers: []
+  startup_timeout_seconds: 20.0
 resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0
@@ -127,9 +132,9 @@ task_affinity:
     - '*-code'
     - '*-code:*'
 strategy_router:
-  enabled: false
+  enabled: true
   heuristic_classifier: true
-  confidence_escalation: false
+  confidence_escalation: true
   adaptive_learning: false
   record_cases: true
   mixture_min_prompt_chars: 600
@@ -322,9 +327,11 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: compatible
-      compatibility_checked_at: '2026-07-16T19:39:55.699771+00:00'
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-08-15T07:42:34.782488+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":{"message":"Failed to load model \"qwen/qwen3-coder-30b\". Error:
+        Engine protocol startup was aborted.","type":"invalid_request_error","param":"model","code":null}}'
       features:
         vision: false
         json_mode: false
@@ -364,13 +371,13 @@ providers:
       capabilities:
       - completion
       compatibility: compatible
-      compatibility_checked_at: '2026-07-16T19:42:00.336824+00:00'
+      compatibility_checked_at: '2026-08-15T07:45:19.008918+00:00'
       compatibility_error: null
       features:
         vision: false
         json_mode: false
         tools: true
-      features_checked_at: '2026-07-16T19:42:10.181408+00:00'
+      features_checked_at: '2026-08-15T07:45:19.602764+00:00'
     - name: kimi-k2.7-code-ud-layers
       context_window: 32768
       input_cost_per_million: 0.0
@@ -589,7 +596,7 @@ providers:
       capabilities:
       - embedding
       compatibility: error
-      compatibility_checked_at: '2026-08-11T17:36:25.839576+00:00'
+      compatibility_checked_at: '2026-08-15T07:41:18.548098+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/embeddings:
         {"error":"Something went wrong with the request."}'
       features: {}
@@ -1238,7 +1245,7 @@ providers:
       capabilities:
       - completion
       compatibility: error
-      compatibility_checked_at: '2026-08-11T17:36:57.741896+00:00'
+      compatibility_checked_at: '2026-08-15T07:41:20.754737+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
         Server Error","status":500,"detail":"Internal error while making inference
@@ -2432,10 +2439,36 @@ providers:
       capabilities:
       - completion
       compatibility: compatible
-      compatibility_checked_at: '2026-08-11T17:36:04.819657+00:00'
+      compatibility_checked_at: '2026-08-15T07:42:55.866139+00:00'
       compatibility_error: null
       features:
         vision: true
         json_mode: true
         tools: true
-      features_checked_at: '2026-08-11T17:36:12.024551+00:00'
+      features_checked_at: '2026-08-15T07:43:13.758890+00:00'
+    - name: glm-5.3
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-08-15T07:41:29.190977+00:00'
+      compatibility_error: 'HTTP 502 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"all upstream channels failed","type":"upstream_error","param":"","code":"upstream_error"}}'
+      features: {}
+      features_checked_at: null
+    - name: Qwen3.8-27B
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-15T07:45:28.883095+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-15T07:45:33.865386+00:00'

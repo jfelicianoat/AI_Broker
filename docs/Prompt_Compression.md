@@ -38,8 +38,9 @@ Esos proyectos actúan por instrucciones de estilo sobre la **salida** del model
 | Prompt original en `mixture_of_agents` (proponentes y `<original_request>` del árbitro) | Sí |
 | Prompt que entra en un loop de tools (`agent`, `auto`, mixture con `proposer_skills`) | Sí, pero nunca por encima de `medium` (ver abajo) |
 | Candidatos de los proponentes dentro de la síntesis del árbitro | No |
+| Síntesis anterior dentro de la petición de la segunda ronda (`max_rounds: 2`) | No: la petición viaja con `prompt_compression: "off"` |
 | Embeddings (`inference_kind = embedding`) | Nunca: alterar el texto altera el vector |
-| System prompts de roles | No |
+| System prompts de roles (texto literal en [`System_Prompts.md`](System_Prompts.md)) | No |
 | Código, URLs y correos dentro del prompt | Nunca (protegidos byte a byte) |
 
 El punto de aplicación es `RoutedModelProvider.user_prompt` (`app/providers/routing.py`), el punto único por donde los prompts salen hacia cualquier proveedor real (Ollama, DeepSeek, OpenAI-compatible). El proveedor `bootstrap` de pruebas no comprime.

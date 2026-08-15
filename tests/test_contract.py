@@ -2,7 +2,9 @@ import json
 from pathlib import Path
 
 import jsonschema
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import BrokerConfig, PersistenceConfig, ProcessingConfig
 from app.main import create_app
@@ -133,6 +135,61 @@ def test_local_only_forces_ollama_provider() -> None:
 
     assert payload.model_requirements.cloud_allowed is False
     assert payload.model_requirements.allowed_providers == ["ollama"]
+
+
+def test_local_boundary_rejects_skills_that_leave_the_machine() -> None:
+    """`local_only` apagaba los proveedores cloud y acto seguido dejaba a
+    web_search mandar la consulta a un buscador: da igual que el modelo sea
+    local si el texto de la tarea sale igual. Pedirlas explícitamente falla."""
+    for classification in ("local_only", "confidential"):
+        with pytest.raises(ValidationError) as error:
+            TaskCreateRequest.model_validate({
+                "idempotency_key": f"contract:egress-{classification}",
+                "content": {"prompt": "Privado"},
+                "risk": {"data_classification": classification},
+                "execution": {
+                    "strategy": "agent",
+                    "agent": {"skills": ["web_search", "calculator"]},
+                },
+            })
+        assert "off this machine: web_search" in str(error.value)
+
+    # Y lo mismo por la vía de los proponentes de un mixture.
+    with pytest.raises(ValidationError) as error:
+        TaskCreateRequest.model_validate({
+            "idempotency_key": "contract:egress-proposers",
+            "content": {"prompt": "Privado"},
+            "risk": {"data_classification": "local_only"},
+            "execution": {"strategy": "mixture_of_agents", "proposer_skills": ["fetch_url"]},
+        })
+    assert "off this machine: fetch_url" in str(error.value)
+
+
+def test_local_boundary_narrows_default_skills_instead_of_failing() -> None:
+    """Un default del broker no puede hacer fallar la tarea del cliente: si no
+    eligió skills, la lista se acota a las locales. Las skills locales pedidas a
+    mano siguen pasando intactas, y sin frontera no se toca nada."""
+    narrowed = TaskCreateRequest.model_validate({
+        "idempotency_key": "contract:egress-defaults",
+        "content": {"prompt": "Privado"},
+        "risk": {"data_classification": "local_only"},
+    })
+    assert narrowed.execution.agent.skills == ["calculator", "current_datetime"]
+
+    explicit = TaskCreateRequest.model_validate({
+        "idempotency_key": "contract:egress-explicit-local",
+        "content": {"prompt": "Privado"},
+        "risk": {"data_classification": "confidential"},
+        "execution": {"strategy": "agent", "agent": {"skills": ["run_code"]}},
+    })
+    assert explicit.execution.agent.skills == ["run_code"]
+
+    open_boundary = TaskCreateRequest.model_validate({
+        "idempotency_key": "contract:egress-internal",
+        "content": {"prompt": "Público"},
+        "risk": {"data_classification": "internal"},
+    })
+    assert "web_search" in open_boundary.execution.agent.skills
 
 
 def test_local_only_allows_lmstudio_local_provider() -> None:

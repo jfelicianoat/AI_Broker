@@ -52,6 +52,7 @@ from app.dashboard_forms import (
 )
 from app.ingestion.detection import ALLOWED_FORMATS
 from app.ingestion.service import AttachmentError, stream_upload_to_temp
+from app.model_references import deletion_warnings
 from app.model_stats import load_model_stats
 from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
@@ -301,6 +302,9 @@ def create_dashboard_router(
         model_probe: str | None = None,
         model_name: str | None = None,
         model_error: str | None = None,
+        model_delete: str | None = None,
+        model_deleted: str | None = None,
+        model_freed: str | None = None,
     ):
         catalog, catalog_error = await models()
         resource_snapshot = await resources()
@@ -315,6 +319,10 @@ def create_dashboard_router(
                 "model_stats": _model_dashboard_stats(catalog, resource_snapshot),
                 "probeable_provider_ids": _probeable_provider_ids(config),
                 "model_probe": _model_probe_notice(model_probe, model_name, model_error),
+                "model_delete": _model_delete_notice(
+                    model_delete, model_deleted, model_freed, model_error,
+                ),
+                "csrf_token": _csrf_token(request),
                 "nav_active": "modelos",
             },
         )
@@ -783,6 +791,88 @@ def create_dashboard_router(
                 },
                 status_code=422,
             )
+        return RedirectResponse(f"/dashboard/models?{urlencode(query)}", status_code=303)
+
+    @protected.post("/dashboard/actions/models/delete", response_class=HTMLResponse)
+    async def delete_local_model(request: Request):
+        """Borra del disco un modelo local, en dos pasos.
+
+        El primer POST no borra: devuelve la confirmación con el nombre y el
+        tamaño que se va a liberar. Solo el segundo, que llega con
+        `confirm=<nombre>`, ejecuta el borrado. Se hace así y no con un
+        `confirm()` del navegador por dos motivos: el diálogo nativo no puede
+        decir cuánto ocupa lo que vas a perder, y se puede tener silenciado.
+
+        Es la única acción irreversible del panel. Un modelo borrado hay que
+        volver a descargarlo entero.
+        """
+        form = await _read_urlencoded_form(request)
+        _verify_dashboard_mutation(request, form)
+        provider_id = form.get("provider", "").strip()
+        model_name = form.get("model", "").strip()
+        confirmed = form.get("confirm", "").strip()
+        query: dict[str, str] = {}
+        if not provider_id or not model_name:
+            query["model_delete"] = "error"
+            query["model_error"] = "Referencia de modelo incompleta."
+            return RedirectResponse(f"/dashboard/models?{urlencode(query)}", status_code=303)
+
+        if confirmed != model_name:
+            # Paso 1: se pinta la confirmación en la propia fila.
+            catalog, _ = await models()
+            entry = next(
+                (
+                    item for item in catalog
+                    if item.get("name") == model_name
+                    and str(item.get("provider") or "").lower() == provider_id.lower()
+                ),
+                None,
+            )
+            return templates.TemplateResponse(
+                request=request,
+                name="fragments/model_delete_confirm.html",
+                context={
+                    "provider": provider_id,
+                    "model": model_name,
+                    "size_bytes": int((entry or {}).get("size_bytes") or 0),
+                    # Qué deja de funcionar. No bloquea: la decisión sigue
+                    # siendo suya, pero no puede tomarla sin saberlo.
+                    "consequences": deletion_warnings(config, catalog, provider_id, model_name),
+                    "csrf_token": _csrf_token(request),
+                },
+            )
+
+        # Paso 2: borrado real.
+        try:
+            if repository.has_unfinished_task():
+                # No basta con mirar lo que se está ejecutando: una tarea que
+                # aún espera turno puede tener por delante justo este modelo, y
+                # se encontraría con un MODEL_UNAVAILABLE inexplicable. Con un
+                # solo workflow activo, vaciar la cola es cuestión de poco.
+                raise PromptTesterError(
+                    "Hay trabajo pendiente en la cola: espera a que termine (o cancélalo) "
+                    "antes de borrar modelos."
+                )
+            deleter = getattr(provider, "delete_local_model", None)
+            if deleter is None:
+                raise PromptTesterError("Este broker no permite borrar modelos.")
+            freed = await deleter(provider_id, model_name)
+            logger.warning(
+                "models.deleted",
+                extra={
+                    "event": "models.deleted", "provider": provider_id,
+                    "model": model_name, "freed_bytes": freed,
+                },
+            )
+            query["model_delete"] = "ok"
+            query["model_deleted"] = model_name
+            query["model_freed"] = str(freed)
+        except PromptTesterError as error:
+            query["model_delete"] = "error"
+            query["model_error"] = str(error)
+        except ProviderError as error:
+            query["model_delete"] = "error"
+            query["model_error"] = f"{error.code}: {error}"
         return RedirectResponse(f"/dashboard/models?{urlencode(query)}", status_code=303)
 
     @protected.post("/dashboard/actions/prompt-tester", response_class=HTMLResponse)
@@ -1274,6 +1364,32 @@ def _model_probe_notice(
         "kind": "success" if result == "compatible" else "warning",
         "title": "Compatibilidad actualizada",
         "message": f"{model_name or 'Modelo'} queda marcado como {label}.",
+    }
+
+
+def _model_delete_notice(
+    result: str | None,
+    model_name: str | None,
+    freed_bytes: str | None,
+    error: str | None,
+) -> dict[str, str] | None:
+    if result is None:
+        return None
+    if result != "ok":
+        return {
+            "kind": "danger",
+            "title": "No se ha borrado el modelo",
+            "message": error or "El proveedor no ha podido borrarlo.",
+        }
+    try:
+        freed = int(freed_bytes or 0)
+    except ValueError:
+        freed = 0
+    liberado = f" Liberados {freed / 1024**3:.1f} GB." if freed else ""
+    return {
+        "kind": "success",
+        "title": "Modelo borrado del disco",
+        "message": f"{model_name or 'El modelo'} ya no está en esta máquina.{liberado}",
     }
 
 

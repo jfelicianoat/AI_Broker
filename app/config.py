@@ -55,6 +55,11 @@ class ProcessingConfig(BaseModel):
     auto_dispatch: bool = True
     dispatcher_interval_seconds: float = Field(default=0.1, gt=0, le=60)
     provider_mode: Literal["real", "bootstrap"] = "real"
+    # Cada cuánto reintenta una tarea que espera a sus dependencias. Corto a
+    # propósito, y bastante menor que la espera por memoria: lo que bloquea está
+    # en esta misma cola y suele terminar en segundos, así que un intervalo
+    # largo añadiría a la respuesta un retraso que no lo causa nada.
+    dependency_wait_seconds: float = Field(default=2.0, ge=0.1, le=3600.0)
 
     @model_validator(mode="after")
     def validate_single_workflow(self) -> ProcessingConfig:
@@ -135,6 +140,46 @@ class IngestionConfig(BaseModel):
     isolate_conversions: bool = True
     images: IngestionImagesConfig = Field(default_factory=IngestionImagesConfig)
     transcription: IngestionTranscriptionConfig = Field(default_factory=IngestionTranscriptionConfig)
+
+
+class MCPServerConfig(BaseModel):
+    """Un servidor MCP que el broker lanza como subproceso local (transporte
+    stdio). Sin transporte HTTP a propósito: el broker no depende de ninguna
+    nube para funcionar, y un servidor remoto haría que cada herramienta suya
+    fuese una salida de datos más difícil de ver que un proveedor cloud.
+    """
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    enabled: bool = True
+    command: str = Field(min_length=1, max_length=512)
+    args: list[str] = Field(default_factory=list, max_length=32)
+    # Variables de entorno adicionales para el proceso hijo. El valor puede ser
+    # el NOMBRE de otra variable del entorno del broker con el prefijo `env:`,
+    # para no escribir credenciales en el YAML (misma regla que api_key_env).
+    env: dict[str, str] = Field(default_factory=dict)
+    # Frontera de datos de TODO lo que sirva este servidor. Obligatoria y sin
+    # valor por defecto a propósito: si se dedujese del transporte, un servidor
+    # stdio que por dentro llama a una API de internet quedaría marcado como
+    # local y la clasificación `local_only` volvería a prometer lo que no
+    # cumple. Quien añade el servidor sabe lo que hace; el broker no puede
+    # saberlo, así que lo pregunta en vez de suponerlo.
+    data_boundary: Literal["local", "egress"]
+    # Tope por llamada. Un servidor MCP colgado no puede quedarse con el turno.
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+
+
+class MCPConfig(BaseModel):
+    enabled: bool = False
+    servers: list[MCPServerConfig] = Field(default_factory=list, max_length=16)
+    # Tope de espera del handshake inicial (initialize + tools/list) al arrancar
+    # un servidor. Se paga una vez por servidor y proceso.
+    startup_timeout_seconds: float = Field(default=20.0, ge=1.0, le=300.0)
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> MCPConfig:
+        ids = [server.id for server in self.servers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("mcp.servers ids must be unique")
+        return self
 
 
 class SandboxConfig(BaseModel):
@@ -551,6 +596,7 @@ class BrokerConfig(BaseModel):
     prompt_compression: PromptCompressionConfig = Field(default_factory=PromptCompressionConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     model_quarantine: ModelQuarantineConfig = Field(default_factory=ModelQuarantineConfig)

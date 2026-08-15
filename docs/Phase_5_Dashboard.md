@@ -129,6 +129,20 @@ Los endpoints JSON públicos existentes mantienen su compatibilidad. Las proyecc
 - No se muestran confianza, atribucion, cobertura ni paralelismo inventado.
 - Pendiente: filtros/paginacion completos, detalle por candidato, comparacion entre varias tareas, QA visual automatizada y seguridad 5.5.
 
+## Borrado de modelos del disco (pantalla Modelos)
+
+Cada modelo **local de Ollama** lleva a su izquierda un botón `Borrar` que elimina el modelo del disco duro. Es la única acción irreversible del panel, y su diseño responde a eso:
+
+- **Dos pasos, no un `confirm()` del navegador.** El primer POST no borra: devuelve una confirmación dentro de la propia fila, con el nombre del modelo y los GB que se van a liberar. Solo el segundo POST, que viaja con `confirm=<nombre del modelo>`, ejecuta el borrado. El diálogo nativo no puede decir cuánto vas a perder, se puede tener silenciado en el navegador, y aparece desligado de la fila que lo lanzó.
+- **La confirmación se lee sin esfuerzo.** No se encoge a tamaño de nota al pie: es la pregunta más consecuente de la interfaz.
+- **Dice qué se va a romper**, no solo cuánto libera (`app.model_references.deletion_warnings`). Comprueba dos cosas: si el nombre del modelo está escrito a mano en `broker_config.yaml` —`ingestion.images.model`, `providers.deepseek.default_model`, `providers.custom[].models`—, que quedaría apuntando a algo inexistente y fallaría en la siguiente tarea que lo use; y si es el **último modelo local** con una capacidad crítica (`embedding`), en cuyo caso esa clase de tareas se queda sin dónde ejecutarse. Un modelo cloud superviviente no cuenta como recambio: sería contestar a otra pregunta, y a una que la clasificación de datos de esas tareas puede tener prohibida. Los patrones de `task_affinity` quedan fuera a propósito: una exclusión que deja de casar con algo no rompe nada, solo sobra. Y **sin consecuencias no se añade ruido**: un aviso que sale siempre enseña a ignorarlo.
+- **Solo donde el borrado es posible y honesto.** Ollama es el único proveedor con API de borrado, y el único capaz de saber qué blobs quedan sin referenciar cuando varios modelos comparten capas. Los modelos de Ollama Cloud no ocupan este disco (`MODEL_NOT_LOCAL`) y el resto de proveedores se rechazan (`MODEL_DELETE_UNSUPPORTED`) en vez de adivinar rutas y borrar ficheros a mano.
+- **No se borra con trabajo pendiente.** Basta una tarea en cola —no hace falta que se esté ejecutando— para rechazar la operación: una tarea que aún espera turno puede tener por delante justo ese modelo y se encontraría con un `MODEL_UNAVAILABLE` que nadie sabría explicar. Con un solo workflow activo, vaciar la cola es cuestión de poco.
+- **Antes de borrar se descarga de memoria**, para no dejar una copia en VRAM sirviendo un modelo que ya no existe en disco.
+- Queda registro: log `models.deleted` con proveedor, modelo y bytes liberados.
+
+El borrado físico lo ejecuta el runtime de Ollama (`DELETE /api/delete`), no el broker: es lo que garantiza que el almacén quede consistente.
+
 ## Seguridad
 
 - Todo prompt, respuesta y error se escapa como texto; no se renderiza Markdown o HTML del modelo sin sanitización explícita.
