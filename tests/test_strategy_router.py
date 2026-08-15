@@ -47,6 +47,31 @@ def test_classifier_long_prompt_to_mixture_and_budget_gate() -> None:
     assert any("presupuesto" in r for r in decision.reasons)
 
 
+def test_classifier_does_not_pick_agent_when_the_boundary_forbids_the_network() -> None:
+    """Bajo frontera local la tarea se queda sin skills de red, así que elegir
+    `agent` por "necesita datos actuales" sería elegir una estrategia incapaz de
+    cumplir su motivo. La señal se conserva —el caso se agrupa con los suyos—,
+    lo que cambia es la estrategia."""
+    config = StrategyRouterConfig(enabled=True)
+    private = {"risk": {"data_classification": "local_only"}}
+
+    decision = classify_request(_request("Dame el precio actual del oro", **private), config)
+    assert decision.strategy == "single"
+    assert decision.signals["needs_recent"] is True  # el bucket no se falsea
+    assert any("frontera de datos" in reason for reason in decision.reasons)
+
+    # `confidential` además marca high_stakes, que sí justifica deliberar.
+    confidential = {"risk": {"data_classification": "confidential"}}
+    assert classify_request(
+        _request("Resume esta página https://ejemplo.com", **confidential), config,
+    ).strategy == "mixture_of_agents"
+
+    # El cálculo se resuelve en esta máquina: ahí `agent` sobrevive.
+    assert classify_request(
+        _request("Calcula cuánto es 1234 * 55", **private), config,
+    ).strategy == "agent"
+
+
 def test_classifier_simple_prompt_to_single() -> None:
     config = StrategyRouterConfig(enabled=True)
     decision = classify_request(_request("¿Cuál es la capital de Francia?"), config)

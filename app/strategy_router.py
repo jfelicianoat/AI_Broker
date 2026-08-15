@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import StrategyRouterConfig
-from app.schemas import DataClassification, TaskCreateRequest
+from app.schemas import DataClassification, TaskCreateRequest, classification_allows_cloud
 
 # Señales de que la respuesta depende de información que el modelo no tiene
 # (posterior a su corte de conocimiento, actual, o verificable en la web).
@@ -202,4 +202,25 @@ def classify_request(request: TaskCreateRequest, config: StrategyRouterConfig) -
         "high_stakes": request.risk.data_classification == DataClassification.confidential,
         "budget_ok_for_mixture": budget is None or budget >= config.mixture_min_budget_usd,
     }
-    return strategy_for_signals(signals)
+    decision = strategy_for_signals(signals)
+    if decision.strategy == "agent" and not classification_allows_cloud(request.risk.data_classification):
+        # La frontera de datos manda sobre la heurística. Bajo `confidential` o
+        # `local_only` la tarea no tiene skills con salida a red (las apaga
+        # TaskCreateRequest.enforce_data_boundary), así que elegir `agent`
+        # porque "necesita información actual" es elegir una estrategia que ya
+        # no puede cumplir su propio motivo: gastaría vueltas de bucle para
+        # acabar respondiendo de memoria igual que un `single`.
+        #
+        # Se recalcula sin las señales de red en vez de fijar una estrategia a
+        # mano, para no duplicar la precedencia. Si la señal era de cálculo,
+        # `agent` sobrevive: la calculadora se resuelve en esta máquina.
+        decision = strategy_for_signals({**signals, "needs_recent": False, "has_url": False})
+        # El bucket no cambia: la señal existió y el caso tiene que agruparse
+        # con los suyos. Lo que cambia es lo que el broker puede hacer con ella.
+        decision.signals = signals
+        decision.reasons.insert(
+            0,
+            f"frontera de datos ({request.risk.data_classification.value}): sin skills "
+            "de red, la investigación en vivo no es posible",
+        )
+    return decision

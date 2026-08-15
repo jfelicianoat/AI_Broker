@@ -11,12 +11,15 @@ from uuid import uuid4
 
 from app.artifacts import ArtifactStore
 from app.db import Database, dumps_json
+from app.evidence import extract_urls, unsupported_citations
 from app.ingestion.service import split_expanded_prompt
+from app.mcp import MCPError, split_qualified_name
 from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.providers.base import (
     MIN_BYTES_PER_TOKEN,
     ROLE_SYSTEM_PROMPTS,
     estimate_tokens_upper_bound,
+    neutralize_consensus_delimiters,
     role_system_prompt,
     with_output_language,
 )
@@ -62,21 +65,104 @@ _TASK_FATAL_ERRORS = frozenset({
 })
 
 
+# Margen sobre la ventana al medir una conversación agéntica: la estimación es
+# una cota por bytes, no un tokenizer real, y la plantilla de chat del modelo
+# añade lo suyo por cada mensaje.
+_AGENT_CONTEXT_HEADROOM_TOKENS = 512
+# Lo que sobrevive de un resultado de tool compactado: bastante para que el
+# modelo recuerde qué consultó y con qué pinta volvió, no para releerlo entero.
+_COMPACTED_TOOL_RESULT_CHARS = 400
+# Los últimos resultados de tool no se compactan salvo como último recurso: son
+# los que el modelo está usando para razonar en la vuelta actual.
+_PROTECTED_TOOL_RESULTS = 2
+
+
+def _conversation_tokens(messages: list[dict[str, Any]]) -> int:
+    """Cota superior de los tokens que ocupa una conversación agéntica.
+
+    Misma regla que el preflight de contexto (bytes UTF-8), aplicada al
+    contenido de todos los mensajes y a los argumentos de las tool_calls, que
+    también viajan y en una búsqueda larga no son despreciables.
+    """
+    total = 0
+    for message in messages:
+        total += estimate_tokens_upper_bound(str(message.get("content") or ""))
+        for call in message.get("tool_calls") or []:
+            function = (call or {}).get("function") or {}
+            total += estimate_tokens_upper_bound(
+                f"{function.get('name') or ''}{function.get('arguments') or ''}"
+            )
+    return total
+
+
+def _last_assistant_content(messages: list[dict[str, Any]]) -> str | None:
+    """Lo último que dijo el modelo en una conversación agéntica, si dijo algo.
+
+    Un turno con tool_calls puede traer texto además de las llamadas (un
+    preámbulo, un avance parcial). Cuando el bucle se corta sin respuesta final
+    eso es lo único aprovechable que hay sin pagar otra invocación.
+    """
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = (message.get("content") or "").strip()
+        if content:
+            return content
+    return None
+
+
 @dataclass
 class AgentLoopResult:
     """Resultado de un bucle de tool-calling: la respuesta final del modelo,
     las invocaciones LLM realizadas (para coste/artefactos) y por qué paró."""
     content: str | None
     outputs: list[ModelOutput] = field(default_factory=list)
-    # completed | max_iterations | budget_exhausted | cancelled | waiting_for_tools
+    # completed | max_iterations | budget_exhausted | context_exhausted |
+    # cancelled | waiting_for_tools
     stop_reason: str = "completed"
     tool_calls: int = 0
     last_invocation_id: str | None = None
     iteration: int = 0
+    # Hubo turno de cierre sin tools (ver Coordinator._final_answer_turn). Es
+    # una invocación más dentro de `outputs`, pero NO una ronda del bucle: quien
+    # informe de iteraciones tiene que descontarla para no contradecir el tope.
+    final_turn: bool = False
     # Solo en waiting_for_tools: llamadas del cliente pendientes y la
     # conversación completa a congelar para reanudar tras resolverlas.
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _RoundOutcome:
+    """Lo que deja una ronda de propuestas del consenso."""
+    proposals: list[tuple[ModelReference, ModelOutput]] = field(default_factory=list)
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    max_parallel_launched: int = 0
+    # La cancelación sube por aquí en vez de por una excepción: el llamante ya
+    # tiene que decidir qué escribe en la tarea, y son dos sitios distintos
+    # según la ronda en la que se cancele.
+    cancelled: bool = False
+
+
+@dataclass
+class _SecondRound:
+    """Lo que deja el intento de segunda ronda.
+
+    `synthesis is None` significa que la tarea se queda con la ronda 1: puede
+    ser porque el juez la dio por buena, porque no quedaba presupuesto o porque
+    la ronda 2 falló. Los tres casos se ven igual desde fuera a propósito — la
+    ronda 2 no puede empeorar el resultado— y se distinguen por los eventos.
+    """
+    confidence: float | None = None
+    # Invocaciones ya pagadas que dejan de estar representadas en el resultado
+    # (el juez, y las de la ronda 1 cuando la 2 la sustituye). Sin ellas el
+    # coste que se informa sería menor que el real.
+    extra_outputs: list[ModelOutput] = field(default_factory=list)
+    proposals: list[tuple[ModelReference, ModelOutput]] = field(default_factory=list)
+    skipped: list[dict[str, Any]] = field(default_factory=list)
+    max_parallel_launched: int = 0
+    synthesis: _Synthesis | None = None
 
 
 @dataclass(frozen=True)
@@ -103,11 +189,15 @@ class ConsensusCoordinator:
         provider: Any | None = None,
         ingestion: Any | None = None,
         sandbox: Any | None = None,
+        mcp: Any | None = None,
     ) -> None:
         self.db = db
         self.scheduler = scheduler
         self.artifacts = artifacts or ArtifactStore()
         self.provider = provider or BootstrapModelProvider()
+        # Registro MCP opcional: herramientas de servidores de terceros para el
+        # bucle agéntico. None = el broker corre sin MCP, como hasta ahora.
+        self.mcp = mcp
         # IngestionService opcional: expande los adjuntos broker_file a Markdown
         # dentro del prompt en el momento del despacho.
         self.ingestion = ingestion
@@ -166,6 +256,97 @@ class ConsensusCoordinator:
         await self.process_task(repository, task_id)
         return task_id
 
+    @staticmethod
+    def _dependency_warnings(repository, task_id: str) -> list[str]:
+        """Avisos en texto de las dependencias que no se cumplieron.
+
+        Se reconstruyen de los eventos en vez de acarrearse por la ejecución:
+        los eventos ya son el registro persistente de lo que pasó, y la espera
+        ocurre mucho antes de que exista un resultado donde escribirlos.
+        """
+        warnings: list[str] = []
+        for payload in repository.event_payloads(task_id, "task.dependency_unknown"):
+            tasks = payload.get("tasks") or []
+            if tasks:
+                warnings.append(
+                    "dependencias inexistentes, no se esperó por ellas: " + ", ".join(tasks)
+                )
+        for payload in repository.event_payloads(task_id, "task.dependency_timeout"):
+            parts = []
+            if payload.get("tasks"):
+                parts.append(f"{len(payload['tasks'])} tarea(s) sin terminar")
+            if payload.get("group_pending"):
+                parts.append(f"{payload['group_pending']} del grupo «{payload.get('group')}»")
+            detail = " y ".join(parts) or "dependencias sin cumplir"
+            warnings.append(
+                f"se ejecutó sin esperar a sus dependencias ({detail}) tras "
+                f"{payload.get('waited_seconds')} s de espera: la respuesta puede "
+                "estar construida sobre trabajo incompleto"
+            )
+        return warnings
+
+    def _await_dependencies(self, repository, task_id: str, request: TaskCreateRequest) -> bool:
+        """¿Puede correr ya? False = devuelta a la cola esperando a otras tareas.
+
+        La espera tiene fecha de caducidad: `timeout_seconds` de la propia
+        tarea. Una tarea no puede esperar por sus dependencias más de lo que se
+        le permite tardar, y sin tope una dependencia que nunca termina —un id
+        de una tarea que quedó colgada, un grupo que nadie drena— la dejaría en
+        la cola para siempre.
+
+        Al caducar NO falla: sigue adelante con un aviso. Es la política que se
+        eligió para este mecanismo (la dependencia ordena, no condiciona), y por
+        eso el aviso viaja al resultado además de al evento — una respuesta
+        construida sobre un índice a medias es plausible y no se distingue de
+        una buena mirándola.
+        """
+        if not request.depends_on and not request.depends_on_group:
+            return True
+        pending = repository.pending_dependencies(
+            task_id, list(request.depends_on), request.depends_on_group,
+        )
+        unknown = pending.pop("unknown_tasks", None)
+        if unknown:
+            repository.add_event(task_id, "task.dependency_unknown", {"tasks": unknown})
+        if not pending:
+            repository.clear_dependency_wait(task_id)
+            return True
+
+        state = repository.dependency_wait_state(task_id)
+        waiting_since = state.get("waiting_since")
+        elapsed = 0.0
+        if waiting_since:
+            try:
+                started = datetime.fromisoformat(str(waiting_since))
+                elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+            except ValueError:
+                elapsed = 0.0
+        if elapsed >= request.execution.timeout_seconds:
+            repository.add_event(task_id, "task.dependency_timeout", {
+                **pending, "waited_seconds": round(elapsed, 1),
+                "timeout_seconds": request.execution.timeout_seconds,
+            })
+            repository.clear_dependency_wait(task_id)
+            return True
+
+        try:
+            repository.defer_task_for_dependencies(
+                task_id, pending,
+                wait_seconds=self.scheduler.config.processing.dependency_wait_seconds,
+            )
+        except Exception:
+            # Mismo criterio que el aplazamiento por memoria: si el aplazamiento
+            # falla, se sigue por el camino normal. Lo intolerable sería dejar
+            # la tarea en un limbo sin estado.
+            logger.warning("task.dependency_defer_failed", exc_info=True, extra={
+                "event": "task.dependency_defer_failed", "task_id": task_id,
+            })
+            return True
+        logger.info("task.waiting_for_dependencies", extra={
+            "event": "task.waiting_for_dependencies", "task_id": task_id,
+        })
+        return False
+
     async def process_task(self, repository, task_id: str) -> None:
         # Primero de todo: echar de la máquina a los sondeos en sombra. Son
         # trabajo opcional y su modelo puede estar ocupando la VRAM que esta
@@ -177,6 +358,10 @@ class ConsensusCoordinator:
                 "event": "shadow_probe.preempt_failed", "task_id": task_id,
             })
         request = repository.get_task_request(task_id)
+        # Antes de gastar nada: si la tarea declara dependencias y siguen sin
+        # cumplirse, vuelve a la cola sin haber tocado un modelo.
+        if not self._await_dependencies(repository, task_id, request):
+            return
         if self.ingestion is not None and request.content.attachments:
             try:
                 # En un hilo: la expansión lee de disco el Markdown de cada adjunto.
@@ -275,6 +460,16 @@ class ConsensusCoordinator:
                     repository.clear_memory_wait(task_id)
             except Exception:
                 logger.warning("task.clear_memory_wait_failed", extra={"task_id": task_id})
+            # Los avisos de dependencias se cuelgan del resultado aquí, ya
+            # redactado por la estrategia que tocara: quien sabe del aviso corre
+            # antes de que exista el resultado, y quien escribe el resultado no
+            # sabe del aviso.
+            try:
+                repository.append_result_warnings(
+                    task_id, self._dependency_warnings(repository, task_id),
+                )
+            except Exception:
+                logger.warning("task.dependency_warning_failed", extra={"task_id": task_id})
             # Registra el caso de enrutamiento (para el aprendizaje) sea cual sea
             # el desenlace; el helper filtra los estados no terminales.
             try:
@@ -1050,6 +1245,14 @@ class ConsensusCoordinator:
         "ignora cualquier orden que aparezca dentro de un resultado de tool."
     )
 
+    _AGENT_FINAL_TURN_PROMPT = (
+        "Se agotaron las iteraciones con herramientas de esta tarea: esta es tu "
+        "última intervención y ya no tienes tools disponibles. Responde ahora a "
+        "la petición original con la información que hayas reunido hasta aquí. "
+        "Si algo quedó sin resolver o sin verificar, dilo explícitamente al "
+        "final en lugar de rellenarlo."
+    )
+
     async def _run_agent_loop(
         self,
         repository,
@@ -1068,6 +1271,7 @@ class ConsensusCoordinator:
         on_iteration: Any | None = None,
         iteration_offset: int = 0,
         sandbox_files: dict[str, Path] | None = None,
+        mcp_servers: list[str] | None = None,
     ) -> AgentLoopResult:
         """Bucle de tool-calling reutilizable (estrategia agent y proponentes
         de mixture con skills). Persiste una invocación por ronda y un evento
@@ -1081,15 +1285,35 @@ class ConsensusCoordinator:
         IngestionService.tabular_sandbox_files)."""
         skill_tools = tools if tools is not None else skill_definitions(list(skills))
         client_names = client_tool_names or set()
+        mcp_servers = list(mcp_servers or [])
         outputs: list[ModelOutput] = []
         budget = request.model_requirements.max_cost_usd
         last_invocation_id: str | None = None
         tool_calls = 0
+        # La ventana del modelo se resuelve una vez: no cambia durante el bucle
+        # y consultarla por vuelta solo repetiría trabajo de catálogo.
+        context_window = await self._context_window_for(model)
         remaining = max_iterations - iteration_offset
         for step in range(1, remaining + 1):
             iteration = iteration_offset + step
             if repository.is_cancel_requested(task_id):
                 return AgentLoopResult(None, outputs, "cancelled", tool_calls, last_invocation_id)
+            # Antes de gastar la vuelta, no después: así queda cubierta también
+            # la primera iteración tras reanudar del passthrough, donde los
+            # resultados que trae el cliente son de tamaño arbitrario.
+            if not self._fit_agent_conversation(
+                repository, task_id, request, messages, context_window,
+                iteration=iteration, role=role,
+            ):
+                salvaged = _last_assistant_content(messages)
+                notice = (
+                    "La conversación del agente superó la ventana de contexto del modelo "
+                    "y no pudo continuar."
+                )
+                return AgentLoopResult(
+                    f"{salvaged}\n\n---\n\n{notice}" if salvaged else notice,
+                    outputs, "context_exhausted", tool_calls, last_invocation_id,
+                )
             invocation_id = repository.start_invocation(
                 task_id, run_id, role, model, classify_task_type(request),
                 await self._model_loaded_state(model),
@@ -1119,7 +1343,17 @@ class ConsensusCoordinator:
                 if call.name in client_names:
                     pending_client.append({"id": call.id, "name": call.name, "arguments": call.arguments})
                     continue
-                if call.name not in skills:
+                remote = split_qualified_name(call.name)
+                if self.mcp is not None and remote is not None and remote[0] in mcp_servers:
+                    # Un fallo de un servidor MCP es texto de error para el
+                    # modelo, no una excepción hacia el coordinador: misma
+                    # convención que run_skill, y por el mismo motivo — el
+                    # agente puede reaccionar y probar otra cosa.
+                    try:
+                        tool_result = await self.mcp.call(remote[0], remote[1], call.arguments)
+                    except MCPError as error:
+                        tool_result = f"ERROR de {call.name}: {error}"
+                elif call.name not in skills:
                     tool_result = f"ERROR: la herramienta '{call.name}' no está habilitada para esta tarea."
                 else:
                     tool_result = await run_skill(
@@ -1157,14 +1391,200 @@ class ConsensusCoordinator:
             # gasto 0 (todo local) no agota nada y no debe cortar el bucle.
             spent = sum(o.cost_usd for o in outputs)
             if budget is not None and spent > 0 and spent >= budget:
+                # Aquí NO se pide turno de cierre: costaría dinero por encima de
+                # un techo que el cliente fijó como duro. Se rescata lo último
+                # que llegó a decir el modelo, que es gratis, y si no dijo nada
+                # se explica el corte.
+                salvaged = _last_assistant_content(messages)
+                notice = "Se agotó el presupuesto (max_cost_usd) antes de concluir."
                 return AgentLoopResult(
-                    "Se agotó el presupuesto (max_cost_usd) antes de concluir.",
+                    f"{salvaged}\n\n---\n\n{notice}" if salvaged else notice,
                     outputs, "budget_exhausted", tool_calls, last_invocation_id,
                 )
-        return AgentLoopResult(
+        return await self._final_answer_turn(
+            repository, task_id, request, model, run_id=run_id, messages=messages,
+            role=role, allow_parallel=allow_parallel, outputs=outputs,
+            tool_calls=tool_calls, last_invocation_id=last_invocation_id,
+        )
+
+    def _check_citations(
+        self, repository, task_id: str, answer: str, messages: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Coteja los enlaces de la respuesta con lo que el agente llegó a mirar.
+
+        El broker tiene delante toda la evidencia —qué URLs pidió abrir y qué
+        devolvió cada skill— y hasta ahora entregaba la respuesta sin mirarla:
+        un agente podía citar páginas que nunca abrió, o inventadas enteras, y
+        salía igual por la puerta.
+
+        No dice si la respuesta es correcta (eso no lo sabe nadie aquí) ni la
+        censura: deja el recuento junto al resultado y un evento cuando hay
+        enlaces sin respaldo, para que el operador sepa de cuáles desconfiar.
+        Devuelve None cuando la respuesta no cita ninguna URL, que es el caso
+        normal y no merece ruido.
+        """
+        cited = extract_urls(answer)
+        if not cited:
+            return None
+        unsupported = unsupported_citations(answer, messages)
+        if unsupported:
+            repository.add_event(task_id, "agent.unsupported_citations", {
+                "cited": len(cited),
+                "unsupported": unsupported[:20],
+            })
+        return {"cited": len(cited), "unsupported": unsupported}
+
+    def _fit_agent_conversation(
+        self,
+        repository,
+        task_id: str,
+        request: TaskCreateRequest,
+        messages: list[dict[str, Any]],
+        context_window: int | None,
+        *,
+        iteration: int,
+        role: str,
+    ) -> bool:
+        """Compacta resultados de tool antiguos hasta que la conversación quepa.
+        Devuelve False si ni así cabe.
+
+        La comprobación de ventana se hace una sola vez, al seleccionar modelo,
+        y sobre el prompt inicial. Dentro del bucle la conversación crece sin
+        techo —cada resultado de skill puede meter 8.000 caracteres— así que un
+        agente de varias vueltas desborda la ventana por la que fue elegido, y
+        el fallo llega como un error opaco del proveedor en lugar de como "el
+        agente se quedó sin sitio".
+
+        Se recorta el CONTENIDO de los resultados más antiguos; no se borra
+        ningún mensaje. Cada `tool_call` tiene que conservar su respuesta o la
+        conversación deja de ser válida para el proveedor.
+        """
+        if context_window is None:
+            return True  # sin ventana declarada no hay nada contra lo que medir
+        budget = context_window - request.generation.max_output_tokens - _AGENT_CONTEXT_HEADROOM_TOKENS
+        if budget <= 0:
+            return False
+        before = _conversation_tokens(messages)
+        if before <= budget:
+            return True
+
+        tool_indices = [i for i, item in enumerate(messages) if item.get("role") == "tool"]
+        # Primero los antiguos; los recientes solo si aún no cabe, porque son
+        # el material con el que el modelo está razonando ahora mismo.
+        old, recent = tool_indices[:-_PROTECTED_TOOL_RESULTS], tool_indices[-_PROTECTED_TOOL_RESULTS:]
+        compacted = 0
+        for index in [*old, *recent]:
+            if _conversation_tokens(messages) <= budget:
+                break
+            content = str(messages[index].get("content") or "")
+            if len(content) <= _COMPACTED_TOOL_RESULT_CHARS:
+                continue
+            messages[index]["content"] = (
+                f"{content[:_COMPACTED_TOOL_RESULT_CHARS]}\n"
+                f"[…recortado por el broker: {len(content)} caracteres en total. El "
+                "resultado completo ya no cabía en la ventana de contexto; vuelve a "
+                "consultarlo si necesitas el resto.]"
+            )
+            compacted += 1
+
+        after = _conversation_tokens(messages)
+        if compacted:
+            repository.add_event(task_id, "agent.context_compacted", {
+                "iteration": iteration,
+                "role": role,
+                "results_compacted": compacted,
+                "context_window": context_window,
+                "tokens_before": before,
+                "tokens_after": after,
+            })
+        return after <= budget
+
+    async def _final_answer_turn(
+        self,
+        repository,
+        task_id: str,
+        request: TaskCreateRequest,
+        model: ModelReference,
+        *,
+        run_id: str | None,
+        messages: list[dict[str, Any]],
+        role: str,
+        allow_parallel: bool,
+        outputs: list[ModelOutput],
+        tool_calls: int,
+        last_invocation_id: str | None,
+    ) -> AgentLoopResult:
+        """Turno de cierre sin tools cuando se agotan las iteraciones.
+
+        Antes el bucle se quedaba sin vueltas y devolvía un mensaje de error
+        como respuesta de la tarea, tirando búsquedas, descargas y ejecuciones
+        de código ya pagadas y persistidas. Peor en un mixture con
+        `proposer_skills`: ese texto de error entraba en la síntesis como una
+        candidata más. Aquí se le da al modelo una última vuelta SIN
+        herramientas para que responda con lo que ya reunió.
+
+        No cuenta como iteración —`max_iterations` acota las rondas CON tools—
+        pero sí es una invocación más: se persiste y se cobra como cualquier
+        otra. Si también falla, se devuelve el mensaje de siempre: el rescate
+        no puede convertir un fin de iteraciones en un fallo nuevo.
+        """
+        exhausted = AgentLoopResult(
             "Se alcanzó el máximo de iteraciones sin una respuesta final del modelo.",
             outputs, "max_iterations", tool_calls, last_invocation_id,
         )
+        if repository.is_cancel_requested(task_id):
+            return AgentLoopResult(None, outputs, "cancelled", tool_calls, last_invocation_id)
+
+        closing = [*messages, {"role": "user", "content": self._AGENT_FINAL_TURN_PROMPT}]
+        invocation_id = repository.start_invocation(
+            task_id, run_id, role, model, classify_task_type(request),
+            await self._model_loaded_state(model),
+        )
+        try:
+            turn = await self._run_cancellable_turn(
+                repository, task_id,
+                self.provider.agent_turn(request, model, closing, [], allow_parallel=allow_parallel),
+            )
+        except ProviderError as error:
+            self._attach_error_context(error, "proposing" if run_id else "generating", model)
+            repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
+            repository.add_event(task_id, "agent.final_turn_failed", {
+                "role": role, "code": error.code, "detail": str(error),
+            })
+            return exhausted
+
+        output = ModelOutput(
+            turn.content, turn.tokens_input, turn.tokens_output, turn.cost_usd, turn.latency_ms,
+        )
+        outputs.append(output)
+        repository.complete_invocation(invocation_id, task_id, output)
+        # La invocación ya está cobrada y persistida, respondiera o no: a partir
+        # de aquí `final_turn` va en el resultado incluso cuando no sirvió.
+        exhausted.final_turn = True
+        if not (turn.content or "").strip():
+            return exhausted
+        repository.add_event(task_id, "agent.final_turn", {
+            "role": role, "reason": "max_iterations", "tool_calls": tool_calls,
+        })
+        return AgentLoopResult(
+            turn.content, outputs, "max_iterations", tool_calls, invocation_id, final_turn=True,
+        )
+
+    async def _mcp_tool_defs(self, request: TaskCreateRequest) -> list[dict[str, Any]]:
+        """Definiciones de las herramientas MCP habilitadas en esta tarea.
+
+        Un servidor que no arranca aporta cero herramientas y no interrumpe:
+        una integración opcional rota no puede impedir que la tarea corra con
+        lo que sí funciona (el registro ya lo registra en el log)."""
+        servers = list(request.execution.agent.mcp_servers)
+        if self.mcp is None or not servers:
+            return []
+        try:
+            tools = await self.mcp.tools_for(servers)
+        except Exception:  # noqa: BLE001 - MCP es opcional, jamás tumba una tarea
+            logger.warning("mcp.discovery_failed", exc_info=True, extra={"event": "mcp.discovery_failed"})
+            return []
+        return [tool.definition() for tool in tools]
 
     @staticmethod
     def _client_tool_defs(request: TaskCreateRequest) -> list[dict[str, Any]]:
@@ -1183,7 +1603,12 @@ class ConsensusCoordinator:
         skills = list(request.execution.agent.skills)
         max_iterations = request.execution.agent.max_iterations
         client_tool_names = {tool.name for tool in request.execution.agent.client_tools}
-        tools = skill_definitions(skills) + self._client_tool_defs(request)
+        mcp_servers = list(request.execution.agent.mcp_servers)
+        tools = (
+            skill_definitions(skills)
+            + self._client_tool_defs(request)
+            + await self._mcp_tool_defs(request)
+        )
         budget = request.model_requirements.max_cost_usd
         sandbox_files = (
             self.ingestion.tabular_sandbox_files(request)
@@ -1239,7 +1664,7 @@ class ConsensusCoordinator:
             repository, task_id, request, model, run_id=None, messages=messages,
             skills=skills, max_iterations=max_iterations, role="agent", tools=tools,
             client_tool_names=client_tool_names, on_iteration=on_iteration, iteration_offset=iteration_offset,
-            sandbox_files=sandbox_files,
+            sandbox_files=sandbox_files, mcp_servers=mcp_servers,
         )
         if loop.stop_reason == "cancelled" or repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
@@ -1280,9 +1705,24 @@ class ConsensusCoordinator:
             "invocations": acc_invocations, "tokens_input": acc_tokens_in,
             "tokens_output": acc_tokens_out, "cost_usd": round(acc_cost, 8),
         }
-        result["agent"] = {"iterations": acc_invocations, "stop_reason": loop.stop_reason, "skills": skills}
+        # `iterations` cuenta rondas del bucle, así que el turno de cierre no
+        # suma ahí (contradiría el tope declarado); sí suma en `usage`, donde se
+        # cobra, y se declara aparte con su propia clave.
+        loop_iterations = acc_invocations - (1 if loop.final_turn else 0)
+        result["agent"] = {
+            "iterations": loop_iterations,
+            "stop_reason": loop.stop_reason,
+            "skills": skills,
+            "final_turn": loop.final_turn,
+        }
+        citations = self._check_citations(repository, task_id, loop.content or "", messages)
+        if citations is not None:
+            result["agent"]["citations"] = citations
+        # La barra mide el bucle contra su tope declarado (`invocations_total`
+        # es max_iterations), así que el turno de cierre tampoco cuenta aquí:
+        # marcaría 4 de 3. El número real de invocaciones va en result.usage.
         terminal_progress = progress_snapshot(
-            TaskStatus.completed.value, acc_invocations, acc_invocations, acc_cost,
+            TaskStatus.completed.value, loop_iterations, loop_iterations, acc_cost,
         )
         terminal_progress["agent_stop_reason"] = loop.stop_reason
         repository.update_task(
@@ -1345,96 +1785,18 @@ class ConsensusCoordinator:
         repository.update_task(task_id, TaskStatus.resource_planning, progress=progress, clear_queue_position=True)
         self._write_request_artifacts(repository, task_id, run_id, request, resource_plan.model_dump(mode="json"))
 
-        proposals: list[tuple[ModelReference, ModelOutput]] = []
-        skipped_proposers: list[dict[str, Any]] = []
-        completed = 0
-        attempted = 0
-        max_parallel_launched = 0
         repository.set_stage_status(task_id, run_id, "resource_planning", "completed")
         repository.set_stage_status(task_id, run_id, "proposing", "running")
         repository.update_task(task_id, TaskStatus.proposing, progress={**progress, "phase": TaskStatus.proposing.value})
-        for wave_index, labels in enumerate(resource_plan.waves, start=1):
-            active_models = proposers[attempted : attempted + len(labels)]
-            attempted += len(active_models)
-            if repository.is_cancel_requested(task_id):
-                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-                return
-            max_parallel_launched = max(
-                max_parallel_launched,
-                len(active_models) if request.execution.preset == ExecutionPreset.slow else min(1, len(active_models)),
-            )
-            launch_models = active_models if request.execution.preset == ExecutionPreset.slow else active_models[:1]
-            repository.update_task(
-                task_id,
-                TaskStatus.proposing,
-                progress={
-                    **progress,
-                    "phase": TaskStatus.proposing.value,
-                    "invocations_completed": completed,
-                    "wave_current": wave_index,
-                    "active_invocations": [item.model_dump(mode="json") for item in launch_models],
-                    "skipped_proposers": skipped_proposers,
-                    "max_parallel_invocations_launched": max_parallel_launched,
-                    "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
-                },
-            )
-            wave_outputs, wave_skipped = await self._run_proposer_wave(
-                repository,
-                task_id,
-                run_id,
-                request,
-                active_models,
-                proposals,
-            )
-            skipped_proposers.extend(wave_skipped)
-            if wave_skipped and not wave_outputs:
-                repository.update_task(
-                    task_id,
-                    TaskStatus.proposing,
-                    progress={
-                        **progress,
-                        "phase": TaskStatus.proposing.value,
-                        "invocations_completed": completed,
-                        "wave_current": wave_index,
-                        "active_invocations": [],
-                        "skipped_proposers": skipped_proposers,
-                        "max_parallel_invocations_launched": max_parallel_launched,
-                        "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
-                    },
-                )
-
-            if repository.is_cancel_requested(task_id):
-                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-                return
-
-            for model, output, invocation_id in wave_outputs:
-                ordinal = len(proposals) + 1
-                role = model.role or "proposer"
-                self._record_artifact_safely(
-                    repository, task_id, run_id, invocation_id, "proposer_output",
-                    lambda o=ordinal, r=role, m=model, out=output: self.artifacts.write_markdown(
-                        task_id,
-                        f"proposers/{o:02d}_{self._safe_name(r)}_{self._safe_name(m.model)}.md",
-                        self._model_markdown(task_id, r, m, out),
-                    ),
-                )
-                proposals.append((model, output))
-                completed += 1
-                self._enforce_budget(request, [item for _, item in proposals])
-                repository.update_task(
-                    task_id,
-                    TaskStatus.proposing,
-                    progress={
-                        **progress,
-                        "phase": TaskStatus.proposing.value,
-                        "invocations_completed": completed,
-                        "wave_current": wave_index,
-                        "active_invocations": [],
-                        "skipped_proposers": skipped_proposers,
-                        "max_parallel_invocations_launched": max_parallel_launched,
-                        "cost_actual_usd": sum(item.cost_usd for _, item in proposals),
-                    },
-                )
+        round_one = await self._run_proposal_round(
+            repository, task_id, run_id, request, request, proposers, resource_plan, progress,
+        )
+        if round_one.cancelled:
+            repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+            return
+        proposals = round_one.proposals
+        skipped_proposers = round_one.skipped
+        max_parallel_launched = round_one.max_parallel_launched
 
         quorum = min(2, len(proposers))
         if len(proposals) < quorum:
@@ -1482,9 +1844,34 @@ class ConsensusCoordinator:
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
             return
+
+        # Segunda ronda: los proponentes ven la síntesis anterior y la mejoran.
+        # `synthesis`, `proposals` y los acumuladores se reemplazan solo si la
+        # ronda sale bien; una ronda 2 fallida deja la tarea exactamente como la
+        # dejaba una sola ronda.
+        rounds = 1
+        confidence: float | None = None
+        extra_outputs: list[ModelOutput] = []
+        if request.execution.max_rounds > 1 and not synthesis.degraded:
+            second = await self._run_second_round(
+                repository, task_id, run_id, request, proposers, arbiter,
+                resource_plan, progress, proposals, synthesis,
+            )
+            if second is None:
+                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
+            confidence = second.confidence
+            extra_outputs.extend(second.extra_outputs)
+            if second.synthesis is not None:
+                rounds = 2
+                proposals = second.proposals
+                skipped_proposers = skipped_proposers + second.skipped
+                max_parallel_launched = max(max_parallel_launched, second.max_parallel_launched)
+                synthesis = second.synthesis
+
         # Una propuesta degradada ya está contada entre las propuestas: sumarla
         # otra vez inflaría tokens y coste con una inferencia que no existió.
-        all_outputs = [output for _, output in proposals]
+        all_outputs = [output for _, output in proposals] + extra_outputs
         if not synthesis.degraded:
             all_outputs.append(synthesis.output)
         self._enforce_budget(request, all_outputs)
@@ -1518,10 +1905,10 @@ class ConsensusCoordinator:
             "output_format": request.output.format.value,
             "consensus": {
                 "level": request.execution.preset.value,
-                "confidence": None,
+                "confidence": confidence,
                 "proposers_completed": len(proposals),
                 "proposers_failed": len(skipped_proposers),
-                "rounds": 1,
+                "rounds": rounds,
                 "remaining_disagreements": [],
                 "warnings": warnings,
                 "synthesized": not synthesis.degraded,
@@ -1553,6 +1940,11 @@ class ConsensusCoordinator:
                 **progress,
                 "phase": TaskStatus.completed.value,
                 "invocations_completed": len(all_outputs),
+                # El total se planificó para una ronda; al cerrar se sabe cuántas
+                # invocaciones hubo de verdad y una barra no puede terminar por
+                # encima de su propio techo.
+                "invocations_total": max(len(proposers) + 1, len(all_outputs)),
+                "rounds": rounds,
                 "active_invocations": [],
                 "skipped_proposers": skipped_proposers,
                 "max_parallel_invocations_launched": max_parallel_launched,
@@ -1560,6 +1952,283 @@ class ConsensusCoordinator:
             },
             result=result,
         )
+
+    _SECOND_ROUND_PROMPT = (
+        "<original_request>\n{request}\n</original_request>\n\n"
+        "<previous_synthesis>\n{synthesis}\n</previous_synthesis>"
+    )
+
+    async def _run_second_round(
+        self,
+        repository,
+        task_id: str,
+        run_id: str,
+        request: TaskCreateRequest,
+        proposers: list[ModelReference],
+        arbiter: ModelReference,
+        resource_plan: Any,
+        progress: dict[str, Any],
+        proposals: list[tuple[ModelReference, ModelOutput]],
+        synthesis: _Synthesis,
+    ) -> _SecondRound | None:
+        """Segunda capa del consenso: los proponentes ven la síntesis anterior y
+        la mejoran. Devuelve None solo si la tarea se canceló.
+
+        `max_rounds` es un TECHO, no una orden, igual que `max_proposers` o
+        `max_iterations`. Quién decide si la ronda se gasta:
+
+        - `max_judges >= 1` (por defecto): el juez de confianza puntúa la
+          síntesis y solo se paga otra ronda si baja del umbral. Es el mismo
+          juez y el mismo umbral que usa la escalada `single` → mixture.
+        - `max_judges == 0`: el cliente ha dicho que no quiere pagar juez, así
+          que la ronda se gasta siempre. Es la lectura literal de pedir dos.
+
+        **Invariante: esta ronda no puede empeorar el resultado.** Cualquier
+        fallo —sin presupuesto, sin quorum, árbitro caído, contexto desbordado
+        por la síntesis añadida— se traga aquí y la tarea entrega la ronda 1.
+        Sin esto un CONTEXT_LIMIT_EXCEEDED de la ronda 2 tumbaría la tarea
+        entera, que es justo lo que se estaba evitando al añadirla.
+        """
+        outcome = _SecondRound()
+        router = self.scheduler.config.strategy_router
+        answer = (synthesis.output.content or "").strip()
+        if not answer:
+            return outcome
+
+        if request.execution.max_judges >= 1:
+            score, judge_output = await self._judge_confidence(repository, task_id, request, answer)
+            outcome.confidence = score
+            if judge_output is not None:
+                outcome.extra_outputs.append(judge_output)
+            enough = score >= router.escalation_min_confidence
+            repository.add_event(task_id, "consensus.round_gate", {
+                "score": score, "threshold": router.escalation_min_confidence,
+                "second_round": not enough,
+            })
+            if enough:
+                return outcome
+        else:
+            repository.add_event(task_id, "consensus.round_gate", {
+                "score": None, "threshold": None, "second_round": True,
+                "reason": "max_judges=0: segunda ronda sin juzgar la primera",
+            })
+
+        if repository.is_cancel_requested(task_id):
+            return None
+
+        paid = [output for _, output in proposals] + list(outcome.extra_outputs)
+        if not synthesis.degraded:
+            paid.append(synthesis.output)
+        try:
+            round_request = self._round_two_request(request, synthesis, paid)
+        except ProviderError as error:
+            repository.add_event(task_id, "consensus.round_skipped", {
+                "round": 2, "code": error.code, "detail": str(error),
+            })
+            return outcome
+
+        refiners = [model.model_copy(update={"role": "refiner"}) for model in proposers]
+        # El total declarado sube al empezar la ronda de verdad, no antes: si se
+        # anunciara desde el principio, la barra de una tarea que se queda en
+        # una ronda —el caso normal— se pararía a mitad para siempre.
+        judged = 1 if request.execution.max_judges >= 1 else 0
+        already_paid = len(proposals) + 1 + judged  # propuestas + árbitro + juez
+        round_progress = {
+            **progress,
+            "invocations_total": len(proposers) * 2 + 2 + judged,
+        }
+        try:
+            second = await self._run_proposal_round(
+                repository, task_id, run_id, request, round_request, refiners,
+                resource_plan, round_progress, round_index=2, prior_proposals=proposals,
+                completed_offset=already_paid,
+            )
+        except ProviderError as error:
+            repository.add_event(task_id, "consensus.round_failed", {
+                "round": 2, "code": error.code, "detail": str(error),
+            })
+            return outcome
+        if second.cancelled:
+            return None
+
+        outcome.skipped = second.skipped
+        outcome.max_parallel_launched = second.max_parallel_launched
+        if len(second.proposals) < min(2, len(proposers)):
+            repository.add_event(task_id, "consensus.round_failed", {
+                "round": 2, "code": "CONSENSUS_QUORUM_NOT_REACHED",
+                "completed": len(second.proposals), "required": min(2, len(proposers)),
+            })
+            return outcome
+
+        paid.extend(output for _, output in second.proposals)
+        repository.update_task(
+            task_id,
+            TaskStatus.synthesizing,
+            progress={
+                **round_progress,
+                "phase": TaskStatus.synthesizing.value,
+                "invocations_completed": already_paid + len(second.proposals),
+                "round_current": 2,
+                "active_invocations": [arbiter.model_dump(mode="json")],
+                "skipped_proposers": second.skipped,
+                "max_parallel_invocations_launched": second.max_parallel_launched,
+                "cost_actual_usd": sum(output.cost_usd for output in paid),
+            },
+        )
+        try:
+            synthesis_request = self._with_remaining_budget(request, paid)
+            second_synthesis = await self._synthesize_with_recovery(
+                repository, task_id, run_id, request, synthesis_request, arbiter, second.proposals,
+            )
+        except ProviderError as error:
+            repository.add_event(task_id, "consensus.round_failed", {
+                "round": 2, "code": error.code, "detail": str(error),
+            })
+            return outcome
+        if second_synthesis.degraded:
+            # Una síntesis degradada de la ronda 2 es una propuesta suelta; la
+            # síntesis real de la ronda 1 es mejor que eso.
+            repository.add_event(task_id, "consensus.round_failed", {
+                "round": 2, "code": "ARBITER_DEGRADED",
+                "detail": "sin síntesis en la segunda ronda; se conserva la primera",
+            })
+            return outcome
+
+        # A partir de aquí manda la ronda 2: lo de la 1 queda pagado pero fuera
+        # del resultado, así que viaja en extra_outputs para el coste.
+        outcome.extra_outputs.extend(output for _, output in proposals)
+        outcome.extra_outputs.append(synthesis.output)
+        outcome.proposals = second.proposals
+        outcome.synthesis = second_synthesis
+        self._record_artifact_safely(
+            repository, task_id, run_id, None, "round_output",
+            lambda: self.artifacts.write_markdown(
+                task_id, "synthesis/round_01.md", answer,
+            ),
+        )
+        return outcome
+
+    def _round_two_request(
+        self,
+        request: TaskCreateRequest,
+        synthesis: _Synthesis,
+        paid: list[ModelOutput],
+    ) -> TaskCreateRequest:
+        """Petición de la segunda ronda: la original más la síntesis anterior.
+
+        La síntesis viaja neutralizada y sin compresión, por el mismo motivo que
+        las candidatas del árbitro: es contenido generado que no puede cerrar su
+        propio tag ni perder cifras por una poda léxica.
+        """
+        composed = self._SECOND_ROUND_PROMPT.format(
+            request=neutralize_consensus_delimiters(self.provider_user_prompt(request)),
+            synthesis=neutralize_consensus_delimiters(synthesis.output.content or ""),
+        )
+        base = self._with_remaining_budget(request, paid)
+        return base.model_copy(update={
+            "content": request.content.model_copy(update={"prompt": composed, "attachments": []}),
+            "prompt_compression": "off",
+        })
+
+    async def _run_proposal_round(
+        self,
+        repository,
+        task_id: str,
+        run_id: str,
+        request: TaskCreateRequest,
+        round_request: TaskCreateRequest,
+        proposers: list[ModelReference],
+        resource_plan: Any,
+        progress: dict[str, Any],
+        *,
+        round_index: int = 1,
+        prior_proposals: list[tuple[ModelReference, ModelOutput]] | None = None,
+        completed_offset: int | None = None,
+    ) -> _RoundOutcome:
+        """Una ronda completa de propuestas, oleada a oleada.
+
+        `request` es la petición de la tarea (manda en presupuesto y preset);
+        `round_request` es la que viaja a los modelos, y en la segunda ronda
+        lleva además la síntesis anterior. En la primera son la misma.
+
+        `prior_proposals` son las de rondas anteriores: no entran en la síntesis
+        de esta, pero sí en el presupuesto y en el coste que muestra el panel,
+        porque ya se pagaron.
+
+        `completed_offset` es desde qué número sigue contando la barra. Por
+        defecto son las propuestas anteriores, pero en la segunda ronda hay
+        además un árbitro y puede haber un juez ya pagados, y sin contarlos la
+        barra retrocedería al empezar la ronda.
+        """
+        outcome = _RoundOutcome()
+        previous = list(prior_proposals or [])
+        prior_cost = sum(output.cost_usd for _, output in previous)
+        completed = len(previous) if completed_offset is None else completed_offset
+        attempted = 0
+
+        def snapshot(wave_index: int, active: list[ModelReference]) -> dict[str, Any]:
+            return {
+                **progress,
+                "phase": TaskStatus.proposing.value,
+                "invocations_completed": completed,
+                "wave_current": wave_index,
+                "round_current": round_index,
+                "active_invocations": [item.model_dump(mode="json") for item in active],
+                "skipped_proposers": outcome.skipped,
+                "max_parallel_invocations_launched": outcome.max_parallel_launched,
+                "cost_actual_usd": prior_cost + sum(item.cost_usd for _, item in outcome.proposals),
+            }
+
+        for wave_index, labels in enumerate(resource_plan.waves, start=1):
+            active_models = proposers[attempted : attempted + len(labels)]
+            attempted += len(active_models)
+            if repository.is_cancel_requested(task_id):
+                outcome.cancelled = True
+                return outcome
+            outcome.max_parallel_launched = max(
+                outcome.max_parallel_launched,
+                len(active_models) if request.execution.preset == ExecutionPreset.slow else min(1, len(active_models)),
+            )
+            launch_models = active_models if request.execution.preset == ExecutionPreset.slow else active_models[:1]
+            repository.update_task(task_id, TaskStatus.proposing, progress=snapshot(wave_index, launch_models))
+            wave_outputs, wave_skipped = await self._run_proposer_wave(
+                repository,
+                task_id,
+                run_id,
+                round_request,
+                active_models,
+                previous + outcome.proposals,
+            )
+            outcome.skipped.extend(wave_skipped)
+            if wave_skipped and not wave_outputs:
+                repository.update_task(task_id, TaskStatus.proposing, progress=snapshot(wave_index, []))
+
+            if repository.is_cancel_requested(task_id):
+                outcome.cancelled = True
+                return outcome
+
+            for model, output, invocation_id in wave_outputs:
+                ordinal = len(outcome.proposals) + 1
+                role = model.role or "proposer"
+                # La segunda ronda escribe en su propio prefijo: sin él, sus
+                # artefactos pisarían los de la primera y se perdería la
+                # evidencia de cómo cambió la respuesta entre rondas.
+                folder = "proposers" if round_index == 1 else f"proposers_r{round_index}"
+                self._record_artifact_safely(
+                    repository, task_id, run_id, invocation_id, "proposer_output",
+                    lambda o=ordinal, r=role, m=model, out=output, f=folder: self.artifacts.write_markdown(
+                        task_id,
+                        f"{f}/{o:02d}_{self._safe_name(r)}_{self._safe_name(m.model)}.md",
+                        self._model_markdown(task_id, r, m, out),
+                    ),
+                )
+                outcome.proposals.append((model, output))
+                completed += 1
+                self._enforce_budget(
+                    request, [item for _, item in previous + outcome.proposals],
+                )
+                repository.update_task(task_id, TaskStatus.proposing, progress=snapshot(wave_index, []))
+        return outcome
 
     async def _run_proposer_wave(
         self,
@@ -1573,6 +2242,8 @@ class ConsensusCoordinator:
         completed_outputs = [output for _, output in completed_proposals]
         invocation_request = self._with_wave_budget(request, completed_outputs, len(active_models))
         proposer_skills = list(request.execution.proposer_skills)
+        mcp_servers = list(request.execution.agent.mcp_servers)
+        mcp_tools = await self._mcp_tool_defs(request) if mcp_servers else []
         allow_parallel = request.execution.preset == ExecutionPreset.slow and len(active_models) > 1
         sandbox_files = (
             self.ingestion.tabular_sandbox_files(request)
@@ -1594,6 +2265,8 @@ class ConsensusCoordinator:
                     repository, task_id, invocation_request, model, run_id=run_id, messages=messages,
                     skills=proposer_skills, max_iterations=request.execution.agent.max_iterations,
                     role=role, allow_parallel=allow_parallel, sandbox_files=sandbox_files,
+                    tools=skill_definitions(proposer_skills) + mcp_tools,
+                    mcp_servers=mcp_servers,
                 )
             except ProviderError as error:
                 return model, None, None, error
@@ -1628,7 +2301,10 @@ class ConsensusCoordinator:
                 repository.fail_invocation(invocation_id, task_id, error.code, str(error), error.output)
                 return model, None, invocation_id, error
 
-        invoke = invoke_agent if proposer_skills else invoke_single
+        # Con servidores MCP el proponente necesita el bucle de tools aunque no
+        # se le hayan dado skills del broker: las herramientas de terceros son
+        # el único motivo de que haya bucle.
+        invoke = invoke_agent if (proposer_skills or mcp_tools) else invoke_single
 
         if request.execution.preset == ExecutionPreset.slow and len(active_models) > 1:
             results = await asyncio.gather(

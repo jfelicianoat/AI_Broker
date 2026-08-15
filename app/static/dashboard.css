@@ -355,6 +355,21 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .compatibility-probe[aria-busy="true"] { opacity: .72; cursor: progress; }
 .provider-status-list small { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Borrado de un modelo del disco: la única acción irreversible del panel.
+   La confirmación aparece dentro de la propia fila, donde estaba el botón, y
+   NO se encoge a tamaño de nota al pie: es la pregunta más consecuente que
+   hace esta interfaz y tiene que leerse sin esfuerzo. */
+.model-actions { width: 1%; white-space: nowrap; }
+.model-delete-confirm { display: grid; gap: 8px; min-width: 260px; padding: 10px; border: 1px solid var(--red-line); border-radius: 5px; background: var(--red-fill); color: var(--red-ink); }
+.model-delete-question { margin: 0; display: grid; gap: 3px; font-size: var(--text-body); }
+.model-delete-question strong { color: inherit; max-width: none; }
+.model-delete-actions { display: flex; align-items: center; gap: 8px; }
+.model-delete-actions form { margin: 0; }
+/* Consecuencias del borrado: cambian la decisión, así que no se pliegan ni se
+   encogen. Fondo propio para que no se lean como parte de la pregunta. */
+.model-delete-consequences { padding: 8px 10px; border-radius: 4px; background: var(--well); color: var(--text-2); font-size: var(--text-body); }
+.model-delete-consequences ul { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+
 .comparison-grid { display: grid; grid-template-columns: minmax(280px, .35fr) minmax(680px, 1fr); gap: 14px; align-items: start; }
 .task-stack { display: grid; }
 .task-card { display: grid; gap: 6px; padding: 13px 15px; border-bottom: 1px solid var(--border-soft); text-decoration: none; color: var(--text-3); }

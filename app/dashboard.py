@@ -427,6 +427,11 @@ class DashboardQueryRepository:
                 if "memory_block_json" in row.keys()
                 else None
             ),
+            dependency_wait=(
+                loads_json(row["dependency_wait_json"], None)
+                if "dependency_wait_json" in row.keys()
+                else None
+            ),
             invocations=int(row["invocation_count"] or 0),
             tokens_input=int(row["invocation_tokens_input"] or 0),
             tokens_output=int(row["invocation_tokens_output"] or 0),

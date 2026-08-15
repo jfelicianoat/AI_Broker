@@ -33,6 +33,11 @@ class TaskStatus(str, Enum):
     # es un fallo y no consume el workflow único — espera su turno mientras el
     # resto de la cola sigue avanzando.
     waiting_for_memory = "waiting_for_memory"
+    # La tarea declara depender de otras que aún no han terminado. Hermano de
+    # `waiting_for_memory`: no es un fallo, no consume el workflow único y no
+    # pierde el sitio en la cola. Se distingue de aquel en que aquí lo que falta
+    # es trabajo ajeno, no máquina.
+    waiting_for_dependencies = "waiting_for_dependencies"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -77,7 +82,25 @@ class ExecutionStrategy(str, Enum):
 # Skills técnicas genéricas ejecutables por el broker en la estrategia agent.
 # Son deliberadamente neutrales al dominio: la orquestación de negocio sigue
 # perteneciendo a las apps cliente.
-AGENT_SKILLS = ("web_search", "fetch_url", "calculator", "current_datetime", "run_code")
+#
+# Cada una declara por dónde salen sus datos: "egress" saca contenido de la
+# tarea de esta máquina, "local" se resuelve dentro (el sandbox de run_code
+# corre con --network none). Sin esta tabla la frontera de datos era una
+# promesa a medias: `local_only` apagaba los proveedores cloud por validación y
+# acto seguido `web_search` mandaba el texto de la consulta a un buscador. La
+# lista de skills se DERIVA de aquí a propósito, para que no pueda existir una
+# skill sin declarar su frontera.
+AGENT_SKILL_DATA_BOUNDARY: dict[str, Literal["local", "egress"]] = {
+    "web_search": "egress",
+    "fetch_url": "egress",
+    "calculator": "local",
+    "current_datetime": "local",
+    "run_code": "local",
+}
+AGENT_SKILLS = tuple(AGENT_SKILL_DATA_BOUNDARY)
+EGRESS_AGENT_SKILLS = frozenset(
+    name for name, boundary in AGENT_SKILL_DATA_BOUNDARY.items() if boundary == "egress"
+)
 # run_code queda fuera del default: requiere sandbox.enabled y Docker en
 # marcha, así que solo participa cuando la tarea lo pide explícitamente.
 DEFAULT_AGENT_SKILLS = ("web_search", "fetch_url", "calculator", "current_datetime")
@@ -310,12 +333,26 @@ class AgentExecutionConfig(StrictBaseModel):
     # Tools del cliente (passthrough): al llamarlas, la tarea pasa a
     # waiting_for_tools y el cliente las resuelve vía POST /tasks/{id}/tool_results.
     client_tools: list[ClientToolDefinition] = Field(default_factory=list, max_length=16)
+    # Servidores MCP (ids de `mcp.servers` en la configuración del broker) cuyas
+    # herramientas se ofrecen al modelo en esta tarea. Opt-in explícito: un
+    # servidor configurado no se cuela en todas las tareas, porque cada
+    # herramienta que se añade es contexto que el modelo tiene que leer y una
+    # forma más de que la tarea se vaya por las ramas.
+    mcp_servers: list[str] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def validate_skills(self) -> AgentExecutionConfig:
-        if not self.skills and not self.client_tools:
-            raise ValueError("agent strategy requires at least one skill or client tool")
-        self.skills = list(dict.fromkeys(self.skills))
+        if not self.skills and not self.client_tools and not self.mcp_servers:
+            raise ValueError("agent strategy requires at least one skill, client tool or MCP server")
+        if len(set(self.mcp_servers)) != len(self.mcp_servers):
+            raise ValueError("mcp_servers must not repeat")
+        # Solo se reasigna si la deduplicación cambia algo: asignar un atributo
+        # lo marca como "puesto por el cliente" en model_fields_set, y de ese
+        # dato depende la frontera de datos para distinguir una skill elegida de
+        # un default del broker (ver TaskCreateRequest.enforce_data_boundary).
+        deduped = list(dict.fromkeys(self.skills))
+        if deduped != self.skills:
+            self.skills = deduped
         names = [tool.name for tool in self.client_tools]
         if len(names) != len(set(names)):
             raise ValueError("client_tools names must be unique")
@@ -438,6 +475,30 @@ class TaskCreateRequest(StrictBaseModel):
     # Override por tarea de la compresión de prompts. None = usar la
     # configuración global del broker; "off" = enviar el prompt tal cual.
     prompt_compression: Literal["off", "light", "medium", "aggressive"] | None = None
+    # --- Dependencias entre tareas ---
+    # Etiqueta a la que pertenece esta tarea. Existe para que otra pueda
+    # esperarla en bloque sin conocer sus identificadores: el caso real es un
+    # documento que se indexa en cientos de embeddings y una pregunta que no
+    # debe correr hasta que el índice esté entero. Enviar esos cientos de ids
+    # en cada pregunta sería inutilizable.
+    group: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:\-]+$")
+    # Tareas concretas que deben haber terminado antes que esta.
+    depends_on: list[str] = Field(default_factory=list, max_length=64)
+    # Grupo que debe estar drenado (ninguna tarea suya sin terminar) antes que
+    # esta. Se evalúa al reclamar, así que solo cuentan las que ya existen.
+    depends_on_group: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:\-]+$"
+    )
+
+    @model_validator(mode="after")
+    def validate_dependencies(self) -> TaskCreateRequest:
+        if self.depends_on_group is not None and self.depends_on_group == self.group:
+            # Esperar a tu propio grupo es esperarte a ti mismo con pasos
+            # extra: las 259 tareas de un índice se bloquearían entre ellas.
+            raise ValueError("depends_on_group must not be the task's own group")
+        if len(set(self.depends_on)) != len(self.depends_on):
+            raise ValueError("depends_on must not repeat task ids")
+        return self
 
     @model_validator(mode="after")
     def validate_agent_constraints(self) -> TaskCreateRequest:
@@ -488,6 +549,32 @@ class TaskCreateRequest(StrictBaseModel):
                     for provider in requirements.allowed_providers
                     if provider.lower() in local_provider_names
                 ] or ["ollama"]
+            # Las skills con salida a red se rechazan en vez de apagarse en
+            # silencio: quitarlas dejaría correr una investigación mutilada que
+            # el cliente cree completa, y aquí lo que pidió y lo que se puede
+            # hacer son incompatibles de verdad. Mismo criterio que target_model
+            # cloud unas líneas más arriba.
+            #
+            # Solo cuenta lo que el cliente PIDIÓ. `agent.skills` trae defaults
+            # que viajan en toda petición: hacer fallar la tarea por un default
+            # del broker sería culpar al cliente de una elección que no hizo, así
+            # que ahí la lista se acota a las skills locales y punto. Lo que el
+            # cliente nombró explícitamente sí es incompatible y se rechaza.
+            agent = self.execution.agent
+            chose_skills = "skills" in agent.model_fields_set
+            requested_skills: set[str] = set(self.execution.proposer_skills)
+            if chose_skills:
+                requested_skills |= set(agent.skills)
+            offending = sorted(requested_skills & EGRESS_AGENT_SKILLS)
+            if offending:
+                raise ValueError(
+                    f"{classification.value} does not allow skills that send task content "
+                    f"off this machine: {', '.join(offending)}"
+                )
+            if not chose_skills:
+                agent.skills = [  # type: ignore[assignment]
+                    skill for skill in agent.skills if skill not in EGRESS_AGENT_SKILLS
+                ]
         for attachment in self.content.attachments:
             # Solo adjuntos ya ingeridos por el broker: el mapeo es sin pérdida
             # porque el fichero llega al modelo como Markdown dentro del prompt.
@@ -604,6 +691,17 @@ class ModelAvailabilityResponse(StrictBaseModel):
     counts: dict[str, int]
 
 
+class MCPServerCapability(StrictBaseModel):
+    """Un servidor MCP disponible, tal como lo ve una app cliente.
+
+    Se publica la frontera de datos porque es lo que decide si ese servidor
+    puede usarse en una tarea `confidential`/`local_only`, y el cliente prefiere
+    saberlo antes de pedirlo que recibir un 409.
+    """
+    id: str
+    data_boundary: Literal["local", "egress"]
+
+
 class BrokerCapabilitiesResponse(StrictBaseModel):
     contract_version: str
     strategies: list[ExecutionStrategy]
@@ -618,11 +716,23 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     prompt_compression_override: bool
     # Estrategia agent con skills técnicas ejecutadas por el broker.
     agent_skills: list[str]
+    # Subconjunto de agent_skills que saca contenido de la tarea de esta
+    # máquina. Una clasificación con frontera local (`confidential`,
+    # `local_only`) las rechaza igual que rechaza un proveedor cloud, así que el
+    # cliente necesita saber cuáles son antes de pedirlas, no al recibir un 422.
+    agent_skills_egress: list[str]
     # Los proponentes de un mixture pueden usar esas mismas skills antes de proponer.
     proposer_skills: bool
     # Passthrough: la estrategia agent acepta tools del cliente y pausa la tarea
     # (waiting_for_tools) hasta que el cliente las resuelve vía tool_results.
     client_tool_passthrough: bool
+    # Dependencias entre tareas: `group`, `depends_on` y `depends_on_group` en la
+    # petición, y estado `waiting_for_dependencies` mientras espera.
+    task_dependencies: bool
+    # Servidores MCP disponibles para `execution.agent.mcp_servers`, con la
+    # frontera de datos que declaró el operador para cada uno. Lista vacía = MCP
+    # apagado o sin servidores; pedir uno daría 409.
+    mcp_servers: list[MCPServerCapability] = Field(default_factory=list)
     # El broker elige la estrategia si se pide strategy: auto (meta-router).
     auto_strategy: bool
     # Pieza 2: single puede escalar a mixture si sale de baja confianza.
@@ -738,6 +848,9 @@ class DashboardTaskItem(StrictBaseModel):
     # Por qué está esperando memoria y quién se la ocupa, cuando el estado es
     # `waiting_for_memory`. None en cualquier otro caso.
     memory_block: dict[str, Any] | None = None
+    # A qué tareas o grupo espera, y desde cuándo, con estado
+    # `waiting_for_dependencies`. None en cualquier otro caso.
+    dependency_wait: dict[str, Any] | None = None
     invocations: int
     tokens_input: int
     tokens_output: int

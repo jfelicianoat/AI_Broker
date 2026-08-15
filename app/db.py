@@ -221,6 +221,23 @@ class Database:
                 # no se libera nunca, una reserva sin caducidad congelaría la
                 # cola entera en vez de dejar pasar a quien sí cabe.
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN memory_reserved_until TEXT")
+            if "task_group" not in task_columns:
+                # Etiqueta de agrupación declarada por el cliente
+                # (TaskCreateRequest.group). Va en columna, no en el JSON de la
+                # petición, porque se consulta en cada reclamo para saber si un
+                # grupo está drenado: mirarlo dentro del JSON obligaría a leer
+                # y parsear la cola entera en cada vuelta del despachador.
+                # "group" es palabra reservada de SQL, de ahí el nombre.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN task_group TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_tasks_group ON tasks(task_group, status)"
+                )
+            if "dependency_wait_json" not in task_columns:
+                # Qué está esperando la tarea y desde cuándo, cuando el estado
+                # es waiting_for_dependencies. Mismo papel que
+                # memory_block_json: sin esto el panel solo puede decir
+                # "espera", que no ayuda a decidir si cancelar.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN dependency_wait_json TEXT")
             if "memory_block_json" not in task_columns:
                 # Qué ocupaba la memoria la última vez que se intentó: modelo
                 # pedido, bytes necesarios y quién los tenía. Sin esto el panel

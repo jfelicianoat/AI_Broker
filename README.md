@@ -127,9 +127,10 @@ La salida rechazada se guarda en la invocación con su coste real, que es la ún
 
 **Capas de defensa:**
 
-- **Frontera de datos:** `risk.data_classification` es el mando único. `local_only` y `confidential` fuerzan proveedores locales y desactivan cloud a nivel de contrato (validación, no convención); `public` e `internal` permiten salir. De esa clasificación se **derivan** `cloud_allowed` y `allowed_providers` cuando la app cliente no los envía, así que no hay tres campos que acertar a la vez. Un `cloud_allowed: false` explícito se respeta siempre; un `true` explícito **no** puede saltarse una clasificación restrictiva.
+- **Frontera de datos:** `risk.data_classification` es el mando único. `local_only` y `confidential` fuerzan proveedores locales y desactivan cloud a nivel de contrato (validación, no convención); `public` e `internal` permiten salir. De esa clasificación se **derivan** `cloud_allowed` y `allowed_providers` cuando la app cliente no los envía, así que no hay tres campos que acertar a la vez. Un `cloud_allowed: false` explícito se respeta siempre; un `true` explícito **no** puede saltarse una clasificación restrictiva. **La frontera cubre también las herramientas:** cada skill declara por dónde salen sus datos y las de red (`web_search`, `fetch_url`) se rechazan bajo frontera local — un modelo local no sirve de nada si la consulta acaba en un buscador.
 - **Anti-inyección sistemática:** candidatos del consenso, resultados de skills y documentos adjuntos viajan en sandboxes XML con delimitadores neutralizados; los system prompts marcan ese contenido como datos no confiables.
 - **SSRF:** `fetch_url` resuelve DNS y rechaza cualquier host no público (el dashboard del propio broker incluido).
+- **Enlaces cotejados:** los que cita un agente se comparan con los que consultó de verdad; los que no salen de ninguna consulta se marcan en `result.agent.citations.unsupported`. Determinista, sin otro modelo opinando.
 - **Sandbox:** el código generado por modelos jamás toca el host (sección 4).
 - **Panel:** CSRF de doble envío + validación `Origin`/`Referer`, cabeceras CSP/`X-Frame-Options`/`nosniff`, sesión admin con cookie HttpOnly y caducidad deslizante. Con token admin configurado (env `AI_BROKER_ADMIN_TOKEN` o keyring `ai-broker/dashboard_admin_token`), toda lectura con prompts/resultados exige credencial. Arranque fail-closed: el broker se niega a escuchar fuera de loopback sin token (opt-out explícito `allow_unauthenticated_lan`).
 - **Credenciales:** claves de API en variables de entorno o Windows Credential Manager (keyring), nunca en el YAML.
@@ -268,6 +269,8 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | [`docs/Client_API.md`](docs/Client_API.md) | **Especificación para aplicaciones cliente** (contrato 2.6, autocontenida) |
 | [`docs/Phase_9_Speed_And_Lanes.md`](docs/Phase_9_Speed_And_Lanes.md) | Tiempo esperado, sondeo en sombra y carriles de trabajo |
 | [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) | Panel operativo (normativo para las pantallas) |
+| [`docs/System_Prompts.md`](docs/System_Prompts.md) | **Prompts que escribe el Broker** (roles del consenso, árbitro, agente, juez, map-reduce) |
+| [`docs/MCP_Servers.md`](docs/MCP_Servers.md) | Servidores MCP (stdio) como herramientas del agente |
 | [`docs/Prompt_Compression.md`](docs/Prompt_Compression.md) | Compresión de prompts |
 | [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md) | Probador de prompts |
 | [`docs/Mixture_Slow_Concurrency.md`](docs/Mixture_Slow_Concurrency.md) | Concurrencia del preset slow |

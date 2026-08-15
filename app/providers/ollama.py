@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from app.providers.base import (
     request_with_context_capped_output,
 )
 from app.schemas import OutputFormat, TaskCreateRequest
+
+logger = logging.getLogger("ai_broker.ollama")
 
 
 def _gib(value: float) -> str:
@@ -271,6 +274,53 @@ class OllamaProvider:
     async def close(self) -> None:
         await self.client.aclose()
 
+    async def delete_model(self, model: str) -> int:
+        """Borra un modelo local del disco. Devuelve los bytes que ocupaba.
+
+        Lo hace el propio Ollama (`DELETE /api/delete`), no el broker a mano:
+        varios modelos comparten blobs y solo el runtime sabe cuáles quedan sin
+        referenciar. Borrar ficheros por nuestra cuenta dejaría el almacén
+        inconsistente o se llevaría por delante capas de otro modelo.
+
+        Antes se descarga de memoria: si estuviera cargado, quedaría una copia
+        en VRAM sirviendo un modelo que ya no existe en disco. Un fallo al
+        descargar no impide el borrado —puede no estar cargado siquiera—, pero
+        sí se propaga cualquier fallo del borrado en sí.
+
+        NO comprueba si hay trabajo en curso: eso lo decide quien llama, que es
+        el único que sabe si la máquina está ocupada (ver el panel de Modelos).
+        """
+        catalog = await self.models()
+        entry = next((item for item in catalog if item.get("name") == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no encontrado: {model}")
+        if entry.get("deployment") != "local":
+            # Un modelo de Ollama Cloud no ocupa disco aquí; borrarlo no
+            # liberaría nada y sí quitaría el acceso.
+            raise ProviderError(
+                "MODEL_NOT_LOCAL", f"{model} no es un modelo local: no hay nada que borrar del disco",
+            )
+        size_bytes = int(entry.get("size_bytes") or 0)
+        try:
+            await self.lifecycle.unload(model)
+        except ProviderError:
+            logger.info("ollama.delete_unload_skipped", extra={
+                "event": "ollama.delete_unload_skipped", "model": model,
+            })
+        try:
+            response = await self.client.request("DELETE", "/api/delete", json={"model": model})
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            raise ProviderError(
+                "MODEL_DELETE_FAILED", provider_http_error_message(error),
+                retryable=error.response.status_code >= 500,
+            ) from error
+        except httpx.HTTPError as error:
+            raise ProviderError("MODEL_DELETE_FAILED", str(error), retryable=True) from error
+        # El catálogo cacheado sigue nombrando un modelo que ya no existe.
+        self._catalog_cache.clear()
+        return size_bytes
+
     async def models(self) -> list[dict[str, Any]]:
         cached = self._catalog_cache.get()
         if cached is not None:
@@ -404,7 +454,6 @@ class OllamaProvider:
         payload_request: dict[str, Any] = {
             "model": model,
             "messages": self._to_ollama_messages(messages),
-            "tools": tools,
             "stream": False,
             "keep_alive": -1,
             "options": {
@@ -412,6 +461,11 @@ class OllamaProvider:
                 "num_predict": request.generation.max_output_tokens,
             },
         }
+        # La clave `tools` se omite cuando no hay ninguna, para que el turno de
+        # cierre del bucle agéntico sea una generación normal y no quede la
+        # plantilla de tools en el contexto invitando a llamarlas.
+        if tools:
+            payload_request["tools"] = tools
         if _thinking_disabled(entry.get("capabilities"), request.generation.max_output_tokens):
             payload_request["think"] = False
         try:

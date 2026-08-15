@@ -35,13 +35,16 @@ Devuelve, entre otros:
 
 | Campo | Forma | Para qué te sirve |
 |---|---|---|
-| `contract_version` | `string` | `"2.7"`. Si no coincide con lo que esperas, revisa §11 |
+| `contract_version` | `string` | `"2.8"`. Si no coincide con lo que esperas, revisa §12 |
 | `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
 | `work_lanes` | `[string]` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
 | `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
 | `presets` | `{string: [string]}` | Presets válidos **por estrategia**: la clave es la estrategia |
 | `scheduling_by_preset` | `{string: [string]}` | Políticas de planificación válidas **por preset**: la clave es el preset |
 | `agent_skills` | `[string]` | Skills que el agente puede usar. `run_code` solo si hay sandbox |
+| `agent_skills_egress` | `[string]` | Subconjunto que saca contenido de la máquina. Prohibidas bajo frontera local (§4) |
+| `task_dependencies` | `bool` | Si puedes usar `group`, `depends_on` y `depends_on_group` (§5.6) |
+| `mcp_servers` | `[{id, data_boundary}]` | Servidores MCP disponibles para `execution.agent.mcp_servers`. Vacío = MCP apagado |
 | `sandbox_run_code` | `bool` | Si es `false`, pedir `run_code` da `409` |
 | `file_ingestion` | `bool` | Si puedes adjuntar ficheros |
 | `ingestion_formats` | `{string: [string]}` | Extensiones admitidas **agrupadas por tipo**: la clave es el grupo (`pdf`, `office`, `text`, `image`, `audio`, `video`), el valor su lista de extensiones con punto |
@@ -54,11 +57,12 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 ```json
 {
-  "contract_version": "2.7",
+  "contract_version": "2.8",
   "strategies": ["single", "mixture_of_agents", "agent"],
   "presets": { "single": ["fast"], "mixture_of_agents": ["fast", "slow"], "agent": ["fast"] },
   "scheduling_by_preset": { "fast": ["sequential"], "slow": ["adaptive", "parallel", "waves", "sequential"] },
   "agent_skills": ["web_search", "fetch_url", "calculator", "current_datetime", "run_code"],
+  "agent_skills_egress": ["fetch_url", "web_search"],
   "sandbox_run_code": true,
   "file_ingestion": true,
   "ingestion_formats": {
@@ -106,16 +110,18 @@ Es el único campo de privacidad. Declara qué es el contenido que envías y el 
 { "risk": { "data_classification": "internal" } }
 ```
 
-| Valor | ¿Puede salir a la nube? | Proveedores elegibles |
-|---|---|---|
-| `public` | sí | todos los configurados |
-| `internal` | sí | todos los configurados |
-| `confidential` | **no** | solo locales |
-| `local_only` | **no** | solo locales |
+| Valor | ¿Puede salir a la nube? | Proveedores elegibles | Skills con salida a red |
+|---|---|---|---|
+| `public` | sí | todos los configurados | sí |
+| `internal` | sí | todos los configurados | sí |
+| `confidential` | **no** | solo locales | **no** |
+| `local_only` | **no** | solo locales | **no** |
 
 Default si no lo envías: `internal`.
 
 **Esto es una restricción, no una recomendación.** Con `confidential` o `local_only`, un `target_model` que apunte a un proveedor externo hace que la petición falle en validación; no se degrada en silencio a otro modelo.
+
+**La frontera cubre las herramientas, no solo los modelos.** De poco sirve elegir un modelo local si el agente manda tu consulta a un buscador: bajo frontera local, `web_search` y `fetch_url` se rechazan igual que un proveedor cloud (§6.3). La lista exacta está en `capabilities.agent_skills_egress`.
 
 ### Si quieres controlar más fino
 
@@ -181,6 +187,9 @@ Todo lo demás tiene default. Respuesta `202`:
 | `risk` | objeto | `internal` | §4 |
 | `priority` | int 0–1000 | `100` | **Menor valor = antes en la cola** |
 | `prompt_compression` | `off` \| `light` \| `medium` \| `aggressive` \| null | `null` | `null` = usar la política global del broker |
+| `group` | string \| null | `null` | Etiqueta de esta tarea, para que otras puedan esperarla en bloque. Ver §5.6 |
+| `depends_on` | lista de task_id | `[]` | Tareas que deben terminar antes que esta. Máximo 64 |
+| `depends_on_group` | string \| null | `null` | Grupo que debe estar drenado antes que esta |
 
 La validación es estricta (`extra="forbid"`): **un campo que no exista en el contrato hace fallar la petición con `422`**, no se ignora. Es deliberado — un typo en un nombre de campo es un error silencioso caro.
 
@@ -211,7 +220,7 @@ La comparación es sobre un hash canónico del cuerpo completo, así que un camb
 
 Con `format: "json"` el broker avisa si el modelo elegido tiene verificado por sondeo que **no** soporta salida estructurada.
 
-`language` solo manda donde el broker ya escribe un system prompt propio: `agent` y `mixture_of_agents` (proponentes y árbitro), donde se añade la instrucción de redactar la respuesta final en ese idioma sea cual sea el de la petición o el de las fuentes consultadas. En `single` sigue siendo **metadata inerte**: esa inferencia es transparente por contrato —no recibe system prompt— y el broker no reescribe tu prompt, así que si necesitas fijar el idioma en `single`, dilo en el texto. El valor debe ser una etiqueta de idioma (`es`, `pt-BR`, `zh_Hans`); cualquier otra cosa se ignora entera en vez de sanearse.
+`language` solo manda donde el broker ya escribe un system prompt propio: `agent` y `mixture_of_agents` (proponentes y árbitro), donde se añade la instrucción de redactar la respuesta final en ese idioma sea cual sea el de la petición o el de las fuentes consultadas. En `single` sigue siendo **metadata inerte**: esa inferencia es transparente por contrato —no recibe system prompt— y el broker no reescribe tu prompt, así que si necesitas fijar el idioma en `single`, dilo en el texto. El valor debe ser una etiqueta de idioma (`es`, `pt-BR`, `zh_Hans`); cualquier otra cosa se ignora entera en vez de sanearse. El texto literal de cada system prompt que el broker escribe está en [`System_Prompts.md`](System_Prompts.md).
 
 ### 5.5 `model_requirements`
 
@@ -225,6 +234,38 @@ Con `format: "json"` el broker avisa si el modelo elegido tiene verificado por s
 | `max_cost_usd` | float ≥ 0 \| null | `null` | Presupuesto duro: corta la ejecución con `BUDGET_EXCEEDED` |
 
 **Sobre elegir modelo tú mismo:** puedes hacerlo con `target_model`, pero lo normal es no hacerlo. El broker ordena los candidatos por **tiempo esperado hasta una respuesta correcta**, medido en tu propia máquina; fijar un modelo a mano desactiva esa optimización. Úsalo cuando el modelo sea parte del requisito (una comparativa, una reproducción exacta), no por costumbre.
+
+### 5.6 Dependencias entre tareas
+
+El caso que las motiva: subes un documento, se indexa en cientos de tareas de embedding, y la pregunta sobre ese documento **no debe correr hasta que el índice esté entero**. Si la envías antes, se responde con un índice a medias y la respuesta parece buena.
+
+Dos formas de declararlo, combinables:
+
+```json
+{ "depends_on": ["task_abc", "task_def"] }
+```
+
+```json
+{ "group": "idx-doc7" }        // en cada tarea de indexado
+{ "depends_on_group": "idx-doc7" }   // en la pregunta
+```
+
+El grupo existe porque enviar los cientos de identificadores en cada pregunta no es viable. Una tarea **no puede** depender de su propio grupo (`422`): sería esperarse a sí misma, y las tareas del índice se bloquearían entre ellas.
+
+**Mientras espera**, la tarea queda en `waiting_for_dependencies`. Es hermano de `waiting_for_memory`: no es un fallo, **no consume el workflow único** —el resto de la cola sigue avanzando, que es lo que permite que su propia dependencia corra— y no pierde su sitio en la cola. El panel muestra a qué espera.
+
+**Reglas que conviene conocer antes de usarlo:**
+
+| Situación | Qué hace el broker |
+|---|---|
+| La dependencia termina `failed` o `cancelled` | La considera resuelta y **sigue adelante**, con un aviso en `result.warnings`. Esperar eternamente a algo que ya no va a terminar sería peor |
+| El `task_id` no existe | No bloquea (no se puede esperar a algo que no está) y lo dice en `result.warnings` |
+| La espera supera `execution.timeout_seconds` | **Se ejecuta igual**, con un aviso en `result.warnings` y un evento `task.dependency_timeout` |
+| Se crean tareas del grupo *después* de que la que espera haya sido reclamada | No las espera: el grupo se evalúa en cada reclamo sobre lo que existe en ese momento |
+
+Es decir: **la dependencia ordena, no condiciona**. En ningún caso una dependencia incumplida hace fallar tu tarea; siempre acaba ejecutándose. Si para tu caso una dependencia rota debe impedir la respuesta, tienes que mirar `result.warnings` y decidir tú — por eso el aviso viaja en el resultado y no solo en los eventos.
+
+Un grupo que no drena nunca no cuelga la cola: cada tarea que espera tiene su propio tope y acaba pasando.
 
 ---
 
@@ -274,6 +315,17 @@ Sin más configuración. Es el default y cubre la mayoría de los casos.
 - Se necesitan al menos 2 proponentes con éxito o la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`.
 - Si falla el árbitro, el broker prueba otro y si tampoco puede entrega la mejor propuesta (ver «El resultado»). Con `selection.arbiter`, `preferred_arbiter` o `allow_substitution: false` no se cambia de árbitro: solo se degrada.
 
+**Segunda ronda (`max_rounds`).** Con `max_rounds: 2` los proponentes pueden ver la síntesis de la primera ronda y mejorarla, y el árbitro sintetiza otra vez sobre lo refinado. Es un **techo, no una orden**, igual que `max_proposers`:
+
+| `max_judges` | Qué pasa con `max_rounds: 2` |
+|---|---|
+| `1` (por defecto) | Un juez puntúa la síntesis de la ronda 1. Solo se paga la segunda si baja del umbral. Coste típico: una invocación extra si la primera ronda ya era buena |
+| `0` | Sin juez: la segunda ronda se gasta siempre. Coste: el doble de proponentes más otro árbitro |
+
+**La segunda ronda no puede dejarte peor que la primera.** Si no queda presupuesto, no hay quorum, el árbitro cae o el contexto se desborda con la síntesis añadida, recibes la síntesis de la ronda 1 y la tarea termina `completed`. No hay ningún caso en que pedir dos rondas convierta en fallo una tarea que con una habría funcionado.
+
+En el resultado, `consensus.rounds` te dice cuántas se ejecutaron de verdad y `consensus.confidence` la puntuación del juez (`null` si no lo hubo). El coste de la ronda 1 sigue contando en `usage` aunque su respuesta no sea la que recibes: se pagó.
+
 ### 6.3 `agent`
 
 ```json
@@ -290,7 +342,12 @@ Sin más configuración. Es el default y cubre la mayoría de los casos.
 ```
 
 - Skills disponibles: `web_search`, `fetch_url`, `calculator`, `current_datetime`, `run_code`. Confirma cuáles con `capabilities.agent_skills`.
-- `max_iterations`: 1–20, default 6.
+- **Frontera de datos.** `web_search` y `fetch_url` sacan contenido de la tarea de esta máquina; el resto se resuelve dentro (el sandbox de `run_code` corre con `--network none`). Con `risk.data_classification` en `confidential` o `local_only`, pedirlas explícitamente —en `agent.skills` o en `proposer_skills`— falla la creación con `422`, igual que pedir un `target_model` cloud: da igual que el modelo sea local si el texto de la tarea sale igual. Si **no** eliges skills, la lista por defecto se acota sola a las locales y la tarea sigue adelante: un default del broker no debe hacer fallar tu petición. La lista exacta está en `capabilities.agent_skills_egress`.
+- Con `strategy: "auto"` y frontera local, el meta-router no elige `agent` por señales de red (`needs_recent`, `has_url`): sin skills de red esa estrategia no puede cumplir su motivo. Sí lo sigue eligiendo por señal de cálculo, que se resuelve en la máquina.
+- **Herramientas de servidores MCP**: `agent.mcp_servers: ["<id>"]` añade las herramientas de un servidor MCP configurado en el broker, con nombres `mcp__<servidor>__<tool>`. Los ids disponibles y su frontera de datos están en `capabilities.mcp_servers`; pedir uno inexistente, con MCP apagado, o uno `egress` bajo frontera local da `409`. Detalle en [`MCP_Servers.md`](MCP_Servers.md).
+- `max_iterations`: 1–20, default 6. Acota las rondas **con** herramientas. Al agotarlas, el broker pide una última respuesta **sin** herramientas en vez de devolverte un mensaje de error con el trabajo hecho tirado: la tarea termina `completed`, con `result.agent.stop_reason: "max_iterations"` y `result.agent.final_turn: true`. Ese turno de cierre no suma en `result.agent.iterations` (que sigue respetando el tope) pero sí en `result.usage.invocations` y en el coste, porque es una invocación real. Si el turno de cierre también falla, recibes el mensaje de iteraciones agotadas y `final_turn: false`.
+- Agotar `max_cost_usd` a media investigación no dispara turno de cierre —costaría por encima de un techo que tú fijaste como duro—: se te entrega lo último que llegó a decir el modelo, si dijo algo, seguido del aviso de presupuesto (`stop_reason: "budget_exhausted"`).
+- La conversación del bucle se mide contra la ventana del modelo antes de cada vuelta y los resultados de herramienta más antiguos se recortan para que quepa. Si aun así no cabe, `stop_reason: "context_exhausted"` con lo último que dijo el modelo. Un `max_iterations` alto con `fetch_url` es la receta para llegar ahí: cada página descargada ocupa contexto que ya no se recupera.
 - **Solo `inference_kind: "chat"` y no admite `output.format: "json"`.**
 - Necesita al menos una skill o una `client_tool`.
 - `run_code` requiere sandbox activo; si no lo está, la creación falla con `409 SANDBOX_DISABLED`.
@@ -415,7 +472,7 @@ GET /api/v1/tasks/{task_id}
 
 | Grupo | Estados |
 |---|---|
-| En espera | `queued`, `waiting_for_memory` |
+| En espera | `queued`, `waiting_for_memory`, `waiting_for_dependencies` (§5.6) |
 | En curso (inferencia) | `routing`, `planning`, `resource_planning`, `chunking`, `generating`, `proposing`, `evaluating`, `debating`, `synthesizing`, `verifying` |
 | En curso (conversión) | `converting` |
 | Pausada | `waiting_for_tools` (ver §9) |
@@ -461,6 +518,15 @@ Para `chat`:
 Para `embedding`: `result.embedding` con el vector.
 
 Según la estrategia aparecen además `result.agent` (iteraciones, skills usadas), `result.long_context` (fragmentos) o el detalle del consenso.
+
+**Los enlaces del agente vienen cotejados.** Si la respuesta de un `agent` cita URLs, el broker las compara con las que el agente llegó a mirar de verdad —las que pidió abrir con `fetch_url` y las que aparecieron en los resultados de sus skills— y lo deja en `result.agent.citations`:
+
+| Campo | Contenido |
+|---|---|
+| `citations.cited` | Cuántos enlaces distintos cita la respuesta |
+| `citations.unsupported` | Los que no salen de ninguna consulta del agente |
+
+La comprobación es determinista (comparación de URLs normalizadas: sin `www.`, sin barra final, sin fragmento) y **no censura nada**: la respuesta se entrega íntegra y esto la acompaña. Un `unsupported` no vacío no significa que la respuesta sea falsa, significa que esos enlaces no los vio el agente en esta tarea — típicamente los recuerda de su entrenamiento, y ahí es donde suele haber URLs que ya no existen. El campo no aparece cuando la respuesta no cita ningún enlace, que es el caso normal.
 
 **Un consenso puede llegar degradado.** Si el árbitro falla, el broker prueba otro y, si tampoco sintetiza, entrega la mejor propuesta en lugar de fallar: prefiere una respuesta sin contrastar a ninguna respuesta. Se ve en dos campos:
 
@@ -582,7 +648,29 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 
 ---
 
-## 12. Qué ha cambiado desde 2.5
+## 12. Qué ha cambiado
+
+### 2.8 — dependencias, guardarraíles del agente y la frontera de las herramientas
+
+**Lo nuevo que puede que quieras usar:**
+
+- **Dependencias entre tareas** (§5.6): `group`, `depends_on` y `depends_on_group`, con el estado nuevo `waiting_for_dependencies`. Trátalo como cualquier otro estado no terminal: sigue sondeando y no hagas nada. Anunciado en `capabilities.task_dependencies`.
+- **`result.warnings`**: lista de avisos en texto sobre cómo se ejecutó la tarea. Hoy la usan las dependencias incumplidas. Si tu interfaz muestra la respuesta sin mirar este campo, no se enterará de que se construyó sobre trabajo incompleto.
+- **`result.agent.citations`**: los enlaces que cita un agente, cotejados contra los que consultó de verdad. `unsupported` son los que no salen de ninguna consulta suya.
+- **Segunda ronda de consenso**: `max_rounds: 2` ya hace algo (§6.2). Antes se aceptaba y se ignoraba en silencio, y `consensus.rounds` devolvía siempre `1`.
+- **Herramientas MCP** (§6.3): `agent.mcp_servers` ofrece al modelo las herramientas de servidores MCP que el operador haya configurado en el broker. Lo disponible está en `capabilities.mcp_servers`; si viene vacío, no hay nada configurado y no tienes que hacer nada.
+
+**Un cambio de comportamiento que debes revisar:**
+
+**La frontera de datos ahora cubre las herramientas.** Con `risk.data_classification` en `confidential` o `local_only`, pedir explícitamente `web_search` o `fetch_url` —en `agent.skills` o en `proposer_skills`— **falla con `422`**. Antes se aceptaba: el modelo se quedaba en local y la consulta salía igual a un buscador, que hacía la promesa de la clasificación falsa a medias. Si no eliges skills, la lista por defecto se acota sola a las locales y no falla nada. La lista está en `capabilities.agent_skills_egress`.
+
+**Detalles del bucle agéntico que puede que notes:**
+
+- Al agotar `max_iterations`, la tarea termina `completed` con una última respuesta sin herramientas en vez de con un mensaje de error (§6.3). `result.agent.final_turn` lo indica.
+- Nuevo `stop_reason: "context_exhausted"` cuando la conversación desborda la ventana del modelo.
+- Al agotar `max_cost_usd`, se entrega lo último que dijo el modelo en vez de solo el aviso.
+
+### Desde 2.5
 
 Si tu cliente ya funcionaba, **lo más probable es que siga funcionando sin tocar nada**. Los cambios son aditivos o relajaciones, con una excepción de comportamiento.
 

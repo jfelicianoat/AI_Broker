@@ -866,6 +866,29 @@ class RoutedModelProvider:
 
         return [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
 
+    async def delete_local_model(self, provider_id: str, model: str) -> int:
+        """Borra del disco un modelo local. Devuelve los bytes liberados.
+
+        Solo Ollama: es el único proveedor con API de borrado, y por tanto el
+        único donde el runtime puede quitar los blobs que dejan de estar
+        referenciados. Para LM Studio y compañía habría que adivinar rutas y
+        borrar ficheros a mano, que es exactamente la clase de operación que no
+        debe hacer un servicio sobre el disco de nadie.
+        """
+        if provider_id.lower() != "ollama":
+            raise ProviderError(
+                "MODEL_DELETE_UNSUPPORTED",
+                f"El proveedor {provider_id} no permite borrar modelos desde el broker: "
+                "hazlo con su propia aplicación",
+            )
+        if not self.config.providers.ollama.enabled:
+            raise ProviderError("PROVIDER_UNAVAILABLE", "El proveedor Ollama está desactivado")
+        freed = await self.ollama.delete_model(model)
+        # La foto de modelos en VRAM puede seguir nombrando al borrado durante
+        # su TTL; se invalida para que el panel no lo enseñe cargado.
+        self._loaded_models_cache = None
+        return freed
+
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         system = None
         if request.execution.strategy == ExecutionStrategy.mixture_of_agents:

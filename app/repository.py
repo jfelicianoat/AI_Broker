@@ -10,6 +10,7 @@ from app.artifacts import ArtifactRecord
 from app.db import Database, dumps_json, loads_json
 from app.providers import ModelOutput, ProviderError
 from app.schemas import (
+    TERMINAL_STATUSES,
     ExecutionStrategy,
     ModelReference,
     QueueItem,
@@ -96,11 +97,12 @@ class TaskRepository:
                 """
                 INSERT INTO tasks (
                     id, request_id, idempotency_key, request_hash, request_json, status, priority, queue_position,
-                    progress_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    progress_json, task_group, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (task_id, request.request_id, request.idempotency_key, request_hash, dumps_json(request_json),
-                 TaskStatus.queued.value, request.priority, queue_position, dumps_json(progress), now, now),
+                 TaskStatus.queued.value, request.priority, queue_position, dumps_json(progress),
+                 request.group, now, now),
             )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
@@ -125,6 +127,23 @@ class TaskRepository:
             )
         return TaskCreateRequest.model_validate(loads_json(row["request_json"]))
 
+    def has_unfinished_task(self) -> bool:
+        """¿Queda trabajo por hacer: ejecutándose, esperando turno o en cola?
+
+        Más amplia que `has_active_task` a propósito. La usa el borrado de
+        modelos del panel: una tarea que aún no ha corrido puede tener por
+        delante justo el modelo que se va a borrar, y se encontraría con un
+        MODEL_UNAVAILABLE que nadie sabría explicar. Con un solo workflow
+        activo, esperar a que la cola se vacíe es cuestión de poco.
+        """
+        statuses = (*ACTIVE_TASK_STATUSES, *PENDING_QUEUE_STATUSES,
+                    TaskStatus.waiting_for_dependencies.value, TaskStatus.waiting_for_tools.value)
+        marks = ",".join("?" for _ in statuses)
+        row = self.db.query_one(
+            f"SELECT 1 FROM tasks WHERE status IN ({marks}) LIMIT 1", statuses,
+        )
+        return row is not None
+
     def has_active_task(self) -> bool:
         """¿Está la máquina ocupada ahora mismo, en cualquiera de los carriles?
 
@@ -146,6 +165,7 @@ class TaskRepository:
     # degrada a la tarea ni la manda al final.
     CLAIMABLE_INFERENCE_STATUSES = (
         TaskStatus.queued.value, TaskStatus.waiting_for_memory.value,
+        TaskStatus.waiting_for_dependencies.value,
     )
 
     def claim_next_queued_task_id(self) -> str | None:
@@ -220,6 +240,101 @@ class TaskRepository:
                 (row["id"], "task.claimed", dumps_json({"status": "routing"}), now),
             )
             return str(row["id"])
+
+    def pending_dependencies(
+        self, task_id: str, depends_on: list[str], depends_on_group: str | None,
+    ) -> dict[str, Any]:
+        """Qué le falta a una tarea para poder correr. Diccionario vacío = nada.
+
+        «Terminada» es cualquier estado terminal, incluidos `failed` y
+        `cancelled`: la dependencia se considera resuelta y quien esperaba sigue
+        adelante con un aviso (ver ConsensusCoordinator._await_dependencies).
+        Esperar eternamente a algo que ya no va a terminar sería peor.
+
+        Un id desconocido NO bloquea: no se puede esperar a una tarea que no
+        existe, y un cliente que manda un id caducado dejaría la suya colgada
+        para siempre. Se informa aparte para que el aviso lo diga.
+        """
+        terminal = tuple(status.value for status in TERMINAL_STATUSES)
+        pending: dict[str, Any] = {}
+        if depends_on:
+            id_marks = ",".join("?" for _ in depends_on)
+            terminal_marks = ",".join("?" for _ in terminal)
+            rows = self.db.query_all(
+                f"SELECT id, status FROM tasks WHERE id IN ({id_marks})", tuple(depends_on),
+            )
+            known = {str(row["id"]): str(row["status"]) for row in rows}
+            unfinished = [
+                task for task, status in known.items() if status not in terminal
+            ]
+            missing = [task for task in depends_on if task not in known]
+            if unfinished:
+                pending["tasks"] = sorted(unfinished)
+            if missing:
+                pending["unknown_tasks"] = sorted(missing)
+        if depends_on_group:
+            terminal_marks = ",".join("?" for _ in terminal)
+            row = self.db.query_one(
+                f"SELECT COUNT(*) AS pending FROM tasks WHERE task_group = ? AND id <> ? "
+                f"AND status NOT IN ({terminal_marks})",
+                (depends_on_group, task_id, *terminal),
+            )
+            remaining = int(row["pending"]) if row else 0
+            if remaining:
+                pending["group"] = depends_on_group
+                pending["group_pending"] = remaining
+        return pending
+
+    def defer_task_for_dependencies(
+        self, task_id: str, pending: dict[str, Any], *, wait_seconds: float,
+    ) -> dict[str, Any]:
+        """Devuelve la tarea a la cola porque aún le falta trabajo ajeno.
+
+        Misma mecánica que `defer_task_for_memory` —conserva `queue_position` y
+        vuelve a ser reclamable dentro de `wait_seconds`— pero sin reserva
+        anti-inanición: aquí no compite por un recurso que otros le quiten, solo
+        espera a que algo termine, y reservar turno no lo aceleraría.
+        """
+        now = datetime.now(timezone.utc)
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT dependency_wait_json FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            previous = loads_json(row["dependency_wait_json"], {}) or {}
+            not_before = (now + timedelta(seconds=wait_seconds)).isoformat()
+            state = {
+                **pending,
+                "waits": int(previous.get("waits") or 0) + 1,
+                "waiting_since": previous.get("waiting_since") or now.isoformat(),
+                "retry_at": not_before,
+            }
+            connection.execute(
+                "UPDATE tasks SET status = ?, not_before = ?, dependency_wait_json = ?, "
+                "updated_at = ? WHERE id = ?",
+                (
+                    TaskStatus.waiting_for_dependencies.value, not_before,
+                    dumps_json(state), now.isoformat(), task_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.waiting_for_dependencies", dumps_json(state), now.isoformat()),
+            )
+            return state
+
+    def dependency_wait_state(self, task_id: str) -> dict[str, Any]:
+        row = self.db.query_one("SELECT dependency_wait_json FROM tasks WHERE id = ?", (task_id,))
+        if row is None:
+            raise KeyError(task_id)
+        return loads_json(row["dependency_wait_json"], {}) or {}
+
+    def clear_dependency_wait(self, task_id: str) -> None:
+        self.db.execute(
+            "UPDATE tasks SET not_before = NULL, dependency_wait_json = NULL WHERE id = ?",
+            (task_id,),
+        )
 
     def defer_task_for_memory(
         self,
@@ -768,6 +883,40 @@ class TaskRepository:
                 (None, "queue.reordered", dumps_json({"task_ids": task_ids}), now),
             )
         return self.list_queue()
+
+    def event_payloads(self, task_id: str, event_type: str) -> list[dict[str, Any]]:
+        """Payloads de un tipo de evento de una tarea, en orden cronológico."""
+        rows = self.db.query_all(
+            "SELECT payload_json FROM events WHERE task_id = ? AND event_type = ? ORDER BY id ASC",
+            (task_id, event_type),
+        )
+        return [loads_json(row["payload_json"], {}) or {} for row in rows]
+
+    def append_result_warnings(self, task_id: str, warnings: list[str]) -> None:
+        """Añade avisos al resultado ya escrito, sin tocar nada más.
+
+        Los escribe quien sabe del aviso pero no del resultado: la espera por
+        dependencias ocurre antes de elegir estrategia y el resultado lo redacta
+        cada estrategia por su cuenta. Sin este canal el aviso se quedaría en el
+        log de eventos, que es justo donde nadie lo va a ver.
+        """
+        if not warnings:
+            return
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if row is None or not row["result_json"]:
+                return
+            result = loads_json(row["result_json"], None)
+            if not isinstance(result, dict):
+                return
+            existing = result.get("warnings")
+            result["warnings"] = [*existing, *warnings] if isinstance(existing, list) else list(warnings)
+            connection.execute(
+                "UPDATE tasks SET result_json = ?, updated_at = ? WHERE id = ?",
+                (dumps_json(result), _utc_now_iso(), task_id),
+            )
 
     def add_event(self, task_id: str | None, event_type: str, payload: dict[str, Any]) -> None:
         self.db.execute(

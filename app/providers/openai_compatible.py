@@ -490,9 +490,13 @@ class OpenAICompatibleProvider:
             "temperature": request.generation.temperature,
             "max_tokens": request.generation.max_output_tokens,
             "stream": False,
-            "tools": tools,
-            "tool_choice": "auto",
         }
+        # Sin tools se omiten ambas claves: un `"tools": []` es un 400 en los
+        # servidores estrictos de la familia OpenAI. El turno de cierre del
+        # bucle agéntico (ver Coordinator._final_answer_turn) llega justo así.
+        if tools:
+            payload_body["tools"] = tools
+            payload_body["tool_choice"] = "auto"
         try:
             response = await self.client.post("/chat/completions", headers=self._headers(), json=payload_body)
             response.raise_for_status()

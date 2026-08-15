@@ -46,6 +46,7 @@ from app.maintenance import (
     prune_terminal_task_artifacts,
     prune_terminal_task_events,
 )
+from app.mcp import MCPRegistry
 from app.model_catalog import model_availability_item, model_feature_profile
 from app.model_quarantine import load_quarantine
 from app.model_stats import load_model_stats
@@ -56,6 +57,7 @@ from app.sandbox import SandboxExecutor
 from app.schemas import (
     AGENT_SKILLS,
     DEFAULT_AGENT_SKILLS,
+    EGRESS_AGENT_SKILLS,
     BrokerCapabilitiesResponse,
     DashboardResourcesResponse,
     DashboardSummaryResponse,
@@ -67,6 +69,7 @@ from app.schemas import (
     FileStateResponse,
     FileStatus,
     HealthResponse,
+    MCPServerCapability,
     ModelAvailabilityResponse,
     ModelContextResponse,
     QueueReorderRequest,
@@ -79,6 +82,7 @@ from app.schemas import (
     TaskStatus,
     ToolResultsRequest,
     UsageResponse,
+    classification_allows_cloud,
     run_code_available,
 )
 from app.startup import (
@@ -122,8 +126,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     # Siempre construido: lee sandbox.* en vivo, así que activarlo/desactivarlo
     # desde el panel de Configuración aplica sin reiniciar el broker.
     sandbox = SandboxExecutor(broker_config)
+    # Registro de servidores MCP. Se construye siempre; los procesos se lanzan
+    # de forma perezosa, así que un servidor configurado y nunca usado no cuesta
+    # nada, y uno roto no impide arrancar el broker.
+    mcp_registry = MCPRegistry(broker_config.mcp)
     coordinator = ConsensusCoordinator(
         db, scheduler, provider=provider, ingestion=ingestion, sandbox=sandbox,
+        mcp=mcp_registry,
     )
 
     @asynccontextmanager
@@ -252,6 +261,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             # clientes HTTP que están a punto de cerrarse.
             await coordinator.shadow_probe.shutdown()
             await ingestion.shutdown()
+            # Los servidores MCP son procesos hijo: sin esto quedarían huérfanos
+            # al parar el broker.
+            await mcp_registry.aclose()
             await provider.close()
             db.close()
 
@@ -365,6 +377,31 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             # Fail-fast: sin sandbox la skill solo produciría errores de tool
             # en cada iteración del agente, gastando presupuesto.
             raise HTTPException(status_code=409, detail="SANDBOX_DISABLED")
+        requested_mcp = payload.execution.agent.mcp_servers
+        if requested_mcp:
+            # Mismo criterio que el sandbox: lo que depende de la configuración
+            # del broker se rechaza al crear, no al ejecutar. Aquí además está la
+            # frontera de datos, que en las skills se aplica en el contrato y en
+            # MCP no puede: qué servidor saca datos fuera lo declara el operador
+            # en el YAML, no lo sabe el esquema.
+            if not mcp_registry.config.enabled:
+                raise HTTPException(status_code=409, detail="MCP_DISABLED")
+            unknown = sorted(set(requested_mcp) - set(mcp_registry.server_ids()))
+            if unknown:
+                raise HTTPException(status_code=409, detail={
+                    "code": "MCP_SERVER_UNKNOWN",
+                    "message": "Servidores MCP no configurados o desactivados: " + ", ".join(unknown),
+                })
+            if not classification_allows_cloud(payload.risk.data_classification):
+                egress = sorted(set(requested_mcp) & set(mcp_registry.egress_server_ids()))
+                if egress:
+                    raise HTTPException(status_code=409, detail={
+                        "code": "MCP_SERVER_NOT_LOCAL",
+                        "message": (
+                            f"{payload.risk.data_classification.value} no admite servidores MCP "
+                            "que saquen contenido de la máquina: " + ", ".join(egress)
+                        ),
+                    })
         if payload.content.attachments:
             if not broker_config.ingestion.enabled:
                 raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
@@ -648,7 +685,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.7",
+            contract_version="2.8",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -674,9 +711,16 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             task_timeout=True,
             prompt_compression_override=True,
             agent_skills=list(AGENT_SKILLS if broker_config.sandbox.enabled else DEFAULT_AGENT_SKILLS),
+            agent_skills_egress=sorted(EGRESS_AGENT_SKILLS),
             sandbox_run_code=broker_config.sandbox.enabled,
             proposer_skills=True,
             client_tool_passthrough=True,
+            task_dependencies=True,
+            mcp_servers=[
+                MCPServerCapability(id=server.id, data_boundary=server.data_boundary)
+                for server in broker_config.mcp.servers
+                if broker_config.mcp.enabled and server.enabled
+            ],
             auto_strategy=broker_config.strategy_router.enabled,
             confidence_escalation=(
                 broker_config.strategy_router.enabled
