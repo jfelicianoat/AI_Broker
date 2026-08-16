@@ -6,16 +6,23 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from app import execution_fingerprint
 from app.artifacts import ArtifactRecord
 from app.db import Database, dumps_json, loads_json
 from app.providers import ModelOutput, ProviderError
 from app.schemas import (
     TERMINAL_STATUSES,
+    EffectiveGeneration,
+    ExecutionFingerprint,
     ExecutionStrategy,
     ModelReference,
     QueueItem,
     QueueResponse,
     TaskCreateRequest,
+    TaskExecutionSummary,
+    TaskGroupStateResponse,
+    TaskInvocationItem,
+    TaskInvocationsResponse,
     TaskKind,
     TaskStateResponse,
     TaskStatus,
@@ -56,6 +63,20 @@ class QueueFull(ValueError):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _model_reference_or_none(value: Any) -> ModelReference | None:
+    """Referencia de modelo guardada en el resultado, o None si no la hay.
+
+    El resultado es un diccionario sin contrato: puede venir de una versión
+    anterior o de una tarea que aún no ha elegido modelo, así que se valida en
+    vez de confiar."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        return ModelReference.model_validate(value)
+    except Exception:
+        return None
 
 
 def _parse_dt(value: str) -> datetime:
@@ -574,6 +595,9 @@ class TaskRepository:
         model: ModelReference,
         task_type: str,
         was_loaded: bool | None = None,
+        *,
+        excluded_from_learning: bool = False,
+        fingerprint: dict[str, Any] | None = None,
     ) -> str:
         """Checkpoint pre-vuelo: la fila existe ANTES de llamar al proveedor.
 
@@ -588,19 +612,30 @@ class TaskRepository:
         latencia de un modelo local en frío incluye la carga desde disco, y
         mezclar ambas poblaciones en una media hace inservible la estimación
         de tiempo. None = no se sabe (o no aplica, como en cloud).
+
+        excluded_from_learning propaga el marcador de la tarea: esta fila se
+        contabiliza como cualquier otra pero no alimenta las métricas del router
+        (ver TaskCreateRequest.exclude_from_model_learning).
+
+        fingerprint es la configuración con la que se va a servir, capturada
+        AHORA y no al terminar: es lo que permite comparar dos invocaciones de
+        una tirada larga que el proveedor cambió por medio.
         """
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             connection.execute(
                 "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
-                "task_type, was_loaded, tokens_input, tokens_output, cost_usd, started_at, status, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
+                "task_type, was_loaded, excluded_from_learning, fingerprint_hash, fingerprint_json, "
+                "tokens_input, tokens_output, cost_usd, started_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
                 (
                     invocation_id, task_id, run_id, role,
                     model.provider, model.deployment, model.model, task_type,
                     None if was_loaded is None else int(was_loaded),
+                    int(excluded_from_learning),
+                    (fingerprint or {}).get("hash"),
+                    dumps_json(fingerprint) if fingerprint else None,
                     now, now, now,
                 ),
             )
@@ -621,13 +656,40 @@ class TaskRepository:
             )
         return invocation_id
 
+    @staticmethod
+    def _served_with(connection: Any, invocation_id: str, output: ModelOutput) -> tuple[str, list[Any]]:
+        """Fragmento SQL con lo que el proveedor declara de la llamada real.
+
+        Son dos cosas que solo se saben al volver: los parámetros efectivos
+        —`max_output_tokens` puede haberse recortado para caber en la ventana—
+        y los componentes de huella que viajan en la respuesta (capa C:
+        `system_fingerprint` de un proveedor cloud no está en ningún catálogo).
+        La huella guardada al arrancar se conserva y solo se le añade lo nuevo.
+        """
+        assignments: list[str] = []
+        params: list[Any] = []
+        if output.generation:
+            assignments.append("generation_json = ?")
+            params.append(dumps_json(output.generation))
+        if output.fingerprint_observed:
+            row = connection.execute(
+                "SELECT fingerprint_json FROM model_invocations WHERE id = ?", (invocation_id,),
+            ).fetchone()
+            stored = loads_json(row["fingerprint_json"], None) if row is not None else None
+            merged = execution_fingerprint.merge(stored, output.fingerprint_observed)
+            if merged is not None:
+                assignments.extend(["fingerprint_hash = ?", "fingerprint_json = ?"])
+                params.extend([merged["hash"], dumps_json(merged)])
+        return ("".join(f", {item}" for item in assignments), params)
+
     def complete_invocation(self, invocation_id: str, task_id: str, output: ModelOutput) -> None:
         """Cierra el checkpoint con la respuesta real (tokens, coste, latencia)."""
         now = _utc_now_iso()
         with self.db.transaction() as connection:
+            served, served_params = self._served_with(connection, invocation_id, output)
             connection.execute(
                 "UPDATE model_invocations SET output_json = ?, tokens_input = ?, tokens_output = ?, "
-                "cost_usd = ?, latency_ms = ?, completed_at = ?, status = 'completed', updated_at = ? "
+                f"cost_usd = ?, latency_ms = ?, completed_at = ?, status = 'completed'{served}, updated_at = ? "
                 "WHERE id = ?",
                 (
                     dumps_json(output.technical_output()),
@@ -636,6 +698,7 @@ class TaskRepository:
                     output.cost_usd,
                     output.latency_ms,
                     now,
+                    *served_params,
                     now,
                     invocation_id,
                 ),
@@ -672,10 +735,11 @@ class TaskRepository:
                     (now, code, now, invocation_id),
                 )
             else:
+                served, served_params = self._served_with(connection, invocation_id, output)
                 connection.execute(
                     "UPDATE model_invocations SET output_json = ?, tokens_input = ?, "
                     "tokens_output = ?, cost_usd = ?, latency_ms = ?, completed_at = ?, "
-                    "status = 'failed', error_code = ?, updated_at = ? WHERE id = ?",
+                    f"status = 'failed', error_code = ?{served}, updated_at = ? WHERE id = ?",
                     (
                         dumps_json(output.technical_output()),
                         output.tokens_input,
@@ -684,6 +748,7 @@ class TaskRepository:
                         output.latency_ms,
                         now,
                         code,
+                        *served_params,
                         now,
                         invocation_id,
                     ),
@@ -732,13 +797,14 @@ class TaskRepository:
             row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None or row["status"] == TaskStatus.cancelled.value:
                 raise ProviderError("TASK_CANCELLED", "La tarea fue cancelada antes de persistir el resultado")
+            served, served_params = self._served_with(connection, invocation_id, output)
             connection.execute(
                 "UPDATE model_invocations SET output_json = ?, tokens_input = ?, tokens_output = ?, "
-                "cost_usd = ?, latency_ms = ?, completed_at = ?, status = 'completed', updated_at = ? "
+                f"cost_usd = ?, latency_ms = ?, completed_at = ?, status = 'completed'{served}, updated_at = ? "
                 "WHERE id = ?",
                 (
                     dumps_json(output.technical_output()), output.tokens_input, output.tokens_output,
-                    output.cost_usd, output.latency_ms, now, now, invocation_id,
+                    output.cost_usd, output.latency_ms, now, *served_params, now, invocation_id,
                 ),
             )
             connection.execute(
@@ -1260,6 +1326,135 @@ class TaskRepository:
                 recovered += 1
         return recovered
 
+    def get_group_state(self, group: str) -> TaskGroupStateResponse:
+        """Recuento por estado de una tirada. KeyError si el grupo no existe.
+
+        Un grupo sin tareas es indistinguible de uno mal escrito, y devolver
+        ceros haría que un cliente diera por terminada una tirada que en
+        realidad nunca llegó a encolarse."""
+        row = self.db.query_one(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                   SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                   SUM(CASE WHEN status IN ('queued', 'waiting_for_memory',
+                                            'waiting_for_dependencies', 'waiting_for_tools')
+                       THEN 1 ELSE 0 END) AS pending,
+                   MIN(created_at) AS created_at,
+                   MAX(updated_at) AS updated_at
+            FROM tasks WHERE task_group = ?
+            """,
+            (group,),
+        )
+        if row is None or not int(row["total"] or 0):
+            raise KeyError(group)
+        total = int(row["total"])
+        completed = int(row["completed"] or 0)
+        failed = int(row["failed"] or 0)
+        cancelled = int(row["cancelled"] or 0)
+        pending = int(row["pending"] or 0)
+        return TaskGroupStateResponse(
+            group=group,
+            total=total,
+            pending=pending,
+            # Lo que no está en cola ni ha terminado está corriendo. Se deriva
+            # en vez de enumerar los estados activos para que un estado nuevo no
+            # desaparezca del recuento por olvidar añadirlo aquí.
+            active=total - pending - completed - failed - cancelled,
+            completed=completed,
+            failed=failed,
+            cancelled=cancelled,
+            finished=(completed + failed + cancelled) == total,
+            created_at=_parse_dt(row["created_at"]) if row["created_at"] else None,
+            updated_at=_parse_dt(row["updated_at"]) if row["updated_at"] else None,
+        )
+
+    def list_task_invocations(self, task_id: str) -> TaskInvocationsResponse:
+        """Telemetría por invocación de una tarea, bajo el contrato v1.
+
+        No recoge nada nuevo: es lo que `model_invocations` ya guardaba, que
+        hasta ahora solo se podía ver por la superficie de dashboard —otra
+        autenticación, otro ciclo de vida— o parseando `result`, que es un
+        diccionario sin contrato."""
+        exists = self.db.query_one("SELECT 1 FROM tasks WHERE id = ?", (task_id,))
+        if exists is None:
+            raise KeyError(task_id)
+        rows = self.db.query_all(
+            "SELECT * FROM model_invocations WHERE task_id = ? ORDER BY created_at ASC, id ASC",
+            (task_id,),
+        )
+        return TaskInvocationsResponse(
+            task_id=task_id,
+            items=[self._row_to_invocation(row) for row in rows],
+        )
+
+    @staticmethod
+    def _row_to_invocation(row: Any) -> TaskInvocationItem:
+        keys = row.keys()
+        generation = loads_json(row["generation_json"], None) if "generation_json" in keys else None
+        output = loads_json(row["output_json"], None) if "output_json" in keys else None
+        fingerprint = loads_json(row["fingerprint_json"], None) if "fingerprint_json" in keys else None
+        return TaskInvocationItem(
+            invocation_id=row["id"],
+            role=row["role"],
+            model=ModelReference(
+                provider=row["provider"],
+                deployment=row["deployment"],
+                model=row["model"],
+                role=row["role"],
+            ),
+            status=row["status"],
+            error_code=row["error_code"] if "error_code" in keys else None,
+            tokens_input=int(row["tokens_input"] or 0),
+            tokens_output=int(row["tokens_output"] or 0),
+            cost_usd=float(row["cost_usd"] or 0),
+            latency_ms=float(row["latency_ms"]) if row["latency_ms"] is not None else None,
+            started_at=_parse_dt(row["started_at"]) if row["started_at"] else None,
+            completed_at=_parse_dt(row["completed_at"]) if row["completed_at"] else None,
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+            generation=EffectiveGeneration.model_validate(generation) if generation else None,
+            execution_fingerprint=(
+                ExecutionFingerprint.model_validate(fingerprint) if fingerprint else None
+            ),
+            excluded_from_model_learning=bool(
+                row["excluded_from_learning"] if "excluded_from_learning" in keys else 0
+            ),
+            content_source=(output or {}).get("content_source") if isinstance(output, dict) else None,
+        )
+
+    @staticmethod
+    def _execution_summary(
+        request: TaskCreateRequest | None, result: dict[str, Any] | None,
+    ) -> TaskExecutionSummary | None:
+        """Quién sirvió la tarea, leído del resultado ya persistido.
+
+        Se deriva y no se guarda aparte a propósito: duplicar el dato abre la
+        puerta a que las dos copias digan cosas distintas."""
+        if request is None:
+            return None
+        served = _model_reference_or_none((result or {}).get("model_used"))
+        models = [
+            reference
+            for reference in (
+                _model_reference_or_none(item) for item in (result or {}).get("models_used") or []
+            )
+            if reference is not None
+        ]
+        fallback = (result or {}).get("fallback_used")
+        summary = TaskExecutionSummary(
+            requested_model=request.model_requirements.target_model,
+            served_by=served,
+            models_used=models,
+            fallback_used=fallback if isinstance(fallback, bool) else None,
+        )
+        # Sin nada que declarar (tarea aún en cola) el bloque se omite entero:
+        # un resumen con todos los campos a null no informa de nada.
+        if summary.served_by is None and not summary.models_used and summary.fallback_used is None:
+            return None if summary.requested_model is None else summary
+        return summary
+
     def _row_to_task_state(self, row: Any) -> TaskStateResponse:
         kind = TaskKind(row["kind"] if "kind" in row.keys() else TaskKind.inference.value)
         # El request_json del carril de ingesta es un descriptor de conversión,
@@ -1283,6 +1478,7 @@ class TaskRepository:
             progress=loads_json(row["progress_json"], {}),
             result=loads_json(row["result_json"], None),
             error=loads_json(row["error_json"], None),
+            execution_summary=self._execution_summary(request, loads_json(row["result_json"], None)),
         )
 
     def _row_to_queue_item(self, row: Any) -> QueueItem:

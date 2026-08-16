@@ -141,6 +141,9 @@ def _prompt_tester_defaults() -> dict[str, str]:
         "json_schema": "",
         "data_classification": "internal",
         "fallback_allowed": "",
+        # Opt-in: por defecto el probador sigue enseñando al router, como
+        # siempre. Se marca cuando se está reproduciendo un fallo a propósito.
+        "exclude_from_model_learning": "",
         "timeout_seconds": "600",
         "max_cost_usd": "",
         "priority": "100",
@@ -1023,6 +1026,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "human_review_required": False,
         },
         "priority": _int_field(form, "priority", 100),
+        "exclude_from_model_learning": _checked(form, "exclude_from_model_learning"),
     })
 
 

@@ -5,6 +5,7 @@ import logging
 import random
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from app.providers.base import (
     output_language_directive,
     prompt_echo_ratio,
     role_system_prompt,
+    template_marker_leak,
     with_output_language,
 )
 from app.providers.bootstrap import BootstrapModelProvider
@@ -113,6 +115,7 @@ class RoutedModelProvider:
                  custom: dict[str, OpenAICompatibleProvider] | None = None,
                  stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
                  quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
+                 fingerprint_recorder: Callable[[tuple[str, str, str], dict[str, Any]], str] | None = None,
                  ) -> None:
         self.config = config
         self.ollama = ollama or OllamaProvider(config)
@@ -125,6 +128,14 @@ class RoutedModelProvider:
         # (app.model_quarantine). Se consulta en cada selección: la cuarentena
         # caduca sola y un modelo reinstalado debe volver sin reiniciar nada.
         self._quarantine_loader = quarantine_loader
+        # Registra la huella de ejecución de cada modelo y deja constancia
+        # cuando cambia (app.model_fingerprints). Sin recorder el catálogo sigue
+        # publicando la huella; lo único que se pierde es la señal de cambio.
+        self._fingerprint_recorder = fingerprint_recorder
+        # Última huella vista de cada modelo EN ESTE PROCESO. Evita ir a la BD
+        # en cada `models()` —que se llama en cada selección— cuando nada ha
+        # cambiado: solo se consulta al arrancar y cuando un hash difiere.
+        self._fingerprint_seen: dict[tuple[str, str, str], str] = {}
         self._parallel_limit = effective_max_parallel_invocations(config)
         self._serial_inference_slot = asyncio.Semaphore(1)
         self._parallel_inference_slot = asyncio.Semaphore(self._parallel_limit)
@@ -288,7 +299,51 @@ class RoutedModelProvider:
             apartado = quarantine.get(quarantine_key(entry))
             entry["quarantined"] = apartado is not None
             entry["quarantine_reason"] = apartado.reason if apartado else None
+        self._track_fingerprints(entries)
         return entries
+
+    def _track_fingerprints(self, entries: list[dict[str, Any]]) -> None:
+        """Deja constancia de la huella de cada modelo y de sus cambios.
+
+        La comparación en memoria es lo que hace esto barato: `models()` se
+        llama en cada selección, y sin ella cada llamada haría una consulta por
+        modelo. Con ella solo se toca la BD la primera vez que se ve un modelo
+        en este proceso y cuando su configuración cambia de verdad."""
+        if self._fingerprint_recorder is None:
+            return
+        for entry in entries:
+            current = entry.get("execution_fingerprint")
+            if not isinstance(current, dict) or not current.get("hash"):
+                continue
+            key = quarantine_key(entry)
+            if self._fingerprint_seen.get(key) == current["hash"]:
+                continue
+            self._fingerprint_recorder(key, current)
+            self._fingerprint_seen[key] = str(current["hash"])
+
+    async def execution_fingerprint(self, model: ModelReference) -> dict[str, Any] | None:
+        """Huella vigente del modelo, para persistirla con la invocación.
+
+        Nunca levanta: una invocación no puede fallar porque no se haya podido
+        describir con qué se iba a servir. Sin dato, la fila queda sin huella,
+        que es un `no_disponible` honesto."""
+        try:
+            catalog = await self.models()
+        except Exception:
+            return None
+        entry = next(
+            (
+                item for item in catalog
+                if item.get("name") == model.model
+                and str(item.get("provider") or "").lower() == model.provider.lower()
+                and str(item.get("deployment") or "").lower() == model.deployment.lower()
+            ),
+            None,
+        )
+        if entry is None:
+            return None
+        current = entry.get("execution_fingerprint")
+        return current if isinstance(current, dict) else None
 
     async def health(self) -> dict[str, dict[str, Any]]:
         """Sondas de salud concurrentes, con deadline corto y caché por proveedor.
@@ -1031,6 +1086,34 @@ class RoutedModelProvider:
         if request.inference_kind == InferenceKind.embedding:
             return output
         content = output.content or ""
+        # La reparación de fugas de formato va PRIMERO: si el modelo contestó y
+        # luego se puso a repetir su marca de cierre, lo que hay que juzgar es
+        # la respuesta, no el ruido de después. Sin esto, el detector de bucles
+        # tumbaba tareas cuya respuesta era correcta —y peor, otras 22 pasaban
+        # como buenas con la basura incluida.
+        leak = template_marker_leak(content)
+        if leak is not None:
+            clean, marker = leak
+            logger.info(
+                "routing.template_marker_trimmed",
+                extra={
+                    "event": "routing.template_marker_trimmed",
+                    "model": f"{model.provider}/{model.model}",
+                    "marker": marker,
+                    "chars_before": len(content),
+                    "chars_after": len(clean),
+                },
+            )
+            output = replace(
+                output,
+                content=clean,
+                content_source="content_truncated_at_template_marker",
+                # El original completo se conserva para poder auditarlo: la
+                # reparación no puede borrar la evidencia de que el modelo está
+                # mal empaquetado, que es justo lo que hay que ver al evaluarlo.
+                raw_content=content,
+            )
+            content = clean
         if looks_like_prompt_echo(prompt, content):
             error = ProviderError(
                 "PROMPT_ECHOED",
@@ -1121,9 +1204,13 @@ def build_provider(
     config: BrokerConfig,
     stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
     quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
+    fingerprint_recorder: Callable[[tuple[str, str, str], dict[str, Any]], str] | None = None,
 ):
     if config.processing.provider_mode == "bootstrap":
         return BootstrapModelProvider()
     return RoutedModelProvider(
-        config, stats_loader=stats_loader, quarantine_loader=quarantine_loader
+        config,
+        stats_loader=stats_loader,
+        quarantine_loader=quarantine_loader,
+        fingerprint_recorder=fingerprint_recorder,
     )

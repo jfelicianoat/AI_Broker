@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-from app.schemas import ModelAvailabilityItem
+from app.schemas import ExecutionFingerprint, ModelAvailabilityItem
 
 
 def model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, Any]]) -> ModelAvailabilityItem:
@@ -76,7 +76,22 @@ def model_availability_item(entry: dict[str, Any], health: dict[str, dict[str, A
         capabilities=capabilities,
         context_window=context_window,
         compatibility_error=entry.get("compatibility_error"),
+        execution_fingerprint=model_execution_fingerprint(entry),
     )
+
+
+def model_execution_fingerprint(entry: dict[str, Any]) -> ExecutionFingerprint | None:
+    """Huella de ejecución del catálogo, si el proveedor la aporta.
+
+    Una huella mal formada se descarta entera en vez de publicarse a medias:
+    aquí el compromiso es que lo que se enseña sea comprobable."""
+    value = entry.get("execution_fingerprint")
+    if not isinstance(value, dict) or not value.get("hash"):
+        return None
+    try:
+        return ExecutionFingerprint.model_validate(value)
+    except Exception:
+        return None
 
 
 def model_feature_profile(entry: dict[str, Any]) -> dict[str, Any]:

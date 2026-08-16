@@ -104,6 +104,18 @@ class Database:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS model_fingerprints (
+                provider TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                model TEXT NOT NULL,
+                fingerprint_hash TEXT NOT NULL,
+                components_json TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, deployment, model)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS artifacts (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -272,6 +284,32 @@ class Database:
                 # apartarlo, el segundo solo esperar. NULL en filas previas y
                 # en las que terminaron bien.
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN error_code TEXT")
+            if "excluded_from_learning" not in invocation_columns:
+                # La tarea declaró que esta invocación no debe enseñarle nada al
+                # broker (TaskCreateRequest.exclude_from_model_learning). Va en
+                # columna y no dentro del JSON de la petición porque las
+                # métricas y la cuarentena agregan sobre esta tabla sin tocar
+                # `tasks`: filtrar por un json_extract con join obligaría a
+                # recorrer meses de peticiones en cada selección. 0 en las filas
+                # anteriores, que es lo que eran: tráfico que sí enseñaba.
+                self._conn.execute(
+                    "ALTER TABLE model_invocations ADD COLUMN "
+                    "excluded_from_learning INTEGER NOT NULL DEFAULT 0"
+                )
+            if "generation_json" not in invocation_columns:
+                # Parámetros con los que se invocó de verdad (temperatura, tope
+                # de salida ya recortado al contexto, semilla y top_p, con el
+                # estado de cada uno). NULL en filas previas.
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN generation_json TEXT")
+            if "fingerprint_hash" not in invocation_columns:
+                # Huella de la configuración que sirvió esta invocación
+                # (app.execution_fingerprint), con su hash aparte para poder
+                # agrupar y comparar sin deserializar el detalle. Se guarda la
+                # vigente EN EL MOMENTO DE SERVIR, no la del catálogo actual: si
+                # el proveedor cambia a mitad de una tirada larga, se ve.
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN fingerprint_hash TEXT")
+            if "fingerprint_json" not in invocation_columns:
+                self._conn.execute("ALTER TABLE model_invocations ADD COLUMN fingerprint_json TEXT")
             file_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(ingested_files)").fetchall()
             }

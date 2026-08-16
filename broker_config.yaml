@@ -71,6 +71,10 @@ resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0
   unified_memory_budget_gb: 112.0
+  gpu_layer_offload: true
+  gpu_offload_reserve_ratio: 0.2
+  gpu_context_sizing: true
+  gpu_context_minimum_tokens: 4096
   max_loaded_local_models: auto
   scheduling_policy: adaptive
   allow_execution_waves: true
@@ -110,17 +114,6 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    code: []
-    long_context:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
     prose:
     - '*-coder*'
     - '*_coder*'
@@ -131,6 +124,17 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    code: []
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -425,9 +429,15 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: compatible
-      compatibility_checked_at: '2026-08-06T21:30:22.247441+00:00'
-      compatibility_error: null
+      compatibility: incompatible
+      compatibility_checked_at: '2026-08-16T19:44:50.984146+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":{"message":"Failed to load model \"laguna-s-2.1-heretic-i1\". Error:
+        Model loading was stopped due to insufficient system resources. Under the
+        current settings, this model requires approximately 64.89 GB of memory, and
+        continuing to load it would likely overload your system and cause it to freeze.
+        If you think this is incorrect, you can adjust the model loading guardrails
+        in settings.","type":"invalid_request_error","param":"model","code":null}}'
       features:
         vision: false
         json_mode: false

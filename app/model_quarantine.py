@@ -52,6 +52,12 @@ def load_quarantine(
     que sea dentro de la ventana, corta la racha y devuelve al modelo a la
     rotación. Solo cuentan los códigos declarados como definitivos; quedarse
     sin memoria o un proveedor caído son circunstancias, no defectos.
+
+    Tampoco cuenta el tráfico excluido del aprendizaje
+    (TaskCreateRequest.exclude_from_model_learning): apartar un modelo del
+    catálogo por fallar donde alguien estaba INTENTANDO que fallara sería
+    castigarlo por hacer justo lo esperable. Ni condena ni absuelve: esas
+    invocaciones no rompen una racha ni la alimentan.
     """
     if not settings.enabled:
         return {}
@@ -61,6 +67,7 @@ def load_quarantine(
         SELECT provider, deployment, model, status, error_code, created_at
         FROM model_invocations
         WHERE created_at >= ? AND status IN ('completed', 'failed')
+          AND excluded_from_learning = 0
         ORDER BY created_at DESC, id DESC
         """,
         (cutoff,),

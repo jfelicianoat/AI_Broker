@@ -221,6 +221,17 @@ class TaskOutput(StrictBaseModel):
 class GenerationConfig(StrictBaseModel):
     temperature: float = Field(default=0.3, ge=0, le=2)
     max_output_tokens: int = Field(default=4000, ge=1)
+    # None = no enviar el campo, NO "enviar el valor por defecto del proveedor":
+    # una petición sin semilla produce exactamente el mismo cuerpo que antes de
+    # que estos dos campos existieran.
+    #
+    # Que el broker envíe la semilla no garantiza que el modelo la honre: eso
+    # depende del runtime y no se puede comprobar desde fuera. Por eso la
+    # telemetría de la invocación declara si llegó a enviarse (`seed_status`);
+    # una semilla aceptada en silencio y descartada por debajo es peor que no
+    # tenerla, porque hace creer que un resultado es reproducible cuando no lo es.
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    top_p: float | None = Field(default=None, ge=0, le=1)
 
 
 class ModelReference(StrictBaseModel):
@@ -475,6 +486,29 @@ class TaskCreateRequest(StrictBaseModel):
     # Override por tarea de la compresión de prompts. None = usar la
     # configuración global del broker; "off" = enviar el prompt tal cual.
     prompt_compression: Literal["off", "light", "medium", "aggressive"] | None = None
+    # Esta tarea NO debe enseñarle nada al broker. Lo respetan las métricas por
+    # modelo (app.model_stats), la cuarentena (app.model_quarantine), la
+    # estimación de tiempo que se deriva de ellas (app.model_timing) y la
+    # elección de aspirante del sondeo en sombra (app.shadow_probe).
+    #
+    # Existe porque medir un modelo lo degradaba en producción: quien lo somete
+    # a prompts deliberadamente difíciles —contexto extremo, instrucciones
+    # contradictorias, entradas adversariales— le bajaba la tasa de fiabilidad
+    # al router y podía llegar a apartarlo del catálogo por acumulación de
+    # fallos. El broker no podía distinguir "falló porque el modelo es malo" de
+    # "falló porque el cliente estaba intentando que fallara". Le pasa igual al
+    # probador de prompts del propio panel cuando se usa para reproducir un fallo.
+    #
+    # Es un campo de primera clase y no una cadena en content.metadata a
+    # propósito: hacer que el router adaptativo dependa de metadata opaca del
+    # cliente sería un acoplamiento oculto que nadie que lea model_stats.py
+    # podría sospechar.
+    #
+    # Excluido del APRENDIZAJE, no de la CONTABILIDAD: sigue consumiendo
+    # presupuesto, cuotas, semáforo y VRAM, y sigue apareciendo en uso, coste y
+    # panel. Lo único que no hace es mover los indicadores que alimentan
+    # decisiones automáticas.
+    exclude_from_model_learning: bool = False
     # --- Dependencias entre tareas ---
     # Etiqueta a la que pertenece esta tarea. Existe para que otra pueda
     # esperarla en bloque sin conocer sus identificadores: el caso real es un
@@ -601,6 +635,103 @@ class TaskAcceptedResponse(StrictBaseModel):
     cancel_url: str
 
 
+class ExecutionFingerprintComponent(StrictBaseModel):
+    """Un componente de la huella con su procedencia (app.execution_fingerprint).
+
+    `no_disponible` es un resultado legítimo y hay que verlo: en un modelo cloud
+    la plantilla y el tokenizador no son observables, y eso es información real
+    sobre el límite de lo que se puede afirmar de esa ejecución."""
+
+    value: str | None = None
+    status: Literal["verificado", "declarado", "no_disponible"] = "no_disponible"
+
+
+class ExecutionFingerprint(StrictBaseModel):
+    """Configuración efectiva que produce (o produjo) una respuesta.
+
+    `hash` es canónico y estable: dos arranques con la misma configuración dan
+    el mismo valor, así que sirve para comparar dos respuestas separadas en el
+    tiempo sin mirar componente a componente."""
+
+    hash: str
+    components: dict[str, ExecutionFingerprintComponent] = Field(default_factory=dict)
+
+
+# Estado de un parámetro de generación en la petición que llegó al proveedor.
+# "sent" significa que el broker lo incluyó en el cuerpo, no que el modelo lo
+# haya honrado: eso último no es observable desde fuera y no se afirma.
+GenerationParameterStatus = Literal["not_requested", "sent", "unsupported"]
+
+
+class EffectiveGeneration(StrictBaseModel):
+    """Parámetros con los que se invocó de verdad al modelo.
+
+    Puede diferir de lo pedido: `max_output_tokens` se recorta cuando el prompt
+    y la reserva de salida no caben juntos en la ventana del modelo (ver
+    app.providers.base.request_with_context_capped_output)."""
+
+    temperature: float | None = None
+    max_output_tokens: int | None = None
+    seed: int | None = None
+    seed_status: GenerationParameterStatus = "not_requested"
+    top_p: float | None = None
+    top_p_status: GenerationParameterStatus = "not_requested"
+
+
+class TaskExecutionSummary(StrictBaseModel):
+    """Quién sirvió la tarea, bajo contrato.
+
+    Hasta ahora `fallback_used` solo existía en la superficie de dashboard, que
+    es administrativa y tiene otra autenticación: un cliente de la API v1 que
+    quisiera saber si le respondió el modelo que pidió tenía que parsear
+    `result`, que es un diccionario sin contrato."""
+
+    requested_model: ModelReference | None = None
+    served_by: ModelReference | None = None
+    models_used: list[ModelReference] = Field(default_factory=list)
+    fallback_used: bool | None = None
+
+
+class TaskInvocationItem(StrictBaseModel):
+    """Una llamada a un modelo dentro de una tarea.
+
+    No se recoge ningún dato nuevo: es lo que `model_invocations` ya almacenaba
+    reexpuesto bajo contrato estable, fuera de la superficie de dashboard."""
+
+    invocation_id: str
+    role: str
+    model: ModelReference
+    status: str
+    error_code: str | None = None
+    tokens_input: int = 0
+    tokens_output: int = 0
+    cost_usd: float = 0.0
+    latency_ms: float | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    # Parámetros efectivos de esta invocación concreta. None en filas anteriores
+    # a esta versión y en las que fallaron antes de llegar al proveedor.
+    generation: EffectiveGeneration | None = None
+    # Huella vigente en el momento de servir, no la del catálogo actual: si el
+    # proveedor cambia a mitad de una tirada larga, tiene que verse aquí.
+    execution_fingerprint: ExecutionFingerprint | None = None
+    # Esta invocación no alimenta las métricas del router (ver
+    # TaskCreateRequest.exclude_from_model_learning).
+    excluded_from_model_learning: bool = False
+    # De qué campo de la respuesta salió el texto. "reasoning_content" significa
+    # que el modelo dejó el contenido vacío y se rescató su razonamiento: la
+    # respuesta es válida, pero el modelo no está entregándola donde debe, y al
+    # comparar modelos eso importa.
+    content_source: str | None = None
+
+
+class TaskInvocationsResponse(StrictBaseModel):
+    task_id: str
+    items: list[TaskInvocationItem] = Field(default_factory=list)
+
+
 class TaskStateResponse(StrictBaseModel):
     task_id: str
     kind: TaskKind = TaskKind.inference
@@ -617,6 +748,36 @@ class TaskStateResponse(StrictBaseModel):
     progress: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    # Resumen tipado de la ejecución. `result` se queda como está, sin tipo y
+    # sin garantía de forma, por compatibilidad: esto no rompe a nadie, solo da
+    # una vía con contrato a lo que antes había que adivinar parseando.
+    execution_summary: TaskExecutionSummary | None = None
+
+
+class TaskGroupStateResponse(StrictBaseModel):
+    """Estado agregado de una tirada de tareas (`TaskCreateRequest.group`).
+
+    El contrato ya dejaba etiquetar tareas con un grupo, y el broker lo usaba
+    por dentro para resolver `depends_on_group`, pero desde fuera no había forma
+    de preguntar por él: un cliente que encolaba doscientas tareas de una tirada
+    tenía que sondear doscientos identificadores para saber si había terminado.
+    Eso empujaba a mandarlas de una en una —esperando cada una antes de enviar
+    la siguiente—, que es justo lo que la cola durable existe para evitar.
+    """
+
+    group: str
+    total: int
+    pending: int
+    active: int
+    completed: int
+    failed: int
+    cancelled: int
+    # Ninguna tarea del grupo sigue viva. Es la pregunta que de verdad hace
+    # quien lanza una tirada, y se responde aquí para que nadie tenga que
+    # deducirla sumando contadores (y equivocarse con los estados de espera).
+    finished: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class QueueItem(StrictBaseModel):
@@ -668,6 +829,9 @@ class ModelContextResponse(StrictBaseModel):
     compatibility: str | None = None
     compatibility_checked_at: str | None = None
     compatibility_error: str | None = None
+    # Configuración efectiva con la que se ejecutaría este modelo ahora mismo.
+    # None cuando el proveedor no aporta nada (ver app.execution_fingerprint).
+    execution_fingerprint: ExecutionFingerprint | None = None
 
 
 class ModelAvailabilityItem(StrictBaseModel):
@@ -683,6 +847,7 @@ class ModelAvailabilityItem(StrictBaseModel):
     capabilities: list[str] = Field(default_factory=list)
     context_window: int | None = None
     compatibility_error: str | None = None
+    execution_fingerprint: ExecutionFingerprint | None = None
 
 
 class ModelAvailabilityResponse(StrictBaseModel):
@@ -729,6 +894,9 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # Dependencias entre tareas: `group`, `depends_on` y `depends_on_group` en la
     # petición, y estado `waiting_for_dependencies` mientras espera.
     task_dependencies: bool
+    # GET /api/v1/groups/{group}: recuento por estado de una tirada entera, para
+    # encolarla de golpe y sondear una sola cosa en vez de N identificadores.
+    task_group_status: bool = False
     # Servidores MCP disponibles para `execution.agent.mcp_servers`, con la
     # frontera de datos que declaró el operador para cada uno. Lista vacía = MCP
     # apagado o sin servidores; pedir uno daría 409.
@@ -759,6 +927,19 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # (kind=ingestion) con su propia concurrencia, y se consultan por las
     # mismas vías que la inferencia.
     work_lanes: list[TaskKind] = Field(default_factory=list)
+    # Contrato 2.9 — evaluación reproducible.
+    # La petición puede fijar `generation.seed` y `generation.top_p`, y la
+    # telemetría declara si llegaron a enviarse al proveedor.
+    generation_determinism: bool = False
+    # La petición puede marcarse con `exclude_from_model_learning`: consume
+    # recursos y se contabiliza, pero no mueve las métricas del router.
+    exclude_from_model_learning: bool = False
+    # GET /api/v1/tasks/{id}/invocations: telemetría por invocación bajo
+    # contrato v1, y bloque `execution_summary` en el estado de tarea.
+    invocation_telemetry: bool = False
+    # El catálogo y cada invocación declaran la configuración efectiva que
+    # produce la respuesta (app.execution_fingerprint).
+    execution_fingerprint: bool = False
 
 
 class FileAcceptedResponse(StrictBaseModel):
@@ -855,6 +1036,9 @@ class DashboardTaskItem(StrictBaseModel):
     tokens_input: int
     tokens_output: int
     cost_actual_usd: float
+    # La tarea declaró no querer enseñarle nada al router. Se marca en el panel
+    # para que nadie lea un indicador de fiabilidad sin saber qué se contó.
+    excluded_from_model_learning: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -865,6 +1049,65 @@ class DashboardTaskPage(StrictBaseModel):
     page_size: int
     total: int
     total_pages: int
+
+
+class DashboardHistoryItem(StrictBaseModel):
+    """Una tarea terminada, tal como se busca en el histórico.
+
+    No reutiliza `DashboardTaskItem` porque las preguntas son otras. Allí lo que
+    importa es qué está pasando ahora (posición en cola, bloqueo de memoria, a
+    qué espera); aquí lo que importa es qué pasó: **por qué falló**, cuánto
+    tardó y qué modelos intervinieron —en plural, porque un mixture usa varios
+    y buscar «tareas de tal modelo» tiene que encontrarlas también.
+    """
+
+    task_id: str
+    kind: TaskKind = TaskKind.inference
+    label: str | None = None
+    request_id: str | None = None
+    status: TaskStatus
+    origin: str | None = None
+    execution_strategy: ExecutionStrategy | None = None
+    execution_preset: ExecutionPreset | None = None
+    # Todos los que intervinieron, no solo el que firmó la respuesta.
+    models: list[ModelReference] = Field(default_factory=list)
+    fallback_used: bool | None = None
+    # Código del fallo cuando `status` es `failed`. Es la columna que convierte
+    # una lista de fallos en un diagnóstico: cien tareas rojas no dicen nada,
+    # cien tareas rojas con el mismo código sí.
+    error_code: str | None = None
+    invocations: int = 0
+    tokens_input: int = 0
+    tokens_output: int = 0
+    cost_actual_usd: float = 0.0
+    duration_seconds: float | None = None
+    excluded_from_model_learning: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class DashboardHistoryPage(StrictBaseModel):
+    items: list[DashboardHistoryItem] = Field(default_factory=list)
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class DashboardHistoryOptions(StrictBaseModel):
+    """Valores que de verdad existen en el histórico, para los desplegables.
+
+    Se leen de los datos y no de la configuración a propósito: un proveedor
+    configurado que nunca sirvió nada no ayuda a filtrar, y uno que se borró de
+    la configuración pero dejó mil tareas detrás sí hace falta."""
+
+    providers: list[str] = Field(default_factory=list)
+    models: list[str] = Field(default_factory=list)
+    origins: list[str] = Field(default_factory=list)
+    # Tiradas recientes (`TaskCreateRequest.group`), de la más nueva a la más
+    # antigua: es la unidad en la que se lanza una evaluación y en la que se
+    # quiere revisarla después.
+    groups: list[str] = Field(default_factory=list)
 
 
 class DashboardInvocationItem(StrictBaseModel):
@@ -882,6 +1125,12 @@ class DashboardInvocationItem(StrictBaseModel):
     completed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    error_code: str | None = None
+    # Hash de la huella con la que se sirvió (app.execution_fingerprint). El
+    # detalle completo va en /api/v1/tasks/{id}/invocations; aquí basta el hash
+    # para ver de un vistazo que dos invocaciones no salieron de lo mismo.
+    execution_fingerprint_hash: str | None = None
+    excluded_from_model_learning: bool = False
 
 
 class DashboardEventItem(StrictBaseModel):

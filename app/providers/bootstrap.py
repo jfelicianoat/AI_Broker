@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from app.providers.base import AgentTurn, ModelOutput, ToolCall
+from app import execution_fingerprint as fingerprint
+from app.providers.base import AgentTurn, ModelOutput, ToolCall, effective_generation
 from app.schemas import InferenceKind, ModelReference, TaskCreateRequest
 
 
@@ -12,7 +13,15 @@ class BootstrapModelProvider:
         return [{"name": "bootstrap-single", "provider": "ollama", "deployment": "bootstrap", "status": "available",
                  "context_window": 1_000_000, "capabilities": ["completion", "embedding"],
                  "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None,
-                 "features": {"vision": False, "json_mode": True, "tools": True}}]
+                 "features": {"vision": False, "json_mode": True, "tools": True},
+                 # El proveedor fake no ejecuta nada: solo puede declarar quién
+                 # dice ser. El resto de componentes queda no_disponible, que es
+                 # exactamente lo que se sabe de él.
+                 "execution_fingerprint": fingerprint.build({
+                     "provider": fingerprint.component("ollama", fingerprint.DECLARED),
+                     "deployment": fingerprint.component("bootstrap", fingerprint.DECLARED),
+                     "model": fingerprint.component("bootstrap-single", fingerprint.DECLARED),
+                 })}]
 
     async def agent_turn(
         self,
@@ -60,12 +69,14 @@ class BootstrapModelProvider:
                     {"id": "call_0", "type": "function",
                      "function": {"name": name, "arguments": args_json}},
                 ]},
+                generation=self._generation(request),
             )
         text = f"Respuesta final del agente bootstrap para: {request.content.prompt}"
         return AgentTurn(
             content=text, tool_calls=(), tokens_input=6, tokens_output=max(1, len(text)//4),
             cost_usd=0.0, latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             raw_assistant_message={"role": "assistant", "content": text},
+            generation=self._generation(request),
         )
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
@@ -91,12 +102,20 @@ class BootstrapModelProvider:
         }
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         if request.inference_kind == InferenceKind.embedding:
-            return ModelOutput(None, max(1, len(request.content.prompt)//4), 0, 0.0, 1.0, (0.25, 0.5, 0.75))
+            return ModelOutput(None, max(1, len(request.content.prompt)//4), 0, 0.0, 1.0, (0.25, 0.5, 0.75),
+                               generation=effective_generation(request, applies=False))
         text = f"## Propuesta {ordinal}: {model.role or 'proposer'}\n\n{request.content.prompt}\n\nProveedor bootstrap."
-        return self._output(text, request.content.prompt)
+        return self._output(text, request)
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:
         text = "# Síntesis de Consenso Rápido\n\n" + "\n\n".join(item.content or "" for item in proposals)
-        return self._output(text, request.content.prompt)
+        return self._output(text, request)
     @staticmethod
-    def _output(content: str, prompt: str) -> ModelOutput:
-        return ModelOutput(content, max(1, len(prompt)//4), max(1, len(content)//4), 0.0, 1.0)
+    def _generation(request: TaskCreateRequest) -> dict[str, Any]:
+        # El proveedor fake no ejecuta ningún modelo, así que una semilla pedida
+        # aquí no se aplica a nada: se declara `unsupported` en vez de fingir
+        # que viajó a alguna parte.
+        return effective_generation(request, seed_supported=False, top_p_supported=False)
+    def _output(self, content: str, request: TaskCreateRequest) -> ModelOutput:
+        prompt = request.content.prompt
+        return ModelOutput(content, max(1, len(prompt)//4), max(1, len(content)//4), 0.0, 1.0,
+                           generation=self._generation(request))

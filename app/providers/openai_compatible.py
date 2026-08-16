@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from app import execution_fingerprint as fingerprint
 from app.config import OpenAICompatibleProviderConfig
 from app.providers.base import (
     PROBE_HARD_MAX_MODELS,
@@ -21,13 +23,25 @@ from app.providers.base import (
     _estimation_text,
     classify_probe_http_error,
     decoded_json,
+    effective_generation,
     enforce_context_limit,
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
+    provider_error_from_http,
     provider_http_error_message,
     request_with_context_capped_output,
+    rescued_content,
 )
+from app.providers.base import (
+    openai_determinism_fields as _determinism_fields,
+)
+from app.providers.base import (
+    openai_observed_fingerprint as _observed_fingerprint,
+)
+from app.providers.diagnostics import reasoning_only_error
 from app.schemas import OutputFormat, TaskCreateRequest
+
+logger = logging.getLogger("ai_broker.openai_compatible")
 
 # Capacidades sondeables contra /chat/completions con 1 token de salida.
 PROBE_FEATURES: tuple[str, ...] = ("vision", "json_mode", "tools")
@@ -131,7 +145,58 @@ class OpenAICompatibleProvider:
             "features_checked_at": (
                 model_config.features_checked_at if model_config is not None else None
             ),
+            # Solo la capa A es observable desde aquí: la plantilla de chat, el
+            # tokenizador y el runtime son del lado del proveedor y no se pueden
+            # comprobar. Quedan `no_disponible`, que no es un hueco a rellenar
+            # después: es información real sobre lo que se puede y no se puede
+            # afirmar de un modelo remoto. La capa C (system_fingerprint) llega
+            # con cada respuesta y se añade a la huella de la invocación.
+            "execution_fingerprint": fingerprint.build({
+                "provider": fingerprint.component(self.config.id, fingerprint.DECLARED),
+                "deployment": fingerprint.component(self.config.deployment, fingerprint.DECLARED),
+                "model": fingerprint.component(name, fingerprint.DECLARED),
+            }),
         }
+
+    def _empty_content_error(
+        self, message: dict[str, Any], payload: dict[str, Any], model: str
+    ) -> ProviderError:
+        """Por qué llegó una respuesta sin contenido.
+
+        «No devolvió contenido» a secas es cierto y a la vez engañoso cuando el
+        modelo sí respondió pero por `reasoning_content`: el proveedor contesta
+        200, cobra los tokens, su propia interfaz enseña el texto, y desde aquí
+        parece que no vino nada. Distinguirlo ahorra la investigación entera.
+        """
+        reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            details = (payload.get("usage") or {}).get("completion_tokens_details") or {}
+            diagnosis = reasoning_only_error(
+                len(reasoning), details.get("reasoning_tokens"),
+            )
+            error = ProviderError(
+                diagnosis.code,
+                diagnosis.message(self.config.id, model),
+                details={
+                    "provider": self.config.id,
+                    "reasoning_chars": len(reasoning),
+                    # El texto rescatable, acotado: es la evidencia de que la
+                    # respuesta existía y de qué decía.
+                    "reasoning_excerpt": reasoning[:2000],
+                },
+            )
+            return error
+        finish = (choice.get("finish_reason") if (choice := (payload.get("choices") or [{}])[0]) else None)
+        detail = f"finish_reason={finish or 'desconocido'}"
+        usage = payload.get("usage") or {}
+        if usage.get("completion_tokens"):
+            detail += f", {usage['completion_tokens']} tokens de salida facturados"
+        return ProviderError(
+            "INVALID_PROVIDER_RESPONSE",
+            f"{self.config.id}/{model}: la respuesta llegó sin contenido ({detail}). "
+            "El proveedor aceptó la petición pero no produjo texto.",
+            details={"provider": self.config.id, "finish_reason": finish},
+        )
 
     def _model_config(self, model: str) -> Any | None:
         return next((item for item in self.config.models if item.name == model), None)
@@ -448,11 +513,7 @@ class OpenAICompatibleProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError(
-                "MODEL_ERROR",
-                provider_http_error_message(error),
-                retryable=error.response.status_code >= 500,
-            ) from error
+            raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         data = payload.get("data") or []
         vector = data[0].get("embedding") if data and isinstance(data[0], dict) else None
         if not isinstance(vector, list) or not vector or any(
@@ -470,6 +531,8 @@ class OpenAICompatibleProvider:
             cost_usd=cost,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             embedding=tuple(float(value) for value in vector),
+            # /embeddings no admite ni temperatura ni semilla.
+            generation=effective_generation(request, applies=False),
         )
 
     async def chat_tools(
@@ -490,6 +553,7 @@ class OpenAICompatibleProvider:
             "temperature": request.generation.temperature,
             "max_tokens": request.generation.max_output_tokens,
             "stream": False,
+            **_determinism_fields(request),
         }
         # Sin tools se omiten ambas claves: un `"tools": []` es un 400 en los
         # servidores estrictos de la familia OpenAI. El turno de cierre del
@@ -506,11 +570,7 @@ class OpenAICompatibleProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError(
-                "MODEL_ERROR",
-                provider_http_error_message(error),
-                retryable=error.response.status_code >= 500,
-            ) from error
+            raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         choices = payload.get("choices") or []
         message = (choices[0].get("message") if choices else None) or {}
         tool_calls: list[ToolCall] = []
@@ -528,15 +588,27 @@ class OpenAICompatibleProvider:
         usage = payload.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or 0)
-        content = message.get("content")
+        # En el bucle agéntico el contenido vacío es NORMAL cuando el modelo
+        # pide herramientas: el rescate solo tiene sentido en el turno en que
+        # debería estar contestando.
+        if tool_calls:
+            content, source = message.get("content"), None
+            content = content if isinstance(content, str) else None
+        else:
+            content, source = rescued_content(
+                message, enabled=self.config.rescue_reasoning_content,
+            )
         return AgentTurn(
-            content=content if isinstance(content, str) else None,
+            content=content,
             tool_calls=tuple(tool_calls),
             tokens_input=input_tokens,
             tokens_output=output_tokens,
             cost_usd=(input_tokens * input_cost + output_tokens * output_cost) / 1_000_000,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             raw_assistant_message=message,
+            generation=effective_generation(request),
+            fingerprint_observed=_observed_fingerprint(payload),
+            content_source=source,
         )
 
     async def generate(
@@ -573,6 +645,7 @@ class OpenAICompatibleProvider:
                 "temperature": inference_request.generation.temperature,
                 "max_tokens": inference_request.generation.max_output_tokens,
                 "stream": False,
+                **_determinism_fields(inference_request),
             }
             if inference_request.output.format == OutputFormat.json:
                 request_payload["response_format"] = {"type": "json_object"}
@@ -584,15 +657,27 @@ class OpenAICompatibleProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError(
-                "MODEL_ERROR",
-                provider_http_error_message(error),
-                retryable=error.response.status_code >= 500,
-            ) from error
+            raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         choices = payload.get("choices") or []
-        content = ((choices[0].get("message") or {}).get("content") if choices else None)
-        if not isinstance(content, str) or not content.strip():
-            raise ProviderError("INVALID_PROVIDER_RESPONSE", f"{self.config.id} no devolvio contenido")
+        message = (choices[0].get("message") or {}) if choices else {}
+        content, source = rescued_content(
+            message, enabled=self.config.rescue_reasoning_content,
+        )
+        if content is None:
+            raise self._empty_content_error(message, payload, model)
+        if source == "reasoning_content":
+            # Se entrega, pero se deja constancia: la respuesta llegó por un
+            # campo que no es el que el contrato considera contenido, y eso dice
+            # algo del modelo que no debe perderse al evaluarlo.
+            logger.info(
+                "provider.reasoning_rescued",
+                extra={
+                    "event": "provider.reasoning_rescued",
+                    "provider": self.config.id,
+                    "model": model,
+                    "chars": len(content),
+                },
+            )
         usage = payload.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or 0)
@@ -603,4 +688,7 @@ class OpenAICompatibleProvider:
             output_tokens,
             cost,
             (datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            generation=effective_generation(inference_request),
+            fingerprint_observed=_observed_fingerprint(payload),
+            content_source=source,
         )

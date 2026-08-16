@@ -6,9 +6,10 @@
      data-refresh-pauseable>
   <div class="panel-heading" id="historial">
     <div>
-      <h2>Historial</h2>
-      <p>{{ history.total }} tareas finalizadas recientes</p>
+      <h2>Historial reciente</h2>
+      <p>Las últimas {{ history.total }}. Para buscar entre todas, con filtros por modelo, proveedor o fallo, ve al <a href="/dashboard/history">Histórico</a>.</p>
     </div>
+    <a class="button secondary compact" href="/dashboard/history">Ver todo</a>
     <button class="button secondary compact" type="button" data-refresh-target="#history-panel">Actualizar</button>
   </div>
   {% if history.items %}
@@ -30,6 +31,11 @@
             <td>
               <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
               <small>{{ task.origin or 'api' }}</small>
+              {% if task.excluded_from_model_learning %}
+                {# Sin esta marca, un panel de fiabilidad se lee sin saber qué
+                   se contó y qué no. #}
+                <small class="badge badge-muted" title="No cuenta para las métricas ni la cuarentena del router">sin aprendizaje</small>
+              {% endif %}
             </td>
             <td><span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span></td>
             <td>

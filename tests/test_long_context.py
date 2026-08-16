@@ -61,7 +61,7 @@ def test_map_reduce_rejected_with_json_output():
 def test_capabilities_announce_map_reduce(tmp_path):
     with make_client(tmp_path) as client:
         body = client.get("/api/v1/capabilities").json()
-        assert body["contract_version"] == "2.8"
+        assert body["contract_version"] == "2.9"
         assert body["long_context_map_reduce"] is True
 
 

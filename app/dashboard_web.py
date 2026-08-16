@@ -67,6 +67,7 @@ from app.schemas import (
     HealthResponse,
     InferenceKind,
     TaskCreateRequest,
+    TaskKind,
     TaskStatus,
 )
 from app.strategy_router import describe_bucket, heuristic_for_bucket, recommend_from_cases
@@ -253,6 +254,82 @@ def create_dashboard_router(
                 "history": queries.list_terminal_tasks(page_size=20),
                 "nav_active": "tareas",
             },
+        )
+
+    def _history_context(params: dict[str, Any], *, with_options: bool = True) -> dict[str, Any]:
+        """Filtros ya validados más la página que producen.
+
+        Compartido por la página y el fragmento HTMX para que el resultado no
+        pueda depender de por dónde se entró. `with_options` distingue los dos:
+        los desplegables solo los pinta la página, y recalcularlos en cada
+        filtrado es leer el histórico entero para nada."""
+        def enum_or_none(factory, raw: str | None):
+            # Un valor inventado en la query string no puede tumbar la página:
+            # se ignora el filtro y se enseña el histórico completo.
+            try:
+                return factory(raw) if raw else None
+            except ValueError:
+                return None
+
+        def date_or_none(raw: str | None):
+            try:
+                return datetime.fromisoformat(raw) if raw else None
+            except ValueError:
+                return None
+
+        excluded_raw = str(params.get("excluded") or "")
+        filters = {
+            "status": enum_or_none(TaskStatus, params.get("status")),
+            "kind": enum_or_none(TaskKind, params.get("kind")),
+            "provider": (params.get("provider") or "").strip() or None,
+            "model": (params.get("model") or "").strip() or None,
+            "origin": (params.get("origin") or "").strip() or None,
+            "group": (params.get("group") or "").strip() or None,
+            "search": (params.get("search") or "").strip() or None,
+            "since": date_or_none(params.get("since")),
+            "until": date_or_none(params.get("until")),
+            "excluded": {"si": True, "no": False}.get(excluded_raw),
+        }
+        try:
+            page = max(1, int(params.get("page") or 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = min(200, max(10, int(params.get("page_size") or 50)))
+        except (TypeError, ValueError):
+            page_size = 50
+        history = queries.list_history(page=page, page_size=page_size, **filters)
+        # La query string sin `page`, para que los enlaces de paginación
+        # conserven los filtros sin arrastrar la página anterior.
+        kept = {
+            key: str(params.get(key))
+            for key in ("status", "kind", "provider", "model", "origin", "group", "search",
+                        "since", "until", "excluded", "page_size")
+            if params.get(key)
+        }
+        return {
+            "history": history,
+            "options": queries.history_options() if with_options else None,
+            "form": {key: str(params.get(key) or "") for key in (
+                "status", "kind", "provider", "model", "origin", "group", "search",
+                "since", "until", "excluded", "page_size",
+            )},
+            "query": urlencode(kept),
+            "nav_active": "historico",
+        }
+
+    @protected.get("/dashboard/history", response_class=HTMLResponse)
+    async def history_page(request: Request):
+        return _template_response(
+            request, "task_history.html", _history_context(dict(request.query_params)),
+        )
+
+    @protected.get("/dashboard/fragments/task-history", response_class=HTMLResponse)
+    async def task_history_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/task_history.html",
+            context=_history_context(dict(request.query_params), with_options=False),
         )
 
     @protected.get("/dashboard/config", response_class=HTMLResponse)

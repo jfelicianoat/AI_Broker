@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app import execution_fingerprint as fingerprint
 from app.config import DeepSeekConfig
 from app.providers.base import (
     AgentTurn,
@@ -15,10 +16,19 @@ from app.providers.base import (
     ToolCall,
     _CatalogCache,
     _estimation_text,
+    effective_generation,
     estimate_tokens_upper_bound,
-    provider_http_error_message,
+    provider_error_from_http,
     request_with_context_capped_output,
+    rescued_content,
 )
+from app.providers.base import (
+    openai_determinism_fields as _determinism_fields,
+)
+from app.providers.base import (
+    openai_observed_fingerprint as _observed_fingerprint,
+)
+from app.providers.diagnostics import reasoning_only_error
 from app.schemas import OutputFormat, TaskCreateRequest
 
 
@@ -65,7 +75,15 @@ class DeepSeekProvider:
                        "context_window": self.config.context_window, "capabilities": ["completion"],
                        "context_window_source": "configured",
                        "compatibility": "compatible", "compatibility_checked_at": None, "compatibility_error": None,
-                       "features": self._known_features(str(item["id"]))}
+                       "features": self._known_features(str(item["id"])),
+                       # Proveedor remoto: solo la capa A es comprobable desde
+                       # aquí. La C (system_fingerprint, modelo devuelto) llega
+                       # con cada respuesta y se suma a la huella de la invocación.
+                       "execution_fingerprint": fingerprint.build({
+                           "provider": fingerprint.component("deepseek", fingerprint.DECLARED),
+                           "deployment": fingerprint.component("api", fingerprint.DECLARED),
+                           "model": fingerprint.component(str(item["id"]), fingerprint.DECLARED),
+                       })}
                       for item in response.json().get("data") or []]
             self._catalog_cache.set(result)
             return result
@@ -108,6 +126,7 @@ class DeepSeekProvider:
                 "temperature": inference_request.generation.temperature,
                 "max_tokens": inference_request.generation.max_output_tokens,
                 "stream": False,
+                **_determinism_fields(inference_request),
             }
             if inference_request.output.format == OutputFormat.json:
                 request_payload["response_format"] = {"type": "json_object"}
@@ -119,21 +138,32 @@ class DeepSeekProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError(
-                "MODEL_ERROR",
-                provider_http_error_message(error),
-                retryable=error.response.status_code >= 500,
-            ) from error
+            raise provider_error_from_http(error, provider="deepseek", model=model) from error
         choices = payload.get("choices") or []
-        content = ((choices[0].get("message") or {}).get("content") if choices else None)
-        if not isinstance(content, str) or not content.strip():
-            raise ProviderError("INVALID_PROVIDER_RESPONSE", "DeepSeek no devolvió contenido")
+        message = (choices[0].get("message") or {}) if choices else {}
+        # deepseek-reasoner entrega su cadena de razonamiento aparte; si la
+        # respuesta se queda ahí, se rescata en vez de dar la tarea por perdida.
+        content, source = rescued_content(message, enabled=True)
+        if content is None:
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                diagnosis = reasoning_only_error(len(reasoning), None)
+                raise ProviderError(diagnosis.code, diagnosis.message("deepseek", model))
+            finish = (choices[0].get("finish_reason") if choices else None)
+            raise ProviderError(
+                "INVALID_PROVIDER_RESPONSE",
+                f"deepseek/{model}: la respuesta llegó sin contenido "
+                f"(finish_reason={finish or 'desconocido'}).",
+            )
         usage = payload.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or 0)
         cost = (input_tokens * self.config.input_cost_per_million + output_tokens * self.config.output_cost_per_million) / 1_000_000
         return ModelOutput(content, input_tokens, output_tokens, cost,
-                           (datetime.now(timezone.utc) - started).total_seconds() * 1000)
+                           (datetime.now(timezone.utc) - started).total_seconds() * 1000,
+                           generation=effective_generation(inference_request),
+                           fingerprint_observed=_observed_fingerprint(payload),
+                           content_source=source)
 
     async def chat_tools(
         self,
@@ -149,6 +179,7 @@ class DeepSeekProvider:
             "temperature": request.generation.temperature,
             "max_tokens": request.generation.max_output_tokens,
             "stream": False,
+            **_determinism_fields(request),
         }
         # Sin tools se omiten ambas claves: `"tools": []` es un 400 en la API
         # de DeepSeek, y el turno de cierre del bucle agéntico llega así.
@@ -164,11 +195,7 @@ class DeepSeekProvider:
         except (httpx.TimeoutException, httpx.NetworkError) as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
-            raise ProviderError(
-                "MODEL_ERROR",
-                provider_http_error_message(error),
-                retryable=error.response.status_code >= 500,
-            ) from error
+            raise provider_error_from_http(error, provider="deepseek", model=model) from error
         message = ((payload.get("choices") or [{}])[0].get("message")) or {}
         tool_calls: list[ToolCall] = []
         for index, raw in enumerate(message.get("tool_calls") or []):
@@ -185,9 +212,14 @@ class DeepSeekProvider:
         usage = payload.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or 0)
-        content = message.get("content")
+        turn_content, turn_source = (
+            (message.get("content"), None) if tool_calls
+            else rescued_content(message, enabled=True)
+        )
+        if tool_calls and not isinstance(turn_content, str):
+            turn_content = None
         return AgentTurn(
-            content=content if isinstance(content, str) and content.strip() else None,
+            content=turn_content if turn_content and str(turn_content).strip() else None,
             tool_calls=tuple(tool_calls),
             tokens_input=input_tokens,
             tokens_output=output_tokens,
@@ -195,4 +227,7 @@ class DeepSeekProvider:
                       + output_tokens * self.config.output_cost_per_million) / 1_000_000,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             raw_assistant_message=message,
+            generation=effective_generation(request),
+            fingerprint_observed=_observed_fingerprint(payload),
+            content_source=turn_source,
         )

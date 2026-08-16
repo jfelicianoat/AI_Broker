@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ai-broker.local/contracts/broker/2.7/task-state.response.json",
-  "title": "AI Broker 2.7 — GET /api/v1/tasks/{task_id}",
+  "$id": "https://ai-broker.local/contracts/broker/2.9/task-state.response.json",
+  "title": "AI Broker 2.9 — GET /api/v1/tasks/{task_id}",
   "description": "Nucleo garantizado del estado de tarea. Lo declarado aqui no cambia sin subir la version de contrato. `progress` y `result` admiten claves adicionales: son informativas y NO son contrato, no construyas logica sobre ellas.",
   "type": "object",
   "required": [
@@ -62,7 +62,33 @@
       "additionalProperties": true
     },
     "result": {"type": ["object", "null"]},
-    "error": {"type": ["object", "null"]}
+    "error": {"type": ["object", "null"]},
+    "execution_summary": {
+      "description": "Quien sirvio la tarea, tipado. A diferencia de `result`, esto SI es contrato: es la via estable para saber si respondio el modelo que se pidio. null mientras la tarea no ha elegido modelo, y en el carril de ingesta.",
+      "type": ["object", "null"],
+      "properties": {
+        "requested_model": {"$ref": "#/$defs/modelReference"},
+        "served_by": {"$ref": "#/$defs/modelReference"},
+        "models_used": {"type": "array", "items": {"$ref": "#/$defs/modelReference"}},
+        "fallback_used": {
+          "description": "true = respondio un modelo distinto del pedido. null = la tarea no fijo modelo o aun no ha respondido.",
+          "type": ["boolean", "null"]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "modelReference": {
+      "type": ["object", "null"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "deployment": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "role": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true,
   "allOf": [

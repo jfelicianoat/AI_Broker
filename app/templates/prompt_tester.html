@@ -327,6 +327,15 @@
               <div class="check-row">
                 <label><input type="checkbox" name="fallback_allowed" {% if form.fallback_allowed %}checked{% endif %}> Permitir fallback</label>
               </div>
+              <div class="check-row">
+                {# Reproducir un fallo a propósito no debe bajarle la fiabilidad
+                   al modelo ni acercarlo a la cuarentena. La tarea se sigue
+                   contabilizando en coste y uso. #}
+                <label title="La tarea se ejecuta y se contabiliza, pero no cuenta para las métricas ni la cuarentena del router.">
+                  <input type="checkbox" name="exclude_from_model_learning" {% if form.exclude_from_model_learning %}checked{% endif %}>
+                  No aprender de esta tarea
+                </label>
+              </div>
               <label class="field compact-field">
                 <span>Prioridad</span>
                 <input name="priority" value="{{ form.priority }}" type="number" min="0" max="1000" step="1">
