@@ -389,14 +389,23 @@ class ConsensusCoordinator:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return
+            # Dónde se quedó. Un timeout a secas no distingue el caso más común
+            # —un modelo local grande que tarda en cargar desde disco— de una
+            # tarea que sí estaba generando: son dos problemas distintos y la
+            # salida de cada uno también.
+            stalled = self._timeout_context(repository, task_id)
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
                 progress={"phase": TaskStatus.failed.value, "timeout_seconds": effective_timeout},
                 error={
                     "code": "TASK_TIMEOUT",
-                    "message": f"La tarea superó el timeout efectivo de {effective_timeout} segundos",
+                    "message": (
+                        f"La tarea superó el timeout efectivo de {effective_timeout} segundos"
+                        f"{stalled['detail']}"
+                    ),
                     "retryable": True,
+                    **stalled["context"],
                 },
                 clear_queue_position=True,
             )
@@ -732,6 +741,8 @@ class ConsensusCoordinator:
             invocation_id = repository.start_invocation(
                 task_id, None, role, model, classify_task_type(request),
                 await self._model_loaded_state(model),
+                excluded_from_learning=request.exclude_from_model_learning,
+                fingerprint=await self._invocation_fingerprint(model),
             )
             try:
                 output = await self._run_cancellable(
@@ -990,6 +1001,8 @@ class ConsensusCoordinator:
         invocation_id = repository.start_invocation(
             task_id, None, role, model, classify_task_type(request),
             await self._model_loaded_state(model),
+            excluded_from_learning=request.exclude_from_model_learning,
+            fingerprint=await self._invocation_fingerprint(model),
         )
         try:
             output = await self._run_cancellable(
@@ -1177,6 +1190,8 @@ class ConsensusCoordinator:
         invocation_id = repository.start_invocation(
             task_id, None, "confidence_judge", model, classify_task_type(request),
             await self._model_loaded_state(model),
+            excluded_from_learning=request.exclude_from_model_learning,
+            fingerprint=await self._invocation_fingerprint(model),
         )
         try:
             output = await self._run_cancellable(
@@ -1317,6 +1332,8 @@ class ConsensusCoordinator:
             invocation_id = repository.start_invocation(
                 task_id, run_id, role, model, classify_task_type(request),
                 await self._model_loaded_state(model),
+                excluded_from_learning=request.exclude_from_model_learning,
+                fingerprint=await self._invocation_fingerprint(model),
             )
             last_invocation_id = invocation_id
             try:
@@ -1539,6 +1556,8 @@ class ConsensusCoordinator:
         invocation_id = repository.start_invocation(
             task_id, run_id, role, model, classify_task_type(request),
             await self._model_loaded_state(model),
+            excluded_from_learning=request.exclude_from_model_learning,
+            fingerprint=await self._invocation_fingerprint(model),
         )
         try:
             turn = await self._run_cancellable_turn(
@@ -2287,6 +2306,8 @@ class ConsensusCoordinator:
             invocation_id = repository.start_invocation(
                 task_id, run_id, role, model, classify_task_type(request),
                 await self._model_loaded_state(model),
+                excluded_from_learning=request.exclude_from_model_learning,
+                fingerprint=await self._invocation_fingerprint(model),
             )
             try:
                 output = await self._run_cancellable(
@@ -2734,6 +2755,63 @@ class ConsensusCoordinator:
         except Exception:
             return None
         return None if loaded is None else model.model in loaded
+
+    def _timeout_context(self, repository, task_id: str) -> dict[str, Any]:
+        """Qué estaba haciendo la tarea cuando venció el plazo.
+
+        Se lee de la última invocación abierta: si quedó en 'started', el
+        modelo nunca respondió —cargando o generando— y decir cuál era es la
+        diferencia entre «algo tardó» y «este modelo tarda demasiado en esta
+        máquina». Best-effort: un problema leyendo esto no puede impedir que la
+        tarea se cierre."""
+        try:
+            invocations = repository.list_task_invocations(task_id).items
+        except Exception:
+            return {"detail": "", "context": {}}
+        pendiente = next(
+            (item for item in reversed(invocations) if item.status == "started"), None,
+        )
+        if pendiente is None:
+            if not invocations:
+                return {
+                    "detail": ". No llegó a invocar a ningún modelo: se agotó antes, "
+                              "seleccionando o esperando recursos.",
+                    "context": {"stalled_at": "before_first_invocation"},
+                }
+            return {"detail": "", "context": {}}
+        modelo = pendiente.model
+        identidad = f"{modelo.provider}/{modelo.deployment}/{modelo.model}"
+        return {
+            "detail": (
+                f". Se quedó esperando a {identidad} en el rol '{pendiente.role}', que nunca "
+                "respondió. En un modelo local grande, lo habitual es que siga cargando desde "
+                "disco: súbele processing.task_timeout_seconds o usa un modelo menor."
+            ),
+            "context": {
+                "stalled_at": "invocation",
+                "stalled_model": identidad,
+                "stalled_role": pendiente.role,
+                "stalled_invocation_id": pendiente.invocation_id,
+            },
+        }
+
+    async def _invocation_fingerprint(self, model: ModelReference) -> dict[str, Any] | None:
+        """Configuración con la que se va a servir esta invocación.
+
+        Se captura ANTES de invocar y se persiste con la fila, no se deduce
+        después del catálogo: si el proveedor cambia a mitad de una tirada
+        larga, las invocaciones de antes y las de después tienen que quedar
+        distinguibles (ver app.execution_fingerprint).
+
+        None es un resultado aceptable —un proveedor que no aporta nada, el
+        fake de pruebas— y nunca es motivo para que falle una invocación."""
+        loader = getattr(self.provider, "execution_fingerprint", None)
+        if loader is None:
+            return None
+        try:
+            return await loader(model)
+        except Exception:
+            return None
 
     def _attach_error_context(
         self,

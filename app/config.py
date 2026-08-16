@@ -229,6 +229,43 @@ class ResourceConfig(BaseModel):
     # Vacío = GPU discreta, donde salir de la VRAM sí es caer por el barranco
     # del bus PCIe y el presupuesto de VRAM sigue mandando.
     unified_memory_budget_gb: float | None = Field(default=None, ge=1.0, le=4096.0)
+    # Reparto de capas entre GPU y CPU cuando un modelo no cabe entero en el
+    # presupuesto local. Sin esto, un modelo más grande que el presupuesto es
+    # terminal (VRAM_MODEL_TOO_LARGE) aunque el runtime supiera repartirlo.
+    #
+    # Con esto activado el broker calcula cuántas capas caben y se lo DICE a
+    # Ollama (`options.num_gpu`) en vez de dejar que lo adivine. La diferencia
+    # importa: en una APU con la memoria partida por BIOS, el driver anuncia la
+    # suma de la VRAM dedicada y la memoria prestada del sistema, Ollama se lo
+    # cree, intenta reservar el modelo entero de una pieza y el proceso muere.
+    # Decírselo evita ese intento imposible.
+    #
+    # El precio es velocidad: las capas que quedan en CPU van mucho más lentas.
+    # Es un intercambio consciente —un modelo lento es mejor que uno que no
+    # arranca—, pero no es gratis, y por eso se puede apagar.
+    gpu_layer_offload: bool = True
+    # Parte del presupuesto que NO se dedica a los pesos: caché KV, buffers de
+    # cómputo y el contexto. Reservar de menos es lo que hace fallar la carga
+    # justo al final, después de haber leído decenas de GB del disco.
+    gpu_offload_reserve_ratio: float = Field(default=0.2, ge=0.0, le=0.9)
+    # Pedirle a Ollama el contexto que la tarea necesita en vez de dejarle
+    # reservar el del modelo entero.
+    #
+    # Sin esto, un modelo que declara 262.144 tokens reserva caché KV para los
+    # 262.144 aunque la petición ocupe mil, y esa caché sale del mismo pool que
+    # los pesos: es lo que hace fallar la carga DESPUÉS de colocar las capas
+    # bien. El broker ya calcula lo que hace falta (estimate_required_context)
+    # para decidir si la petición cabe; aquí simplemente se lo dice al runtime.
+    #
+    # Solo aplica a la generación de un turno, donde el tamaño se conoce
+    # entero de antemano. En el bucle agéntico la conversación crece a cada
+    # iteración y ajustar el contexto en cada llamada obligaría a recargar el
+    # modelo: ahí sale más caro el remedio.
+    gpu_context_sizing: bool = True
+    # Suelo del contexto pedido. Un margen por debajo del cual no se baja
+    # aunque la cuenta salga menor: los tokenizadores reales no coinciden con
+    # la estimación del broker, y quedarse corto trunca la respuesta.
+    gpu_context_minimum_tokens: int = Field(default=4096, ge=512, le=1_000_000)
     max_loaded_local_models: int | str = "auto"
     scheduling_policy: str = "adaptive"
     allow_execution_waves: bool = True
@@ -523,6 +560,22 @@ class OpenAICompatibleProviderConfig(BaseModel):
     probe_features: bool = True
     input_cost_per_million: float = Field(default=0.0, ge=0)
     output_cost_per_million: float = Field(default=0.0, ge=0)
+    # Usar `reasoning_content` como respuesta cuando `content` llega vacío.
+    #
+    # Hay modelos —y proveedores enteros, según cómo separen el razonamiento—
+    # que entregan la contestación completa por ese campo y dejan el contenido
+    # a cero. El proveedor responde 200, cobra los tokens y su propia interfaz
+    # enseña el texto; sin esto, el broker declara la tarea fallida por una
+    # respuesta que sí existe y ya se ha pagado.
+    #
+    # Se rescata SOLO con el contenido vacío: nunca sustituye a una respuesta
+    # normal. Y siempre queda marcado (`content_source` en la telemetría),
+    # porque un rescate silencioso haría que un modelo mal empaquetado pasara
+    # por sano — justo lo contrario de lo que hace falta al evaluarlo.
+    #
+    # Se apaga por proveedor para poder exigir contenido limpio en una tanda de
+    # medición sin cambiar el comportamiento del resto.
+    rescue_reasoning_content: bool = True
     models: list[OpenAICompatibleModelConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")

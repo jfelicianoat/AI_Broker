@@ -9,6 +9,9 @@ from app.db import Database, loads_json
 from app.repository import _parse_dt
 from app.schemas import (
     DashboardEventItem,
+    DashboardHistoryItem,
+    DashboardHistoryOptions,
+    DashboardHistoryPage,
     DashboardInvocationItem,
     DashboardSummaryResponse,
     DashboardTaskDetail,
@@ -268,6 +271,9 @@ class DashboardQueryRepository:
                     completed_at=_parse_dt(item["completed_at"]) if item["completed_at"] else None,
                     created_at=_parse_dt(item["created_at"]),
                     updated_at=_parse_dt(item["updated_at"]),
+                    error_code=_column(item, "error_code"),
+                    execution_fingerprint_hash=_column(item, "fingerprint_hash"),
+                    excluded_from_model_learning=bool(_column(item, "excluded_from_learning") or 0),
                 )
                 for item in invocations
             ],
@@ -349,6 +355,179 @@ class DashboardQueryRepository:
             page_size=page_size,
             total=len(rows),
             total_pages=1 if rows else 0,
+        )
+
+    def history_options(self) -> DashboardHistoryOptions:
+        """Proveedores, modelos y orígenes presentes en el histórico."""
+        def column(sql: str) -> list[str]:
+            return [str(row[0]) for row in self.db.query_all(sql) if row[0]]
+
+        return DashboardHistoryOptions(
+            providers=column(
+                "SELECT DISTINCT provider FROM model_invocations ORDER BY provider"
+            ),
+            models=column("SELECT DISTINCT model FROM model_invocations ORDER BY model"),
+            # Solo las tiradas recientes: son cientos con el tiempo y el
+            # desplegable dejaría de servir para elegir.
+            groups=column(
+                "SELECT task_group FROM tasks WHERE task_group IS NOT NULL "
+                "GROUP BY task_group ORDER BY MAX(updated_at) DESC LIMIT 40"
+            ),
+            origins=column(
+                "SELECT DISTINCT json_extract(request_json, '$.content.metadata.origin') "
+                "FROM tasks ORDER BY 1"
+            ),
+        )
+
+    def list_history(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        status: TaskStatus | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        origin: str | None = None,
+        kind: TaskKind | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        search: str | None = None,
+        excluded: bool | None = None,
+        group: str | None = None,
+    ) -> DashboardHistoryPage:
+        """Tareas terminadas, filtrables y paginadas.
+
+        Existe porque el panel de Tareas solo enseña las últimas y, en una
+        tirada de cientos, lo anterior desaparece de la vista aunque siga en la
+        base de datos.
+
+        **Filtrar por modelo o proveedor mira las invocaciones, no el resultado.**
+        Es la diferencia entre encontrar las tareas de un modelo y encontrar
+        solo aquellas en las que además firmó la respuesta: en un mixture
+        intervienen varios y solo uno queda en `model_used`, y una tarea que
+        falló no llegó a tener resultado pero sí invocó a alguien. Buscar «qué
+        pasó con este modelo» tiene que devolver las dos cosas.
+        """
+        where = ["t.status IN ('completed', 'failed', 'cancelled')"]
+        params: list[Any] = []
+        if status is not None:
+            where.append("t.status = ?")
+            params.append(status.value)
+        if kind is not None:
+            where.append("t.kind = ?")
+            params.append(kind.value)
+        if origin is not None:
+            where.append("json_extract(t.request_json, '$.content.metadata.origin') = ?")
+            params.append(origin)
+        if since is not None:
+            where.append("t.updated_at >= ?")
+            params.append(since.isoformat())
+        if until is not None:
+            where.append("t.updated_at <= ?")
+            params.append(until.isoformat())
+        if excluded is not None:
+            where.append(
+                "COALESCE(json_extract(t.request_json, '$.exclude_from_model_learning'), 0) = ?"
+            )
+            params.append(1 if excluded else 0)
+        if group is not None:
+            # La tirada entera de una tanda de evaluación: es la unidad en la
+            # que se lanza el trabajo, así que también debe serlo al revisarlo.
+            where.append("t.task_group = ?")
+            params.append(group)
+        if search:
+            # Sobre identificadores, que es lo que alguien tiene a mano al
+            # llegar aquí desde un log o desde su propia aplicación.
+            where.append("(t.id LIKE ? OR COALESCE(t.request_id, '') LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
+        for column, value in (("provider", provider), ("model", model)):
+            if value is not None:
+                where.append(
+                    "EXISTS (SELECT 1 FROM model_invocations f "
+                    f"WHERE f.task_id = t.id AND LOWER(f.{column}) = LOWER(?))"
+                )
+                params.append(value)
+        where_sql = " AND ".join(where)
+
+        total_row = self.db.query_one(
+            f"SELECT COUNT(*) AS total FROM tasks t WHERE {where_sql}", params
+        )
+        total = int(total_row["total"] if total_row else 0)
+        # La página se recorta ANTES de unir con las invocaciones. Uniendo
+        # primero, SQLite agrupa el histórico entero para quedarse con veinte
+        # filas: son 400 ms contra 40 con los datos de esta máquina, y crece con
+        # el histórico. Aquí el join solo ve las tareas de la página.
+        rows = self.db.query_all(
+            f"""
+            SELECT t.*,
+                   COUNT(mi.id) AS invocation_count,
+                   COALESCE(SUM(mi.tokens_input), 0) AS invocation_tokens_input,
+                   COALESCE(SUM(mi.tokens_output), 0) AS invocation_tokens_output,
+                   COALESCE(SUM(mi.cost_usd), 0) AS invocation_cost_usd,
+                   GROUP_CONCAT(
+                       DISTINCT mi.provider || '/' || mi.deployment || '/' || mi.model
+                   ) AS invocation_models
+            FROM (
+                SELECT * FROM tasks t
+                WHERE {where_sql}
+                ORDER BY t.updated_at DESC
+                LIMIT ? OFFSET ?
+            ) t
+            LEFT JOIN model_invocations mi ON mi.task_id = t.id
+            GROUP BY t.id
+            ORDER BY t.updated_at DESC
+            """,
+            [*params, page_size, (page - 1) * page_size],
+        )
+        return DashboardHistoryPage(
+            items=[self._history_item(row) for row in rows],
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=math.ceil(total / page_size) if total else 0,
+        )
+
+    @staticmethod
+    def _history_item(row: Any) -> DashboardHistoryItem:
+        kind = TaskKind(row["kind"] if "kind" in row.keys() else TaskKind.inference.value)
+        payload = loads_json(row["request_json"], {})
+        result = loads_json(row["result_json"], None) or {}
+        error = loads_json(row["error_json"], None) or {}
+        request = payload if kind == TaskKind.inference else {}
+        metadata = (request.get("content") or {}).get("metadata") or {}
+        execution = request.get("execution") or {}
+        created_at = _parse_dt(row["created_at"])
+        updated_at = _parse_dt(row["updated_at"])
+        return DashboardHistoryItem(
+            task_id=row["id"],
+            kind=kind,
+            label=payload.get("filename") if kind == TaskKind.ingestion else None,
+            request_id=row["request_id"],
+            status=TaskStatus(row["status"]),
+            origin=metadata.get("origin") if isinstance(metadata.get("origin"), str) else None,
+            execution_strategy=(
+                ExecutionStrategy(execution.get("strategy", "single"))
+                if kind == TaskKind.inference
+                else None
+            ),
+            execution_preset=(
+                ExecutionPreset(execution.get("preset", "fast"))
+                if kind == TaskKind.inference
+                else None
+            ),
+            models=_parse_model_list(row["invocation_models"]),
+            fallback_used=(
+                result.get("fallback_used") if isinstance(result.get("fallback_used"), bool) else None
+            ),
+            error_code=str(error.get("code")) if error.get("code") else None,
+            invocations=int(row["invocation_count"] or 0),
+            tokens_input=int(row["invocation_tokens_input"] or 0),
+            tokens_output=int(row["invocation_tokens_output"] or 0),
+            cost_actual_usd=float(row["invocation_cost_usd"] or 0),
+            duration_seconds=max(0.0, (updated_at - created_at).total_seconds()),
+            excluded_from_model_learning=bool(request.get("exclude_from_model_learning") or False),
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
     def usage(self, month: str) -> UsageResponse:
@@ -436,9 +615,42 @@ class DashboardQueryRepository:
             tokens_input=int(row["invocation_tokens_input"] or 0),
             tokens_output=int(row["invocation_tokens_output"] or 0),
             cost_actual_usd=float(row["invocation_cost_usd"] or 0),
+            # Se lee de la petición y no de las invocaciones porque la tarea
+            # puede no haber invocado nada todavía y la marca ya es cierta.
+            excluded_from_model_learning=bool(request.get("exclude_from_model_learning") or False),
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
         )
+
+
+def _column(row: Any, name: str) -> Any:
+    """Valor de una columna que puede no existir todavía en esta base.
+
+    Las columnas nuevas llegan por migración; leerlas a pelo reventaría contra
+    una fila leída antes de que la migración corriera."""
+    return row[name] if name in row.keys() else None
+
+
+def _parse_model_list(value: Any) -> list[ModelReference]:
+    """Los modelos que intervinieron, desde el GROUP_CONCAT de la consulta.
+
+    Cada entrada llega como `proveedor/deployment/modelo`. El nombre del modelo
+    puede llevar barras (`qwen/qwen3-coder`), así que se parte solo por las dos
+    primeras: partir por todas trocearía el nombre."""
+    if not isinstance(value, str) or not value:
+        return []
+    references: list[ModelReference] = []
+    for item in value.split(","):
+        parts = item.split("/", 2)
+        if len(parts) != 3 or not all(parts):
+            continue
+        try:
+            references.append(
+                ModelReference(provider=parts[0], deployment=parts[1], model=parts[2])
+            )
+        except Exception:
+            continue
+    return references
 
 
 def _model_reference(value: Any) -> ModelReference | None:

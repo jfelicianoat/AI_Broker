@@ -1,0 +1,106 @@
+{# Resultados del histórico. Fragmento aparte para que filtrar y paginar
+   reemplacen solo la tabla y la página no salte al principio. #}
+<div id="task-history-results">
+  <div class="history-summary">
+    {% if history.total %}
+      <strong>{{ history.total }}</strong> tarea(s)
+      {% if history.total_pages > 1 %}
+        · página {{ history.page }} de {{ history.total_pages }}
+      {% endif %}
+    {% else %}
+      Sin resultados
+    {% endif %}
+  </div>
+
+  {% if history.items %}
+    <div class="table-wrap">
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th scope="col">Tarea</th>
+            <th scope="col">Resultado</th>
+            <th scope="col">Modelo(s)</th>
+            <th scope="col">Ejecución</th>
+            <th scope="col" class="align-right">Duración</th>
+            <th scope="col" class="align-right">Tokens</th>
+            <th scope="col" class="align-right">Coste</th>
+            <th scope="col">Terminada</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for task in history.items %}
+          <tr>
+            <td>
+              <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+              <div class="history-tags">
+                <span class="tag">{{ task.origin or 'api' }}</span>
+                {% if task.excluded_from_model_learning %}
+                  <span class="badge badge-muted" title="No cuenta para las métricas ni la cuarentena del router">sin aprendizaje</span>
+                {% endif %}
+                {% if task.fallback_used %}
+                  <span class="badge badge-muted" title="Respondió un modelo distinto del pedido">fallback</span>
+                {% endif %}
+              </div>
+            </td>
+            <td>
+              <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+              {# El código es lo que convierte una lista de fallos en un
+                 diagnóstico: cien tareas rojas no dicen nada, cien con el
+                 mismo código sí. #}
+              {% if task.error_code %}
+                <div class="history-error">{{ task.error_code }}</div>
+              {% endif %}
+            </td>
+            <td>
+              {% if task.kind.value == 'ingestion' %}
+                <span class="muted-text">{{ task.label or 'Conversión de fichero' }}</span>
+              {% elif task.models %}
+                {% for model in task.models %}
+                  <div class="history-model">
+                    <span>{{ model.model }}</span>
+                    <span class="tag">{{ model.provider }}</span>
+                  </div>
+                {% endfor %}
+              {% else %}
+                <span class="muted-text">Sin invocaciones</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if task.execution_strategy %}
+                {{ task.execution_strategy.value }}/{{ task.execution_preset.value }}
+              {% else %}
+                <span class="muted-text">—</span>
+              {% endif %}
+              <div class="muted-text">{{ task.invocations }} invocación(es)</div>
+            </td>
+            <td class="align-right">{{ '%.1f'|format(task.duration_seconds or 0) }} s</td>
+            <td class="align-right">{{ task.tokens_input }} / {{ task.tokens_output }}</td>
+            <td class="align-right">{{ '%.4f'|format(task.cost_actual_usd) }}</td>
+            <td>{{ task.updated_at|short_date }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if history.total_pages > 1 %}
+      <nav class="pager" aria-label="Paginación del histórico">
+        {% set base = '/dashboard/fragments/task-history?' ~ (query ~ '&' if query else '') %}
+        <button class="button secondary" type="button"
+                {% if history.page <= 1 %}disabled{% endif %}
+                hx-get="{{ base }}page={{ history.page - 1 }}"
+                hx-target="#task-history-results" hx-swap="outerHTML">Anterior</button>
+        <span class="pager-state">{{ history.page }} / {{ history.total_pages }}</span>
+        <button class="button secondary" type="button"
+                {% if history.page >= history.total_pages %}disabled{% endif %}
+                hx-get="{{ base }}page={{ history.page + 1 }}"
+                hx-target="#task-history-results" hx-swap="outerHTML">Siguiente</button>
+      </nav>
+    {% endif %}
+  {% else %}
+    <div class="empty-state">
+      <strong>Ninguna tarea coincide con estos filtros</strong>
+      <p>Prueba a quitar alguno, o amplía el rango de fechas.</p>
+    </div>
+  {% endif %}
+</div>

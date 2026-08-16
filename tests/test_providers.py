@@ -632,8 +632,14 @@ class DeepSeekProviderTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "secret"}):
             with self.assertRaises(ProviderError) as http_error:
                 await provider.generate(request, "deepseek-chat", "hola", system="Eres conciso")
-            self.assertEqual(http_error.exception.code, "MODEL_ERROR")
-            self.assertFalse(http_error.exception.retryable)
+            # Un 429 con "rate limited" en el cuerpo es una limitación de
+            # frecuencia, no un fallo del modelo, y SÍ tiene sentido reintentarlo.
+            # Antes salía como MODEL_ERROR no reintentable: le decía al cliente
+            # que se rindiera justo en el caso en que esperar funciona.
+            self.assertEqual(http_error.exception.code, "RATE_LIMITED")
+            self.assertTrue(http_error.exception.retryable)
+            # El texto del proveedor no se pierde al diagnosticar.
+            self.assertIn("rate limited", http_error.exception.details["provider_error"])
 
             with self.assertRaises(ProviderError) as invalid:
                 await provider.generate(request, "deepseek-chat", "hola", system="Eres conciso")
@@ -2204,3 +2210,138 @@ class NeutralizeDelimitersTests(unittest.TestCase):
 
         benign = "Usa <div> en HTML y compara a < b con b > c. <candidato> no es un tag reservado."
         self.assertEqual(neutralize_consensus_delimiters(benign), benign)
+
+
+class LayerOffloadTests(unittest.TestCase):
+    """Reparto de capas entre GPU y CPU (app.providers.ollama.plan_offload).
+
+    El caso real: una APU con la memoria partida por BIOS (64 GiB dedicados al
+    iGPU, 64 para el sistema). ROCm anuncia la suma de la VRAM dedicada y la
+    memoria prestada —99 GiB—, Ollama se lo cree, intenta reservar un modelo de
+    86 GiB de una sola pieza y llama-server muere con `cudaMalloc failed`.
+    Decirle cuántas capas caben evita ese intento imposible.
+    """
+
+    GB = 1024 ** 3
+    BUDGET = 62 * GB  # 64 dedicados menos 2 de margen
+
+    def _plan(self, size_gb: float, layers, **overrides):
+        from app.providers.ollama import plan_offload
+
+        options = {"enabled": True, "reserve_ratio": 0.2, **overrides}
+        return plan_offload(int(size_gb * self.GB), layers, self.BUDGET, **options)
+
+    def test_a_model_that_fits_is_left_exactly_as_before(self) -> None:
+        """Sin regresión: en una máquina holgada no se envía num_gpu y Ollama
+        sigue decidiendo, que es lo que llevaba haciendo bien siempre."""
+        plan = self._plan(13.4, 40)
+
+        assert plan is not None
+        self.assertIsNone(plan.num_gpu)
+        self.assertFalse(plan.split)
+
+    def test_an_oversized_model_is_split_and_reserves_only_its_gpu_half(self) -> None:
+        plan = self._plan(89.4, 48)
+
+        assert plan is not None
+        self.assertTrue(plan.split)
+        self.assertEqual(plan.total_layers, 48)
+        # Las capas que van a GPU caben en el presupuesto, que es la condición
+        # que Ollama no comprobaba.
+        self.assertLessEqual(plan.gpu_bytes, self.BUDGET)
+        self.assertLess(plan.num_gpu, 48)
+        # Y se reserva solo esa parte: reservar el modelo entero cuando la mitad
+        # vive en RAM del sistema rechazaría trabajo que sí cabe.
+        self.assertLess(plan.gpu_bytes, int(89.4 * self.GB))
+
+    def test_without_a_layer_count_nothing_is_invented(self) -> None:
+        """`block_count` ausente en /api/show. Un num_gpu adivinado se paga
+        cargando decenas de GB desde disco para morir al final: mejor el error
+        terminal de siempre."""
+        self.assertIsNone(self._plan(89.4, None))
+        self.assertIsNone(self._plan(89.4, 0))
+
+    def test_the_split_can_be_turned_off(self) -> None:
+        """El reparto cuesta velocidad: las capas en CPU van mucho más lentas.
+        Con la opción apagada vuelve el comportamiento terminal anterior."""
+        self.assertIsNone(self._plan(89.4, 48, enabled=False))
+
+    def test_a_model_too_large_for_even_one_layer_is_still_terminal(self) -> None:
+        """Repartir tiene un suelo: si no cabe ni una capa, cargarlo entero en
+        CPU tardaría horas y nadie ha pedido eso."""
+        self.assertIsNone(self._plan(5000.0, 2))
+
+    def test_num_gpu_travels_in_the_options_only_when_there_is_a_split(self) -> None:
+        from app.providers.ollama import OffloadPlan, _generation_options
+        from app.schemas import TaskCreateRequest
+
+        request = TaskCreateRequest(idempotency_key="offload:opts", content={"prompt": "hola"})
+
+        whole = _generation_options(request, OffloadPlan(num_gpu=None, gpu_bytes=1))
+        split = _generation_options(request, OffloadPlan(num_gpu=26, gpu_bytes=1, layers=26))
+
+        # Cuerpo idéntico al de antes de que existiera el reparto.
+        self.assertEqual(set(whole), {"temperature", "num_predict"})
+        self.assertEqual(split["num_gpu"], 26)
+
+    def test_a_model_of_unknown_weight_proceeds_without_reserving(self) -> None:
+        """Sin `size` en /api/tags no se sabe cuánto pesa. Se sigue adelante sin
+        reserva, como siempre: convertir el desconocimiento en un rechazo dejaría
+        fuera modelos que la máquina ejecuta sin problema."""
+        plan = self._plan(0, 48)
+
+        assert plan is not None
+        self.assertIsNone(plan.num_gpu)
+        self.assertEqual(plan.gpu_bytes, 0)
+
+
+class ContextSizingTests(unittest.TestCase):
+    """Tamaño de contexto pedido al runtime (context_window_for).
+
+    La caché KV se dimensiona con el contexto, no con la petición. Un modelo que
+    declara 262.144 tokens reservaba memoria para los 262.144 aunque se le
+    preguntara la hora, y esa reserva salía del mismo pool que los pesos: con el
+    modelo repartido, era lo que tumbaba la carga JUSTO DESPUÉS de colocar las
+    capas bien. Medido en la máquina real: 6 GiB de caché contra 336 MiB.
+    """
+
+    def _ctx(self, required, window, minimum=4096):
+        from app.providers.ollama import context_window_for
+
+        return context_window_for(required, window, minimum_tokens=minimum)
+
+    def test_a_small_request_does_not_reserve_the_whole_window(self) -> None:
+        self.assertEqual(self._ctx(950, 262144), 4096)
+
+    def test_a_large_request_gets_the_room_it_needs(self) -> None:
+        self.assertEqual(self._ctx(120_000, 262144), 120_000)
+
+    def test_the_floor_protects_against_a_short_estimate(self) -> None:
+        """La estimación del broker no es el tokenizador real del modelo:
+        quedarse corto trunca la respuesta, así que hay suelo."""
+        self.assertEqual(self._ctx(10, 262144), 4096)
+        self.assertEqual(self._ctx(10, 262144, minimum=8192), 8192)
+
+    def test_nothing_is_said_when_the_whole_window_is_wanted(self) -> None:
+        """Pedir exactamente lo que hay es idéntico a callarse, y callarse deja
+        el cuerpo como estaba antes de que esto existiera."""
+        self.assertIsNone(self._ctx(262144, 262144))
+        self.assertIsNone(self._ctx(300_000, 262144))
+
+    def test_an_undeclared_window_still_gets_a_sized_request(self) -> None:
+        """Sin ventana declarada no hay con qué comparar, pero el runtime
+        reservaría su default: se pide lo estimado, que es menos."""
+        self.assertEqual(self._ctx(5000, None), 5000)
+        self.assertEqual(self._ctx(5000, "no-es-un-numero"), 5000)
+
+    def test_num_ctx_travels_only_when_there_is_something_to_say(self) -> None:
+        from app.providers.ollama import _generation_options
+        from app.schemas import TaskCreateRequest
+
+        request = TaskCreateRequest(idempotency_key="ctx:opts", content={"prompt": "hola"})
+
+        silent = _generation_options(request, None, None)
+        sized = _generation_options(request, None, 4096)
+
+        self.assertEqual(set(silent), {"temperature", "num_predict"})
+        self.assertEqual(sized["num_ctx"], 4096)

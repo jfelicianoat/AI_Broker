@@ -163,6 +163,31 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .badge-degraded { border-color: var(--amber-line); color: var(--amber-ink); }
 .badge-unavailable { border-color: var(--red-line); color: var(--red-ink); }
 .badge-neutral { color: var(--info-ink); }
+
+/* --- Histórico de tareas ---
+   Se lee escaneando cientos de filas para encontrar una, así que aquí se
+   prioriza el descanso de la vista sobre la densidad: tipografía por encima
+   de la escala base del panel, filas altas y separadores suaves. */
+.history-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; padding: 4px 0 18px; align-items: end; }
+.history-filters .field span { font-size: var(--text-body); font-weight: 600; }
+.history-filters select, .history-filters input { min-height: 38px; font-size: .875rem; }
+.history-search-field { grid-column: span 2; }
+.history-filters-actions { display: flex; align-items: end; }
+.history-summary { padding: 10px 0 14px; font-size: .875rem; color: var(--text-3); border-top: 1px solid var(--border); }
+.history-summary strong { font-size: 1.05rem; color: var(--text-1); }
+.history-table td { padding-top: 12px; padding-bottom: 12px; font-size: .875rem; vertical-align: top; }
+.history-table th { font-size: .8125rem; }
+/* El modelo es la columna que más se busca: no debe competir con el resto. */
+.history-model { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; font-size: .875rem; }
+.history-error { margin-top: 5px; font-family: ui-monospace, "Cascadia Code", monospace; font-size: .8125rem; color: var(--red-ink); overflow-wrap: anywhere; }
+.history-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.tag { padding: 1px 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--raised); color: var(--text-3); font-size: var(--text-label); white-space: nowrap; }
+.muted-text { color: var(--text-4); font-size: var(--text-label); }
+.pager { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 18px 0 4px; }
+.pager-state { font-size: .875rem; color: var(--text-3); }
+/* Tráfico que no alimenta las métricas del router: no es un estado ni un aviso,
+   solo una advertencia de lectura sobre lo que se contó y lo que no. */
+.badge-muted { border-color: var(--muted-line); background: var(--raised); color: var(--text-3); font-weight: 550; }
 .model-compatible { border-color: var(--green-line) !important; background: var(--green-fill) !important; color: var(--green-ink) !important; }
 .model-incompatible { border-color: var(--red-line) !important; background: var(--red-fill) !important; color: var(--red-ink) !important; }
 .model-unknown { border-color: var(--amber-line) !important; background: var(--amber-fill) !important; color: var(--amber-ink) !important; }

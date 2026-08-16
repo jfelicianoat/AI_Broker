@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from app import execution_fingerprint
+from app.providers.diagnostics import diagnose
 from app.schemas import InferenceKind, OutputFormat, TaskCreateRequest
 
 PROBE_HARD_MAX_MODELS = 20
@@ -206,6 +208,64 @@ def degenerate_loop_period(text: str) -> int | None:
     return None
 
 
+# Marcas de andamiaje de conversación. Un modelo no debería emitirlas nunca
+# como contenido: si aparecen, está filtrando el formato con el que se entrenó
+# porque su plantilla no se lo dio (ver el caso de laguna-xs, empaquetado sin
+# plantilla ni secuencias de parada).
+TEMPLATE_MARKERS = (
+    "</assistant>", "<assistant>", "</user>", "<user>", "</system>",
+    "<|im_end|>", "<|im_start|>", "<|eot_id|>", "<|start_header_id|>",
+    "<|end_header_id|>", "</s>", "<|endoftext|>", "[/INST]",
+    "<|assistant|>", "<|user|>", "<|system|>",
+)
+
+# Código inline o en bloque: ahí estas marcas son contenido legítimo. El caso
+# real del histórico es un modelo explicando qué hace `<|endoftext|>`.
+_CODE_SPAN = re.compile(r"```.*?```|`[^`\n]+`", re.S)
+
+# Solo cuenta una marca en la cola de la respuesta: es donde el modelo cierra
+# su turno, y por tanto donde una fuga es inequívoca.
+_MARKER_TAIL_CHARS = 200
+
+
+def template_marker_leak(text: str) -> tuple[str, str] | None:
+    """Detecta una fuga de formato y devuelve `(texto limpio, marca)`.
+
+    Calibrado contra las 517 salidas de texto del histórico de esta máquina: la
+    regla dispara en 33, todas del mismo modelo mal empaquetado, y en ninguna
+    respuesta legítima.
+
+    Tres cautelas, cada una con su motivo medido:
+
+    1. **Las marcas dentro de código no cuentan.** Un modelo explicando qué es
+       `<|endoftext|>` lo escribe entre comillas: es la única respuesta legítima
+       del histórico que contenía una marca, y así queda fuera.
+    2. **Hace falta que se repita o que esté al final.** Una mención suelta a
+       mitad de un texto largo no basta. En el corpus no cambia el resultado
+       —las 33 cumplen ambas—, pero es la diferencia entre cazar una fuga y
+       castigar a un modelo que nombró una etiqueta de pasada.
+    3. **Nunca se descarta la respuesta: se corta.** Lo que va antes de la
+       primera marca es lo que el modelo contestó de verdad, y en las 33 lo
+       recuperado es correcto — incluidas respuestas de un solo carácter ("b",
+       "210") que cualquier mínimo de longitud habría tirado a la basura.
+
+    Devuelve None si no hay fuga, o si al cortar no queda absolutamente nada:
+    eso último no es una respuesta que rescatar y lo diagnostica quien llama.
+    """
+    if not text:
+        return None
+    outside = _CODE_SPAN.sub("", text)
+    present = [marker for marker in TEMPLATE_MARKERS if marker in outside]
+    if not present:
+        return None
+    tail = text[-_MARKER_TAIL_CHARS:]
+    if not any(text.count(marker) >= 2 or marker in tail for marker in present):
+        return None
+    position, marker = min((text.find(item), item) for item in present)
+    clean = text[:position].strip()
+    return (clean, marker) if clean else None
+
+
 def looks_like_degenerate_loop(text: str) -> bool:
     """¿El modelo se quedó repitiendo una frase en vez de responder?
 
@@ -336,6 +396,104 @@ class ProviderError(RuntimeError):
         self.model: str | None = None
 
 
+def effective_generation(
+    request: TaskCreateRequest,
+    *,
+    seed_supported: bool = True,
+    top_p_supported: bool = True,
+    applies: bool = True,
+) -> dict[str, Any]:
+    """Parámetros con los que el adapter va a invocar de verdad al modelo.
+
+    Lo declara el proveedor y no el coordinador porque solo aquí se sabe qué
+    viajó en el cuerpo: `max_output_tokens` puede haberse recortado para que la
+    petición quepa en la ventana (request_with_context_capped_output), y no
+    todos los endpoints admiten los mismos campos.
+
+    `seed_status`/`top_p_status` dicen exactamente una cosa: si el broker
+    incluyó el campo en la petición. NO afirman que el runtime lo haya honrado
+    —eso no es observable desde fuera— y por eso no se inventa un "aplicado".
+    Un `unsupported` sí es una afirmación fuerte: este endpoint no tiene por
+    dónde llevar ese parámetro, así que pedirlo no cambia nada.
+
+    `applies=False` es el caso de los embeddings: ni temperatura ni tope de
+    salida significan nada ahí.
+    """
+    generation = request.generation
+    snapshot: dict[str, Any] = {
+        "temperature": generation.temperature if applies else None,
+        "max_output_tokens": generation.max_output_tokens if applies else None,
+        "seed": generation.seed,
+        "seed_status": "not_requested",
+        "top_p": generation.top_p,
+        "top_p_status": "not_requested",
+    }
+    if generation.seed is not None:
+        snapshot["seed_status"] = "sent" if (seed_supported and applies) else "unsupported"
+    if generation.top_p is not None:
+        snapshot["top_p_status"] = "sent" if (top_p_supported and applies) else "unsupported"
+    return snapshot
+
+
+def openai_determinism_fields(request: TaskCreateRequest) -> dict[str, Any]:
+    """Campos `seed` y `top_p` del cuerpo, solo si la petición los trae.
+
+    Omitirlos cuando no se piden es deliberado: una petición sin semilla
+    produce exactamente el mismo cuerpo que antes de que estos campos
+    existieran, así que ningún cliente actual ve un cambio de comportamiento."""
+    fields: dict[str, Any] = {}
+    if request.generation.seed is not None:
+        fields["seed"] = request.generation.seed
+    if request.generation.top_p is not None:
+        fields["top_p"] = request.generation.top_p
+    return fields
+
+
+def rescued_content(message: dict[str, Any], *, enabled: bool) -> tuple[str | None, str | None]:
+    """Texto de la respuesta y de qué campo salió.
+
+    Devuelve `(contenido, procedencia)`. La procedencia es "content" cuando el
+    modelo respondió donde debía, y "reasoning_content" cuando hubo que
+    rescatarlo del razonamiento.
+
+    El rescate NUNCA pisa un contenido válido: solo entra en juego con el campo
+    vacío, que es el caso en que la alternativa es dar por fallida una respuesta
+    que existe y ya se ha pagado. Con `enabled=False` no se rescata y quien
+    llame se encuentra el mismo `None` de siempre.
+    """
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content, "content"
+    if not enabled:
+        return None, None
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning, "reasoning_content"
+    return None, None
+
+
+def openai_observed_fingerprint(payload: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+    """Capa C de la huella: lo que el proveedor dice de sí mismo al responder.
+
+    `system_fingerprint` identifica la configuración del backend en la familia
+    OpenAI, y el `model` devuelto puede ser un snapshot concreto distinto del
+    alias que se pidió (`gpt-x` → `gpt-x-2026-01-01`). Ninguno de los dos está
+    en el catálogo: solo existen en la respuesta. Un proveedor que no los envíe
+    no aporta nada aquí, y eso también es un hecho sobre él."""
+    observed: dict[str, dict[str, Any]] = {}
+    system = payload.get("system_fingerprint")
+    if system:
+        observed["system_fingerprint"] = execution_fingerprint.component(
+            system, execution_fingerprint.VERIFIED,
+        )
+    returned_model = payload.get("model")
+    if returned_model:
+        observed["remote_model"] = execution_fingerprint.component(
+            returned_model, execution_fingerprint.VERIFIED,
+        )
+    return observed or None
+
+
 @dataclass(frozen=True)
 class ModelOutput:
     content: str | None
@@ -344,11 +502,31 @@ class ModelOutput:
     cost_usd: float
     latency_ms: float
     embedding: tuple[float, ...] | None = None
+    # Parámetros efectivos de la llamada (ver effective_generation) y
+    # componentes de huella observados en la RESPUESTA —capa C: el
+    # `system_fingerprint` de un proveedor cloud no está en el catálogo, solo
+    # aquí—. None cuando el adapter no los aporta.
+    generation: dict[str, Any] | None = None
+    fingerprint_observed: dict[str, dict[str, Any]] | None = None
+    # De qué campo de la respuesta salió el texto. None o "content" es lo
+    # normal; "reasoning_content" significa que se rescató del razonamiento
+    # porque el contenido venía vacío. Viaja hasta la telemetría a propósito:
+    # sin esta marca, un modelo que nunca produce contenido pasaría por sano.
+    content_source: str | None = None
+    # Lo que el modelo devolvió ANTES de repararlo, cuando hubo reparación. Se
+    # conserva para poder auditar: una respuesta arreglada no puede borrar la
+    # prueba de que el modelo está mal empaquetado.
+    raw_content: str | None = None
 
     def technical_output(self) -> dict[str, Any]:
         if self.embedding is not None:
             return {"embedding": list(self.embedding)}
-        return {"assistant_content": self.content}
+        payload: dict[str, Any] = {"assistant_content": self.content}
+        if self.content_source and self.content_source != "content":
+            payload["content_source"] = self.content_source
+        if self.raw_content is not None:
+            payload["raw_content"] = self.raw_content
+        return payload
 
 
 @dataclass(frozen=True)
@@ -369,6 +547,11 @@ class AgentTurn:
     cost_usd: float
     latency_ms: float
     raw_assistant_message: dict[str, Any]
+    # Mismo papel que en ModelOutput: cada ronda del bucle agéntico es una
+    # invocación con su propia fila, así que también declara con qué se hizo.
+    generation: dict[str, Any] | None = None
+    fingerprint_observed: dict[str, dict[str, Any]] | None = None
+    content_source: str | None = None
 
 
 # Cota superior de tokens por bytes UTF-8: los tokenizers BPE reales producen
@@ -474,6 +657,42 @@ def context_fits_with_capped_output(
         if error.code in {"CONTEXT_LIMIT_EXCEEDED", "CONTEXT_WINDOW_UNKNOWN"}:
             return False
         raise
+
+
+def provider_error_from_http(
+    error: httpx.HTTPStatusError,
+    *,
+    provider: str,
+    model: str | None = None,
+    default_code: str = "MODEL_ERROR",
+) -> ProviderError:
+    """Convierte un fallo HTTP de proveedor en el mejor error que se pueda dar.
+
+    Si la firma se reconoce (app.providers.diagnostics), el error sale con un
+    código específico y una frase que dice qué pasó y qué hacer. Si no, se
+    conserva el comportamiento de siempre: código genérico y el cuerpo del
+    proveedor tal cual.
+
+    El texto original viaja SIEMPRE en `details["provider_error"]`, se haya
+    reconocido o no: el diagnóstico ayuda a leer, no sustituye a la evidencia.
+    """
+    raw = provider_http_error_message(error)
+    status = error.response.status_code
+    diagnosis = diagnose(raw)
+    if diagnosis is None:
+        return ProviderError(
+            default_code, raw, retryable=status >= 500,
+            details={"provider": provider, "http_status": status},
+        )
+    return ProviderError(
+        diagnosis.code,
+        diagnosis.message(provider, model),
+        # La reintentabilidad la decide el diagnóstico, no el código HTTP: un
+        # 500 por falta de memoria no mejora reintentando, y un 400 de un motor
+        # caído sí puede.
+        retryable=diagnosis.retryable,
+        details={"provider": provider, "http_status": status, "provider_error": raw},
+    )
 
 
 def provider_http_error_message(error: httpx.HTTPStatusError) -> str:

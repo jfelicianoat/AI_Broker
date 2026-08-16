@@ -1,6 +1,6 @@
 # Especificación para aplicaciones cliente
 
-*Contrato 2.7 · 28 de julio de 2026*
+*Contrato 2.9 · 16 de agosto de 2026*
 
 Este documento describe **cómo una aplicación envía tareas al broker y recoge el resultado**. Está escrito desde el contrato real (`app/schemas.py`), no desde el histórico de versiones: lo que hay aquí es la forma actual, sin tener que reconstruirla leyendo cinco listas de novedades.
 
@@ -35,7 +35,7 @@ Devuelve, entre otros:
 
 | Campo | Forma | Para qué te sirve |
 |---|---|---|
-| `contract_version` | `string` | `"2.8"`. Si no coincide con lo que esperas, revisa §12 |
+| `contract_version` | `string` | `"2.9"`. Si no coincide con lo que esperas, revisa §12 |
 | `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
 | `work_lanes` | `[string]` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
 | `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
@@ -57,7 +57,7 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 ```json
 {
-  "contract_version": "2.8",
+  "contract_version": "2.9",
   "strategies": ["single", "mixture_of_agents", "agent"],
   "presets": { "single": ["fast"], "mixture_of_agents": ["fast", "slow"], "agent": ["fast"] },
   "scheduling_by_preset": { "fast": ["sequential"], "slow": ["adaptive", "parallel", "waves", "sequential"] },
@@ -74,7 +74,12 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
     "video": [".mkv", ".mp4"]
   },
   "derived_data_boundary": true,
-  "work_lanes": ["inference", "ingestion"]
+  "task_group_status": true,
+  "work_lanes": ["inference", "ingestion"],
+  "generation_determinism": true,
+  "exclude_from_model_learning": true,
+  "invocation_telemetry": true,
+  "execution_fingerprint": true
 }
 ```
 
@@ -181,7 +186,7 @@ Todo lo demás tiene default. Respuesta `202`:
 | `inference_kind` | `chat` \| `embedding` | `chat` | `embedding` exige estrategia `single` y `output.format: "json"` |
 | `content` | objeto **obligatorio** | — | §5.3 |
 | `output` | objeto | markdown/es | §5.4 |
-| `generation` | objeto | 0.3 / 4000 | `temperature` 0–2, `max_output_tokens` ≥ 1 |
+| `generation` | objeto | 0.3 / 4000 | `temperature` 0–2, `max_output_tokens` ≥ 1, `seed`, `top_p`. Ver §5.7 |
 | `model_requirements` | objeto | ver §4 y §5.5 | |
 | `execution` | objeto | `single`/`fast` | §6 |
 | `risk` | objeto | `internal` | §4 |
@@ -190,6 +195,7 @@ Todo lo demás tiene default. Respuesta `202`:
 | `group` | string \| null | `null` | Etiqueta de esta tarea, para que otras puedan esperarla en bloque. Ver §5.6 |
 | `depends_on` | lista de task_id | `[]` | Tareas que deben terminar antes que esta. Máximo 64 |
 | `depends_on_group` | string \| null | `null` | Grupo que debe estar drenado antes que esta |
+| `exclude_from_model_learning` | bool | `false` | Esta tarea no alimenta las métricas del router. Ver §5.8 |
 
 La validación es estricta (`extra="forbid"`): **un campo que no exista en el contrato hace fallar la petición con `422`**, no se ignora. Es deliberado — un typo en un nombre de campo es un error silencioso caro.
 
@@ -266,6 +272,67 @@ El grupo existe porque enviar los cientos de identificadores en cada pregunta no
 Es decir: **la dependencia ordena, no condiciona**. En ningún caso una dependencia incumplida hace fallar tu tarea; siempre acaba ejecutándose. Si para tu caso una dependencia rota debe impedir la respuesta, tienes que mirar `result.warnings` y decidir tú — por eso el aviso viaja en el resultado y no solo en los eventos.
 
 Un grupo que no drena nunca no cuelga la cola: cada tarea que espera tiene su propio tope y acaba pasando.
+
+---
+
+### 5.7 Reproducibilidad: `seed` y `top_p`
+
+`generation` admite dos campos más, ambos opcionales:
+
+| Campo | Tipo | Default | Notas |
+|---|---|---|---|
+| `seed` | int ≥ 0 \| null | `null` | Semilla de muestreo |
+| `top_p` | float 0–1 \| null | `null` | Muestreo por núcleo. Fuera de rango → `CONTRACT_VALIDATION_FAILED` |
+
+**`null` significa «no enviar el campo»**, no «enviar el valor por defecto del proveedor». Una petición sin `seed` produce exactamente el mismo cuerpo hacia el modelo que antes de que estos campos existieran: si no los usas, no cambia nada para ti.
+
+**El broker no promete que la semilla se aplique.** Que un modelo la honre depende de su runtime, y eso no es observable desde fuera. Lo que sí se declara es qué se envió, por invocación (§8.1):
+
+| `seed_status` | Significa |
+|---|---|
+| `not_requested` | No pediste semilla |
+| `sent` | El broker la incluyó en la petición al proveedor |
+| `unsupported` | Ese endpoint no tiene por dónde llevarla (p. ej. `embeddings`); pedirla no cambió nada |
+
+Si mides reproducibilidad, **mira `seed_status` antes de dar por buena una comparación**: una semilla aceptada en silencio y descartada por debajo es peor que no tenerla.
+
+### 5.8 Tráfico que no debe enseñar al broker
+
+`exclude_from_model_learning: true` marca una tarea como **no representativa**.
+
+El problema que resuelve: el broker aprende de lo que pasa. Cada invocación mueve la tasa de fiabilidad del modelo, su latencia media y su cercanía a la cuarentena. Si sometes a un modelo a prompts deliberadamente difíciles —contexto extremo, instrucciones contradictorias, entradas adversariales— le estás bajando la nota al modelo en producción por hacer justo lo que esperabas que hiciera. Con este marcador, **medir un modelo deja de degradarlo**.
+
+Qué hace exactamente:
+
+- **No** cuenta para `model_stats`, la cuarentena, la estimación de tiempo ni la elección de aspirante del sondeo en sombra.
+- **Sí** consume presupuesto, cuota, semáforo y VRAM como cualquier otra tarea, y **sí** aparece en coste, uso y panel. Está excluida del aprendizaje, no de la contabilidad.
+
+Es un campo de primer nivel a propósito, y no una etiqueta dentro de `content.metadata`: esa metadata es opaca por contrato, y hacer que el router dependa de una cadena libre sería un acoplamiento que nadie podría sospechar leyendo el código. Anunciado en `capabilities.exclude_from_model_learning`.
+
+---
+
+### 5.9 Lanzar una tanda y seguirla
+
+Si vas a mandar decenas o cientos de tareas —una evaluación, un índice—, **mándalas todas de golpe con el mismo `group`** y deja que la cola durable las ordene. No esperes a que termine una para enviar la siguiente: el broker ejecuta una cada vez de todos modos (es su invariante), así que esperar no protege la máquina, solo desaprovecha la cola y deja el panel vacío mientras trabajas.
+
+Para seguirla no hace falta sondear N identificadores:
+
+```http
+GET /api/v1/groups/{group}
+```
+
+| Campo | Contenido |
+|---|---|
+| `total` | Tareas de la tirada |
+| `pending` | En cola o esperando (memoria, dependencias, herramientas) |
+| `active` | Ejecutándose ahora |
+| `completed`, `failed`, `cancelled` | Cómo acabaron |
+| `finished` | `true` cuando ninguna sigue viva. **Es el campo que hay que sondear** |
+| `created_at`, `updated_at` | Cuándo empezó la tirada y cuándo se movió por última vez |
+
+`finished: true` significa terminada, **no** exitosa: una tirada con fallos también termina. Mira `failed` para eso.
+
+Un grupo sin ninguna tarea devuelve `404 GROUP_NOT_FOUND` en vez de ceros, para que un nombre mal escrito no parezca una tirada ya acabada. Anunciado en `capabilities.task_group_status`.
 
 ---
 
@@ -499,7 +566,18 @@ Lo que fija:
 - Con `status: "waiting_for_tools"`: `result.pending_tool_calls`, cada una con `id`, `name` y `arguments` (ver §9); y en la estrategia `agent`, `progress.agent_iteration` y `progress.agent_max_iterations`.
 - Con `status: "failed"`: `error` con `code`, `message` y `retryable`.
 
-**Cualquier otra clave de `progress` es informativa** —existe, puede ser útil para pintar, y puede cambiar o desaparecer sin subir versión de contrato—. Los contadores son un **agregado**: te dicen cuántas invocaciones van, no cuáles. El detalle por invocación del broker (modelo, coste, latencia, llamadas a skills) vive en el panel de operación, `GET /api/v1/dashboard/tasks/{id}`, que es un contrato de administración y no de cliente. Si lo que quieres es el detalle de *tus* pasos, la vía es §9.
+**Cualquier otra clave de `progress` es informativa** —existe, puede ser útil para pintar, y puede cambiar o desaparecer sin subir versión de contrato—. Los contadores son un **agregado**: te dicen cuántas invocaciones van, no cuáles. El detalle por invocación tiene endpoint propio y tipado desde 2.9: §8.1.
+
+`execution_summary` sí es contrato, y es la vía estable para saber quién respondió:
+
+| Campo | Contenido |
+|---|---|
+| `requested_model` | El `target_model` que pediste, o `null` |
+| `served_by` | El que respondió de verdad |
+| `models_used` | Todos los que intervinieron |
+| `fallback_used` | `true` si respondió uno distinto del pedido |
+
+Es `null` mientras la tarea no ha elegido modelo y en el carril de ingesta. Los mismos datos siguen en `result` por compatibilidad, pero `result` no tiene contrato: no construyas lógica sobre él.
 
 ### El resultado
 
@@ -536,6 +614,47 @@ La comprobación es determinista (comparación de URLs normalizadas: sin `www.`,
 | `arbiter_failures` | Los árbitros descartados, con `model`, `code` y `message` |
 
 Con `synthesized: false`, `model_used` es el proposer que respondió y `consensus.warnings` lo dice en texto. Si tu interfaz presenta la respuesta como «consenso de N modelos», mira este campo antes: en ese caso contestó uno solo.
+
+### 8.1 Telemetría por invocación
+
+`GET /api/v1/tasks/{task_id}/invocations` — misma sesión y misma autorización que el resto de `/api/v1`. Devuelve `{task_id, items[]}`, una entrada por llamada a un modelo, en orden cronológico. Un `task_id` inexistente devuelve el mismo `404 TASK_NOT_FOUND` que `GET /api/v1/tasks/{id}`.
+
+| Campo | Contenido |
+|---|---|
+| `invocation_id`, `role` | Identidad de la llamada. En `mixture_of_agents` hay una por proponente más la del árbitro (`role: "arbiter"`) |
+| `model` | `{provider, deployment, model, role}` que atendió esa llamada |
+| `status`, `error_code` | `completed`, `failed`, `started`… y el código del fallo si lo hubo |
+| `tokens_input`, `tokens_output`, `cost_usd`, `latency_ms` | Lo que costó esa llamada, no el agregado de la tarea |
+| `started_at`, `completed_at`, `created_at`, `updated_at` | Marcas de tiempo |
+| `generation` | Parámetros **efectivos**: ver §5.7. Ojo: `max_output_tokens` puede ser menor que el pedido si hubo que recortarlo para caber en la ventana del modelo |
+| `execution_fingerprint` | Con qué configuración se sirvió. Ver §8.2 |
+| `excluded_from_model_learning` | Si esta invocación alimentó o no las métricas del router (§5.8) |
+
+No se recoge nada nuevo: es lo que el broker ya guardaba, ahora bajo contrato de cliente en vez de solo bajo el panel de administración. Anunciado en `capabilities.invocation_telemetry`.
+
+### 8.2 Huella de ejecución
+
+Un nombre de modelo **no es una identidad**. `qwen3:8b` de hoy y `qwen3:8b` de dentro de dos meses pueden ser binarios distintos. Y los pesos tampoco bastan: la misma red, con los mismos pesos, responde distinto si cambia la plantilla de chat, el tokenizador o el runtime. Actualizar Ollama puede reescribir la plantilla sin tocar un byte del modelo, y el `digest` seguirá siendo idéntico.
+
+Por eso cada invocación y cada entrada del catálogo (`/api/v1/models/availability` y `/api/v1/models/context`) llevan un bloque:
+
+```json
+{
+  "hash": "…",
+  "components": {
+    "digest":        {"value": "sha256:…", "status": "verificado"},
+    "chat_template": {"value": "8f2c…",    "status": "verificado"},
+    "system_fingerprint": {"value": null,  "status": "no_disponible"}
+  }
+}
+```
+
+- `hash` es **canónico y estable**: dos arranques del broker con la misma configuración dan el mismo valor. Si vas a comparar dos respuestas separadas en el tiempo, compara este campo.
+- Cada componente declara su procedencia: `verificado` (obtenido del entorno de ejecución), `declarado` (dicho por la configuración, sin comprobar) o `no_disponible`.
+- **`no_disponible` no es un hueco pendiente de rellenar.** En un modelo cloud la plantilla y el tokenizador no son observables, y eso es información real sobre el límite de lo que se puede afirmar de él. Ningún componente se deduce del nombre del modelo ni de ninguna heurística.
+- La huella persistida es la **vigente en el momento de servir**, no la del catálogo actual: si el proveedor cambia a mitad de una tirada larga, se ve.
+
+El conjunto de componentes es fijo: `provider`, `deployment`, `model` (capa declarada); `digest`, `quantization`, `parameter_size`, `family`, `tokenizer`, `chat_template`, `runtime`, `runtime_version` (capa técnica); `system_fingerprint`, `remote_model`, `api_version` (lo que dice de sí mismo un proveedor remoto). Anunciado en `capabilities.execution_fingerprint`.
 
 ### Cuando falla
 
@@ -649,6 +768,17 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### 2.9 — evaluación reproducible
+
+Todo lo de esta versión es **aditivo y opcional**: si tu cliente ya funcionaba, sigue funcionando sin tocar nada.
+
+- **`generation.seed` y `generation.top_p`** (§5.7): generación reproducible. Sin ellos el cuerpo que llega al modelo es idéntico al de antes.
+- **`exclude_from_model_learning`** (§5.8): tráfico que no debe enseñarle al broker. Si mides modelos, **querrás esto**: sin él, medir un modelo le baja la fiabilidad al router y puede llegar a apartarlo del catálogo.
+- **`GET /api/v1/tasks/{id}/invocations`** (§8.1): qué modelo respondió, con qué parámetros efectivos y a qué coste, invocación a invocación. Antes solo estaba bajo el panel de administración.
+- **`execution_summary`** en el estado de tarea (§8): `served_by` y `fallback_used` tipados, sin parsear `result`.
+- **Huella de ejecución** (§8.2) en el catálogo y en cada invocación: la configuración exacta que produjo una respuesta.
+- **`GET /api/v1/groups/{group}`** (§5.9): estado agregado de una tanda. Si mandas las tareas de una en una esperando cada respuesta, esto es lo que te permite mandarlas todas de golpe y sondear una sola cosa.
 
 ### 2.8 — dependencias, guardarraíles del agente y la frontera de las herramientas
 

@@ -62,7 +62,14 @@ class _Accumulator:
 def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelStats]:
     """Agrega éxito, latencia media y coste medio por (modelo, tipo de tarea)
     en la ventana dada. Las filas anteriores a la columna task_type (NULL) se
-    descartan: sin clasificar, no se puede saber a qué segmento pertenecen."""
+    descartan: sin clasificar, no se puede saber a qué segmento pertenecen.
+
+    Queda fuera el tráfico marcado como excluido del aprendizaje
+    (TaskCreateRequest.exclude_from_model_learning). Sin ese filtro, cualquiera
+    que someta un modelo a prompts deliberadamente difíciles le baja la
+    fiabilidad al router: medir un modelo lo degradaba en producción. Ese
+    tráfico sigue contando en coste y uso — lo único que no hace es mover los
+    indicadores que alimentan decisiones automáticas."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
     rows = db.query_all(
         """
@@ -70,6 +77,7 @@ def load_model_stats(db: Database, *, window_days: int) -> dict[ModelKey, ModelS
                tokens_input, tokens_output
         FROM model_invocations
         WHERE created_at >= ? AND status IN ('completed', 'failed') AND task_type IS NOT NULL
+          AND excluded_from_learning = 0
         """,
         (cutoff,),
     )

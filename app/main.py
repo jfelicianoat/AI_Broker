@@ -47,7 +47,12 @@ from app.maintenance import (
     prune_terminal_task_events,
 )
 from app.mcp import MCPRegistry
-from app.model_catalog import model_availability_item, model_feature_profile
+from app.model_catalog import (
+    model_availability_item,
+    model_execution_fingerprint,
+    model_feature_profile,
+)
+from app.model_fingerprints import fingerprint_recorder
 from app.model_quarantine import load_quarantine
 from app.model_stats import load_model_stats
 from app.providers import build_provider
@@ -77,6 +82,8 @@ from app.schemas import (
     SchedulingPolicy,
     TaskAcceptedResponse,
     TaskCreateRequest,
+    TaskGroupStateResponse,
+    TaskInvocationsResponse,
     TaskKind,
     TaskStateResponse,
     TaskStatus,
@@ -119,6 +126,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         # Misma BD y mismo diferido: la cuarentena caduca sola, así que hay que
         # releerla en cada selección y no cachearla al arrancar.
         quarantine_loader=lambda: load_quarantine(db, broker_config.model_quarantine),
+        # Deja constancia de la configuración con la que se ejecuta cada modelo
+        # y señala cuándo cambia (app.model_fingerprints): un modelo que empeora
+        # porque le actualizaron la plantilla era hasta ahora indetectable.
+        fingerprint_recorder=fingerprint_recorder(db),
     )
     # El proveedor enrutado permite que la descripción de figuras elija entre
     # todos los modelos con visión en vez de usar siempre un endpoint fijo.
@@ -464,6 +475,34 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
 
+    @app.get("/api/v1/tasks/{task_id}/invocations", response_model=TaskInvocationsResponse)
+    def get_task_invocations(task_id: str, request: Request) -> TaskInvocationsResponse:
+        """Qué modelos atendieron la tarea, con qué parámetros y a qué coste.
+
+        Misma sesión y misma autorización que el resto de /api/v1: hasta ahora
+        esta información solo existía bajo el panel de administración, que tiene
+        otra autenticación y otro ciclo de vida, o dentro de `result`, que es un
+        diccionario sin contrato."""
+        verify_admin_access(request, broker_config)
+        try:
+            return repository.list_task_invocations(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+
+    @app.get("/api/v1/groups/{group}", response_model=TaskGroupStateResponse)
+    def get_group_state(group: str, request: Request) -> TaskGroupStateResponse:
+        """Estado agregado de una tirada etiquetada con `group`.
+
+        Es lo que permite encolar las tareas de una tanda de golpe y sondear una
+        sola cosa. Sin esto, un cliente con doscientas tareas tenía que sondear
+        doscientos identificadores, y lo barato era mandarlas de una en una —que
+        deja la cola vacía y desaprovecha la cola durable."""
+        verify_admin_access(request, broker_config)
+        try:
+            return repository.get_group_state(group)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="GROUP_NOT_FOUND") from exc
+
     @app.delete("/api/v1/tasks/{task_id}", response_model=TaskStateResponse)
     def cancel_task(task_id: str, request: Request) -> TaskStateResponse:
         verify_admin_access(request, broker_config)
@@ -680,12 +719,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             compatibility=entry.get("compatibility"),
             compatibility_checked_at=entry.get("compatibility_checked_at"),
             compatibility_error=entry.get("compatibility_error"),
+            execution_fingerprint=model_execution_fingerprint(entry),
         )
 
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.8",
+            contract_version="2.9",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -716,6 +756,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             proposer_skills=True,
             client_tool_passthrough=True,
             task_dependencies=True,
+            task_group_status=True,
             mcp_servers=[
                 MCPServerCapability(id=server.id, data_boundary=server.data_boundary)
                 for server in broker_config.mcp.servers
@@ -739,6 +780,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 if broker_config.ingestion.enabled
                 else [TaskKind.inference]
             ),
+            generation_determinism=True,
+            exclude_from_model_learning=True,
+            invocation_telemetry=True,
+            execution_fingerprint=True,
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)

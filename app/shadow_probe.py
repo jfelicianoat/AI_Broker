@@ -180,6 +180,14 @@ class ShadowProbe:
             return False
         if request.inference_kind != InferenceKind.chat:
             return False
+        if request.exclude_from_model_learning:
+            # El sondeo existe SOLO para producir evidencia. Con una tarea que
+            # ha declarado no querer enseñar nada, esa evidencia no se contaría,
+            # así que el sondeo sería VRAM y tiempo de máquina gastados para
+            # nada. Y con el prompt de quien está midiendo —contexto extremo,
+            # instrucciones contradictorias— el aspirante fallaría por un
+            # defecto que no es suyo, igual que pasa tras una tarea fallida.
+            return False
         prompt = request.content.prompt or ""
         if not prompt or len(prompt) > self.settings.max_prompt_chars:
             # Un prompt gigante convierte cada sondeo en un trabajo caro y
@@ -227,9 +235,12 @@ class ShadowProbe:
         )
         probe_request = self._probe_request(request)
         was_loaded = await self._loaded_state(model)
+        fingerprint = await self._fingerprint(model)
         invocation_id = await asyncio.to_thread(
-            repository.start_invocation,
-            task_id, None, SHADOW_ROLE, model, task_type, was_loaded,
+            lambda: repository.start_invocation(
+                task_id, None, SHADOW_ROLE, model, task_type, was_loaded,
+                fingerprint=fingerprint,
+            ),
         )
         logger.info(
             "shadow_probe.started",
@@ -271,6 +282,17 @@ class ShadowProbe:
             # del despacho; dejarlos puestos los expandiría por segunda vez.
             "content": request.content.model_copy(update={"attachments": []}),
         })
+
+    async def _fingerprint(self, model: ModelReference) -> dict[str, Any] | None:
+        """Con qué configuración se mide al aspirante. La medida solo vale para
+        la configuración que la produjo, así que se guarda con ella."""
+        loader = getattr(self.provider, "execution_fingerprint", None)
+        if loader is None:
+            return None
+        try:
+            return await loader(model)
+        except Exception:
+            return None
 
     async def _loaded_state(self, model: ModelReference) -> bool | None:
         if not is_local_deployment(model.deployment):
