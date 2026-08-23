@@ -77,6 +77,28 @@ def test_a_tool_error_is_text_for_the_model_not_an_exception() -> None:
     _run(scenario())
 
 
+def test_non_ascii_survives_the_pipe_on_a_windows_console() -> None:
+    """Un acento tiene que llegar entero al modelo.
+
+    MCP habla UTF-8 por contrato, pero un hijo de Python en Windows escribe su
+    stdout con la codificación ANSI del sistema (cp1252 en español) si nadie le
+    dice lo contrario: el broker decodifica como UTF-8 y el acento vuelve como
+    U+FFFD. No falla nada — el resultado simplemente llega roto, que es la
+    peor forma de romperse. El broker fuerza UTF-8 en el entorno del hijo.
+    """
+    async def scenario() -> None:
+        registry = MCPRegistry(_config())
+        try:
+            ida = await registry.call("echo", "echo", {"text": "camión ñu €"})
+            assert ida == "eco: camión ñu €"
+            vuelta = await registry.call("echo", "explota", {})
+            assert "la herramienta falló" in vuelta
+        finally:
+            await registry.aclose()
+
+    _run(scenario())
+
+
 def test_an_unknown_tool_raises() -> None:
     async def scenario() -> None:
         registry = MCPRegistry(_config())

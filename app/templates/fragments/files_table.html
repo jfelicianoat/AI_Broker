@@ -51,6 +51,9 @@
                 {% if file.markdown_url %}
                   <a class="link-button" href="{{ file.markdown_url }}" target="_blank" rel="noopener">Ver Markdown</a>
                 {% endif %}
+                {% if file.image_url %}
+                  <a class="link-button" href="{{ file.image_url }}" target="_blank" rel="noopener">Ver imagen</a>
+                {% endif %}
                 <button class="link-button danger" type="button"
                         hx-post="/dashboard/actions/files/{{ file.id }}/delete"
                         hx-confirm="¿Borrar {{ file.filename }}? Las tareas encoladas que lo referencien fallarán."

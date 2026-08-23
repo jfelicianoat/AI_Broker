@@ -6,7 +6,7 @@ from typing import Any
 
 from app.config import BrokerConfig
 from app.db import Database, loads_json
-from app.repository import _parse_dt
+from app.repository import TaskRepository, _parse_dt
 from app.schemas import (
     DashboardEventItem,
     DashboardHistoryItem,
@@ -249,7 +249,12 @@ class DashboardQueryRepository:
             """,
             (task_id,),
         )
+        artifacts = self.db.query_all(
+            "SELECT * FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, id ASC",
+            (task_id,),
+        )
         return DashboardTaskDetail(
+            artifacts=[TaskRepository._row_to_artifact(task_id, item) for item in artifacts],
             task=self._task_item(row),
             request=loads_json(row["request_json"], {}),
             progress=loads_json(row["progress_json"], {}),

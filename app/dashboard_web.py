@@ -10,7 +10,13 @@ from typing import Any, Literal, TypeGuard
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -51,7 +57,11 @@ from app.dashboard_forms import (
     _validation_messages,
 )
 from app.ingestion.detection import ALLOWED_FORMATS
-from app.ingestion.service import AttachmentError, stream_upload_to_temp
+from app.ingestion.service import (
+    IMAGE_MEDIA_TYPES,
+    AttachmentError,
+    stream_upload_to_temp,
+)
 from app.model_references import deletion_warnings
 from app.model_stats import load_model_stats
 from app.model_timing import estimate_seconds
@@ -450,6 +460,13 @@ def create_dashboard_router(
                     if record.status == "ready" and record.markdown_path
                     else None
                 ),
+                # Una imagen no tiene Markdown que enseñar, así que sin esto su
+                # fila no ofrecía NADA: ni ver el fichero que se acaba de subir.
+                "image_url": (
+                    f"/dashboard/files/{record.id}/original"
+                    if record.kind == "image" and record.status == "ready"
+                    else None
+                ),
             })
         return views
 
@@ -495,6 +512,49 @@ def create_dashboard_router(
             raise HTTPException(status_code=409, detail="FILE_NOT_READY")
         content = Path(record.markdown_path).read_text(encoding="utf-8")
         response = PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
+        renewal = getattr(request.state, "admin_cookie_renewal", None)
+        if renewal:
+            _set_admin_cookie(response, renewal)
+        return response
+
+    @protected.get("/dashboard/tasks/{task_id}/artifacts/{artifact_id}")
+    async def view_dashboard_artifact(request: Request, task_id: str, artifact_id: str) -> FileResponse:
+        """Sirve un artefacto de la tarea desde el panel.
+
+        Existe además de la ruta de `/api/v1` porque el panel se autentica con
+        su propia sesión: sin esto, ver la imagen que generó un modelo exigiría
+        salir a buscar un token y montar una petición a mano, y nadie hace eso
+        para mirar un PNG.
+        """
+        try:
+            path, filename, media_type = repository.artifact_path(task_id, artifact_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="ARTIFACT_NOT_FOUND") from error
+        if not path.is_file():
+            # La fila existe y el fichero no: lo podó la retención, o se
+            # restauró una copia de la BD sin `state/tasks`.
+            raise HTTPException(status_code=410, detail="ARTIFACT_GONE")
+        response = FileResponse(path, media_type=media_type)
+        renewal = getattr(request.state, "admin_cookie_renewal", None)
+        if renewal:
+            _set_admin_cookie(response, renewal)
+        return response
+
+    @protected.get("/dashboard/files/{file_id}/original")
+    async def view_dashboard_file_original(request: Request, file_id: str) -> FileResponse:
+        """El fichero tal y como se subió. Hoy solo para imágenes, que son las
+        que no tienen Markdown y por tanto no tenían forma de mirarse."""
+        if ingestion is None:
+            raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
+        record = ingestion.get(file_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
+        if record.kind != "image":
+            raise HTTPException(status_code=409, detail="FILE_NOT_VIEWABLE")
+        path = Path(record.original_path)
+        if not path.is_file():
+            raise HTTPException(status_code=410, detail="FILE_GONE")
+        response = FileResponse(path, media_type=IMAGE_MEDIA_TYPES.get(record.extension, "application/octet-stream"))
         renewal = getattr(request.state, "admin_cookie_renewal", None)
         if renewal:
             _set_admin_cookie(response, renewal)

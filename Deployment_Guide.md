@@ -647,7 +647,8 @@ server:
   host: "192.168.1.50"   # IP de la interfaz LAN, no 0.0.0.0
   port: 8765
   workers: 1
-  cors_enabled: false
+  cors_enabled: false    # activarlo exige cors_allow_origins (orígenes exactos)
+  cors_allow_origins: [] # p. ej. ["https://mi-app.local:3000"]; '*' se rechaza
 
 persistence:
   database: "state/broker.db"

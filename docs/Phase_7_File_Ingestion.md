@@ -142,7 +142,9 @@ modelo de texto sí escribe (SVG, Mermaid).
 Cuando el modelo sí devuelve una imagen (base64 en `message.images`, en
 cualquiera de los dos dialectos), se guarda como artefacto de la tarea
 (`image_output`), no en el resultado JSON: ese documento se lee entero en cada
-consulta del estado.
+consulta del estado. Se recoge por `GET /api/v1/tasks/{id}/artifacts` (listado
+con tipo MIME, tamaño y SHA-256) y su `download_url`; el detalle de la tarea en
+el panel la enseña, además de enumerarla.
 
 ## Descripción de figuras (documentos con gráficos)
 
@@ -238,8 +240,10 @@ Página **Ficheros** (`/dashboard/files`, nav propia): formulario de subida
 (multipart + CSRF, errores renderizados en la propia página), tabla con
 auto-refresco cada 5 s (fragmento HTMX `/dashboard/fragments/files`) que
 muestra tipo/motor/tamaño/tokens estimados/estado, enlace "Ver Markdown" para
-los `ready` **que tengan Markdown** y botón "Borrar" (elimina fila y
-directorio; avisa de que las tareas encoladas que lo referencien fallarán).
+los `ready` **que tengan Markdown**, enlace "Ver imagen" para las imágenes
+(`/dashboard/files/{id}/original`: sin Markdown que enseñar, su fila no ofrecía
+nada que mirar) y botón "Borrar" (elimina fila y directorio; avisa de que las
+tareas encoladas que lo referencien fallarán).
 
 El formulario tiene dos controles de política, y conviene no confundirlos
 porque suenan parecido y gobiernan cosas distintas:

@@ -219,6 +219,61 @@
     </section>
   {% endif %}
 
+  {% if detail.artifacts %}
+    {% set images = detail.artifacts|selectattr('media_type', 'in', ['image/png', 'image/jpeg', 'image/webp', 'image/gif'])|list %}
+    <section class="panel artifact-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Artefactos</h2>
+          <p>Ficheros que produjo la tarea. Se guardan en disco, no dentro del resultado.</p>
+        </div>
+      </div>
+      {% if images %}
+        {# La imagen se enseña, no se enumera: si el modelo dibujó algo, mirarlo
+           es la razón entera de abrir esta pantalla. #}
+        <ul class="artifact-gallery">
+          {% for item in images %}
+            <li>
+              {% if item.available %}
+                <a href="/dashboard/tasks/{{ detail.task.task_id }}/artifacts/{{ item.artifact_id }}" target="_blank" rel="noopener">
+                  <img src="/dashboard/tasks/{{ detail.task.task_id }}/artifacts/{{ item.artifact_id }}"
+                       alt="Imagen generada por el modelo: {{ item.filename }}" loading="lazy">
+                </a>
+              {% else %}
+                <p class="artifact-missing">La imagen ya no está en disco.</p>
+              {% endif %}
+              <small>{{ item.filename }} · {{ item.size_bytes|bytes_size }}</small>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Tipo</th><th scope="col">Fichero</th><th scope="col">Tamaño</th><th scope="col">Creado</th></tr>
+          </thead>
+          <tbody>
+            {% for item in detail.artifacts %}
+            <tr>
+              <td>{{ item.artifact_type }}</td>
+              <td>
+                {% if item.available %}
+                  <a href="/dashboard/tasks/{{ detail.task.task_id }}/artifacts/{{ item.artifact_id }}" target="_blank" rel="noopener">{{ item.filename }}</a>
+                {% else %}
+                  {# La fila sigue siendo información: existió y ya no está. #}
+                  {{ item.filename }} <span class="badge badge-muted" title="Podado por retención o restaurado sin state/tasks">ya no está en disco</span>
+                {% endif %}
+              </td>
+              <td>{{ item.size_bytes|bytes_size }}</td>
+              <td>{{ item.created_at|short_date }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
   <section class="panel invocation-panel">
     <div class="panel-heading">
       <div>

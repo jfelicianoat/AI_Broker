@@ -81,6 +81,19 @@ def gb(value: Any) -> str:
     return f"{float(value or 0) / 1024**3:.1f} GB"
 
 
+def bytes_size(value: Any) -> str:
+    """Tamaño de un fichero en la unidad en la que se lee de un vistazo.
+
+    `gb` sirve para modelos, que pesan decenas de GB; un artefacto pesa KB o MB
+    y con esa escala saldría siempre "0.0 GB", que no informa de nada.
+    """
+    size = float(value or 0)
+    for unit, factor in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if size >= factor:
+            return f"{size / factor:.1f} {unit}"
+    return f"{size:.0f} B"
+
+
 def short_time(value: Any) -> str:
     return value.astimezone().strftime("%H:%M:%S") if value else "—"
 
@@ -176,6 +189,7 @@ def lane_label(value: Any) -> str:
 
 def register_filters(env: Any) -> None:
     env.filters["gb"] = gb
+    env.filters["bytes_size"] = bytes_size
     env.filters["short_time"] = short_time
     env.filters["short_date"] = short_date
     env.filters["ms"] = ms

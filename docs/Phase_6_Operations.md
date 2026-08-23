@@ -75,6 +75,8 @@ persistence:
 
 Los ficheros ingeridos se podan con fila y directorio (`state/files/{id}/`). Una tarea encolada que referencie un fichero podado fallará en el despacho: retención corta con colas largas es mala combinación.
 
+La poda de **artefactos** borra el fichero y conserva la fila. Desde que los artefactos se pueden descargar (`GET /api/v1/tasks/{id}/artifacts`), eso se ve: el listado marca `available: false` y la descarga responde `410`, no `404`. La diferencia importa —existió y se borró a propósito, frente a nunca existió—, y es lo que permite a un cliente distinguir su propio error de una retención haciendo su trabajo. Si vas a generar imágenes, `artifacts_retention_days: 0` (el valor por defecto) es lo que las conserva.
+
 ## Descarga de modelos locales por inactividad (agosto 2026)
 
 Un bucle propio (`app.maintenance.idle_unload_loop`, arrancado en el lifespan
