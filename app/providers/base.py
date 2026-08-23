@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -517,6 +518,10 @@ class ModelOutput:
     # conserva para poder auditar: una respuesta arreglada no puede borrar la
     # prueba de que el modelo está mal empaquetado.
     raw_content: str | None = None
+    # Imágenes que devolvió el modelo. El coordinador las guarda como
+    # artefactos de la tarea; NO viajan en el resultado JSON, que se lee entero
+    # en memoria en cada consulta del estado.
+    images: tuple[GeneratedImage, ...] = ()
 
     def technical_output(self) -> dict[str, Any]:
         if self.embedding is not None:
@@ -526,7 +531,138 @@ class ModelOutput:
             payload["content_source"] = self.content_source
         if self.raw_content is not None:
             payload["raw_content"] = self.raw_content
+        if self.images:
+            payload["images_returned"] = len(self.images)
         return payload
+
+
+@dataclass(frozen=True)
+class GeneratedImage:
+    """Una imagen que devuelve el modelo, ya decodificada del transporte.
+
+    Los proveedores la mandan de dos maneras —una cadena base64 suelta (Ollama)
+    o un data URI dentro de `message.images` (OpenAI-compatibles)— y las dos
+    acaban aquí en la misma forma, que es la que el coordinador guarda como
+    artefacto de la tarea.
+    """
+
+    media_type: str
+    data_base64: str
+
+    @property
+    def extension(self) -> str:
+        return _IMAGE_EXTENSIONS_BY_MEDIA_TYPE.get(self.media_type, ".bin")
+
+
+_IMAGE_EXTENSIONS_BY_MEDIA_TYPE = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
+    "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tiff",
+}
+
+_DATA_URI_RE = re.compile(r"^data:(?P<media>[\w.+-]+/[\w.+-]+)?;base64,(?P<data>.+)$", re.DOTALL)
+
+
+# Texto con el que se sustituye una respuesta vacía cuando el modelo contestó
+# con una imagen y nada más: el contrato exige contenido, y "no ha contestado"
+# sería falso.
+_IMAGE_ONLY_ANSWER = "(el modelo respondió con una imagen; está en los artefactos de la tarea)"
+
+
+def multimodal_content(prompt: str, images: Sequence[Any]) -> Any:
+    """Contenido de un mensaje de usuario en el dialecto OpenAI.
+
+    Sin imágenes devuelve la cadena tal cual: cambiar el formato del mensaje
+    para todas las peticiones rompería a los servidores compatibles que solo
+    aceptan `content` como texto plano.
+    """
+    if not images:
+        return prompt
+    parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image in images:
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{image.media_type};base64,{image.data_base64}"},
+        })
+    return parts
+
+
+def content_text(content: Any) -> str:
+    """El texto de un contenido que puede venir como cadena o como lista de
+    partes del dialecto OpenAI. Las partes que no son texto (imágenes) se
+    descartan: quien llama a esto quiere leerlo, no reenviarlo."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
+def flatten_multimodal(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """El historial sin los bytes de las imágenes, para poder guardarlo.
+
+    El estado de un bucle agéntico en pausa se persiste en la fila de la tarea;
+    con las imágenes dentro serían megabytes de base64 en la base por cada
+    espera de herramienta, duplicando lo que la ingesta ya guarda en disco. Al
+    reanudar se vuelven a adjuntar desde la petición, que se expande de nuevo.
+    """
+    flattened: list[dict[str, Any]] = []
+    for item in messages:
+        if isinstance(item.get("content"), list):
+            flattened.append({**item, "content": content_text(item["content"])})
+        else:
+            flattened.append(item)
+    return flattened
+
+
+def with_images_reattached(
+    messages: list[dict[str, Any]], images: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Devuelve el historial con las imágenes de vuelta en el primer turno del
+    usuario, que es donde las puso la expansión."""
+    if not images:
+        return messages
+    rebuilt = list(messages)
+    for index, item in enumerate(rebuilt):
+        if item.get("role") == "user":
+            rebuilt[index] = {
+                **item,
+                "content": multimodal_content(content_text(item.get("content")), images),
+            }
+            break
+    return rebuilt
+
+
+def returned_images(message: dict[str, Any]) -> tuple[GeneratedImage, ...]:
+    """Imágenes que trae la respuesta de un modelo, en cualquiera de los dos
+    formatos vistos: base64 suelto o data URI envuelto en `image_url`."""
+    found: list[GeneratedImage] = []
+    for item in message.get("images") or []:
+        raw: Any = item
+        if isinstance(item, dict):
+            url = item.get("image_url") or {}
+            raw = url.get("url") if isinstance(url, dict) else url
+            if not isinstance(raw, str):
+                raw = item.get("data") or item.get("b64_json")
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        match = _DATA_URI_RE.match(raw.strip())
+        if match is not None:
+            found.append(GeneratedImage(
+                media_type=match.group("media") or "image/png",
+                data_base64=match.group("data"),
+            ))
+            continue
+        if raw.startswith("http://") or raw.startswith("https://"):
+            # Una URL remota no es la imagen: descargarla sería tráfico de
+            # salida que la tarea no ha autorizado. Se ignora y el texto de la
+            # respuesta la sigue mencionando, que es lo que hay.
+            continue
+        found.append(GeneratedImage(media_type="image/png", data_base64=raw.strip()))
+    return tuple(found)
 
 
 @dataclass(frozen=True)

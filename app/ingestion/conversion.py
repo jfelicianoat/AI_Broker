@@ -184,17 +184,17 @@ def _convert_text(source: ConversionInput, path: Path) -> ConversionResult:
 def _convert_image(
     source: ConversionInput, path: Path, settings: IngestionConfig
 ) -> ConversionResult:
-    """Solo el OCR. La descripción con visión la añade el padre, que es quien
-    tiene proveedor: aquí se deja anotado que hay una imagen que describir."""
-    meta: dict[str, Any] = {"engine": "docling", "ocr": settings.ocr_enabled}
-    parts: list[str] = []
-    if settings.ocr_enabled:
-        ocr_text = engines.convert_image_docling(path, ocr_languages=settings.ocr_languages)
-        if ocr_text.strip():
-            parts.append(f"**Texto reconocido (OCR):**\n\n{ocr_text}")
-    return ConversionResult(
-        "\n\n".join(parts), meta, [str(path)] if source.describe_images else []
-    )
+    """El texto que hay DENTRO de una imagen, cuando quien la sube lo pide.
+
+    Es la única conversión que se le hace a una imagen, y no la sustituye: la
+    imagen se sigue adjuntando entera a la tarea. Aquí solo se reconoce el
+    texto, sin modelo de visión de por medio — de eso va precisamente pedir
+    OCR: sacar lo que pone, no que alguien lo interprete.
+    """
+    del source  # la descripción con visión ya no pasa por aquí
+    text = engines.convert_image_docling(path, ocr_languages=settings.ocr_languages)
+    meta: dict[str, Any] = {"engine": "ocr", "ocr": True, "ocr_chars": len(text.strip())}
+    return ConversionResult(text.strip(), meta, [])
 
 
 def _probe_duration(

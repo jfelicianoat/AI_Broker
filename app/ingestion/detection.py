@@ -19,8 +19,29 @@ class UnsupportedFormat(ValueError):
 @dataclass(frozen=True)
 class Detection:
     kind: str       # pdf | office | text | image | audio | video
-    engine: str     # docling | markitdown | passthrough | whisper | whisper_video
+    engine: str     # docling | markitdown | passthrough | attach | whisper | whisper_video
     extension: str  # con punto, en minúsculas
+
+
+# Una imagen suelta no se convierte a nada: se adjunta tal cual y la mira un
+# modelo de visión (ver app.ingestion.service.expand_request). Antes pasaba por
+# Docling —OCR más una descripción generada— y lo que llegaba al modelo era un
+# párrafo *sobre* la imagen, escrito por otro modelo, con lo que se perdía todo
+# lo que la descripción no hubiera mencionado. Las figuras EMBEBIDAS en un
+# documento siguen describiéndose: ahí no hay alternativa, porque el resto del
+# documento es texto y la figura tiene que ocupar su sitio en él.
+ATTACH_ENGINE = "attach"
+
+# Motor de la única conversión que sí se le hace a una imagen, y solo si la
+# pide quien la sube: reconocer el texto que hay dentro. La imagen se sigue
+# adjuntando entera; el texto es un extra, no un sustituto.
+OCR_ENGINE = "ocr"
+
+# Formatos de imagen que ningún endpoint de visión acepta. Se reescriben a PNG
+# al subirlos (app.ingestion.engines.transcode_to_png): es un cambio de
+# envoltorio, no de contenido, y evita que la tarea muera con un error del
+# proveedor después de haber esperado en la cola.
+TRANSCODE_TO_PNG = {".tiff", ".tif", ".bmp"}
 
 
 # PDF nativo o escaneado: Docling decide por página si aplica OCR.
@@ -142,7 +163,7 @@ def detect(filename: str, head: bytes) -> Detection:
     elif extension in TEXT_EXTENSIONS:
         kind, engine = "text", "passthrough"
     elif extension in IMAGE_EXTENSIONS:
-        kind, engine = "image", "docling"
+        kind, engine = "image", ATTACH_ENGINE
     elif extension in AUDIO_EXTENSIONS:
         kind, engine = "audio", "whisper"
     elif extension in VIDEO_EXTENSIONS:

@@ -21,6 +21,32 @@ class ArtifactStore:
     def write_markdown(self, task_id: str, relative_path: str, content: str) -> ArtifactRecord:
         return self.write_text(task_id, relative_path, content)
 
+    def write_bytes(self, task_id: str, relative_path: str, data: bytes) -> ArtifactRecord:
+        """Artefacto binario (una imagen que devolvió el modelo).
+
+        Misma escritura atómica que el texto: un artefacto a medio escribir con
+        su fila ya registrada sería un fichero corrupto al que apunta el panel.
+        """
+        target = self.root / task_id / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_name = handle.name
+        os.replace(temp_name, target)
+        return ArtifactRecord(
+            path=str(target),
+            sha256=hashlib.sha256(data).hexdigest(),
+            size_bytes=len(data),
+        )
+
     def write_text(self, task_id: str, relative_path: str, content: str) -> ArtifactRecord:
         task_root = self.root / task_id
         target = task_root / relative_path

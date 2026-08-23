@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import tempfile
+import time
 import zipfile
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # Solo para tipar: el grafo de importación en ejecución no cambia.
+    from app.config import BrokerConfig
+    from app.providers.ollama import OllamaLifecycleManager
+    from app.repository import TaskRepository
 
 BACKUP_FORMAT_VERSION = "ai-broker-backup-v1"
 MANIFEST_NAME = "manifest.json"
@@ -360,3 +369,141 @@ def backfill_invocation_task_type(db: Any, *, dry_run: bool = False) -> Backfill
         pending=len(rows), classified=classified,
         reconstructed=reconstructed, skipped=skipped,
     )
+
+
+# ---------------------------------------------------------------------------
+# Descarga de modelos locales por inactividad
+# ---------------------------------------------------------------------------
+
+# Techo del sondeo: por encima de esto la descarga llegaría bastante más tarde
+# de lo que promete el plazo configurado, y una consulta cada medio minuto no
+# se nota en ninguna parte.
+_IDLE_POLL_CEILING_SECONDS = 30.0
+
+
+def idle_poll_seconds(idle_seconds: float) -> float:
+    """Cada cuánto mirar la máquina, deducido del plazo en vez de configurado.
+
+    Una fracción del plazo para que la descarga no se retrase mucho más de lo
+    prometido, con techo para no sondear en balde cuando el plazo son horas y
+    con suelo de un segundo para que un plazo corto no se convierta en una
+    espera activa.
+    """
+    if idle_seconds <= 0:
+        return _IDLE_POLL_CEILING_SECONDS
+    return max(1.0, min(_IDLE_POLL_CEILING_SECONDS, idle_seconds / 4))
+
+
+class IdleUnloadTracker:
+    """Cuenta cuánto lleva el broker sin trabajo y decide cuándo soltar.
+
+    Va aparte del bucle porque lo único interesante es la decisión, y con el
+    reloj inyectado se prueba entera sin esperar un segundo real.
+
+    Empieza a contar en el momento en que se construye: los modelos que dejó
+    cargados una ejecución anterior también se reclaman, pero no antes de que
+    el broker lleve el plazo completo levantado sin que nadie le pida nada.
+    """
+
+    def __init__(self, *, now: Callable[[], float] = time.monotonic) -> None:
+        self._now = now
+        self._last_busy = now()
+        self._reclaimed = False
+
+    def should_unload(self, *, busy: bool, idle_seconds: float) -> bool:
+        """Anota el estado actual y responde si toca descargar.
+
+        El plazo se pasa en cada llamada en vez de guardarse al construir: la
+        configuración se edita desde el panel con el broker en marcha, y un
+        valor leído una sola vez convertiría ese cambio en un reinicio
+        obligatorio.
+
+        El reloj se actualiza aunque la función esté desactivada (plazo 0). Es
+        deliberado: así, al activarla, el broker sabe desde cuándo lleva
+        realmente parado en vez de empezar a contar desde el clic.
+        """
+        now = self._now()
+        if busy:
+            self._last_busy = now
+            self._reclaimed = False
+            return False
+        if idle_seconds <= 0 or self._reclaimed:
+            return False
+        return now - self._last_busy >= idle_seconds
+
+    def mark_reclaimed(self) -> None:
+        """La memoria ya está devuelta: no se vuelve a intentar hasta que entre
+        trabajo nuevo. Sin esto, cada sondeo posterior le pediría al runtime una
+        lista que ya sabemos vacía, para siempre."""
+        self._reclaimed = True
+
+
+async def idle_unload_loop(
+    repository: TaskRepository,
+    lifecycle: OllamaLifecycleManager,
+    config: BrokerConfig,
+    stop: asyncio.Event,
+    *,
+    now: Callable[[], float] = time.monotonic,
+) -> None:
+    """Devuelve la memoria de los modelos locales cuando el broker lleva un rato
+    sin nada que hacer.
+
+    Es el contrapeso de `processing.unload_after_task=false`. Descargar al
+    terminar cada tarea hace que dos tareas seguidas con el mismo modelo paguen
+    la carga dos veces —y, peor, deja el ranking ciego al modelo caliente,
+    porque cuando la siguiente tarea enruta ya no hay nada cargado que preferir.
+    No descargar nunca tiene el defecto simétrico: la máquina se queda con un
+    modelo dentro toda la noche. Este bucle pone el plazo entre ambos extremos.
+
+    "Sin nada que hacer" se mide con `has_unfinished_task`, que es más ancho que
+    los leases del proveedor y tiene que serlo por dos motivos. Dentro de un
+    mixture hay instantes sin ningún lease vivo —entre dos olas, mientras
+    arbitra— y descargar ahí recargaría el mismo modelo dos frases después. Y
+    una tarea en cola todavía sin turno es trabajo que llega: soltar la memoria
+    delante de ella sería regalarla para volver a pedirla enseguida. El precio
+    de esa anchura es que una tarea parada mucho tiempo esperando dependencias o
+    herramientas mantiene el modelo residente; se prefiere ese error al
+    contrario, porque este solo cuesta memoria y el otro cuesta esperas.
+
+    La configuración se relee en cada vuelta: los dos ajustes se cambian desde
+    el panel con el broker en marcha.
+    """
+    logger = logging.getLogger("ai_broker.maintenance")
+    tracker = IdleUnloadTracker(now=now)
+    while not stop.is_set():
+        idle_seconds = config.processing.idle_unload_seconds
+        # Con descarga al terminar cada tarea no queda nunca nada que reclamar:
+        # el plazo se anula en vez de gastar una ronda de sondeos inútil.
+        if config.processing.unload_after_task:
+            idle_seconds = 0.0
+        try:
+            # La consulta se hace también con la función desactivada, y cuesta
+            # un LIMIT 1 cada medio minuto: es lo que mantiene el reloj honesto
+            # para cuando se active.
+            busy = await asyncio.to_thread(repository.has_unfinished_task)
+            if tracker.should_unload(busy=busy, idle_seconds=idle_seconds):
+                unloaded = await lifecycle.unload_idle()
+                tracker.mark_reclaimed()
+                if unloaded:
+                    logger.info(
+                        "maintenance.idle_models_unloaded",
+                        extra={
+                            "event": "maintenance.idle_models_unloaded",
+                            "models": unloaded,
+                            "idle_seconds": idle_seconds,
+                        },
+                    )
+        except Exception:
+            # Ni el runtime caído ni la BD ocupada pueden matar el bucle: sin él
+            # la memoria dejaría de recuperarse hasta el siguiente reinicio, y
+            # nadie lo notaría hasta la primera tarea grande que no cupiera.
+            logger.warning(
+                "maintenance.idle_unload_failed",
+                exc_info=True,
+                extra={"event": "maintenance.idle_unload_failed"},
+            )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=idle_poll_seconds(idle_seconds))
+        except TimeoutError:
+            pass

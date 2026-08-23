@@ -53,7 +53,14 @@
               {# Sin el detalle, "Esperando memoria" no deja decidir si vale la
                  pena cancelar: lo que importa es quién ocupa y cuánto falta. #}
               <small class="memory-wait">
-                {{ task.memory_block.model }} necesita {{ task.memory_block.needed_bytes|gb }}
+                {% if task.memory_block.reason == 'model_slots' %}
+                  {# Esperar con memoria libre desconcierta si no se dice que
+                     el tope es el cupo de modelos y no los bytes. #}
+                  {{ task.memory_block.model }} espera sitio: {{ task.memory_block.loaded_models }}
+                  de {{ task.memory_block.model_slots }} modelos locales cargados
+                {%- else -%}
+                  {{ task.memory_block.model }} necesita {{ task.memory_block.needed_bytes|gb }}
+                {%- endif %}
                 {%- if task.memory_block.holders %}; ocupan {{ task.memory_block.holders|join(', ') }}{% endif %}
                 {%- if task.memory_block.reserved_until %} · turno reservado{% endif %}
               </small>

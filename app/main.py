@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -42,6 +43,7 @@ from app.ingestion import (
 from app.ingestion.service import stream_upload_to_temp
 from app.logging_config import configure_logging
 from app.maintenance import (
+    idle_unload_loop,
     prune_ingested_files,
     prune_terminal_task_artifacts,
     prune_terminal_task_events,
@@ -256,14 +258,33 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                         broker_config.ingestion.max_concurrent,
                     )
                 )
+        # Descarga por inactividad: carril propio, con el mismo evento de
+        # parada. Se arranca siempre que haya un Ollama al que preguntar, no
+        # solo cuando el ajuste está puesto: el plazo y `unload_after_task` se
+        # cambian desde el panel con el broker en marcha, y decidir aquí si el
+        # bucle existe convertiría ese cambio en un reinicio obligatorio.
+        idle_unload_task = None
+        ollama_provider = getattr(provider, "ollama", None)
+        if broker_config.providers.ollama.enabled and ollama_provider is not None:
+            idle_unload_task = asyncio.create_task(
+                idle_unload_loop(
+                    repository,
+                    ollama_provider.lifecycle,
+                    broker_config,
+                    stop_dispatcher,
+                )
+            )
         app.state.dispatcher_task = dispatcher_task
         app.state.ingestion_dispatcher_task = ingestion_dispatcher_task
+        app.state.idle_unload_task = idle_unload_task
         try:
             yield
         finally:
             stop_dispatcher.set()
             pending_loops = [
-                task for task in (dispatcher_task, ingestion_dispatcher_task) if task is not None
+                task
+                for task in (dispatcher_task, ingestion_dispatcher_task, idle_unload_task)
+                if task is not None
             ]
             if pending_loops:
                 await asyncio.gather(*pending_loops, return_exceptions=True)
@@ -279,6 +300,20 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             db.close()
 
     app = FastAPI(title="AI Broker", version="0.1.0", lifespan=lifespan)
+    if broker_config.server.cors_enabled:
+        # Solo los orígenes declarados, y sin credenciales de navegador: la
+        # autenticación del API es la cabecera `X-Admin-Token`, que la app
+        # cliente pone a mano. Permitir cookies aquí expondría además la sesión
+        # del panel a cualquiera de esos orígenes, que es otra cosa y nadie la
+        # ha pedido. `expose_headers` no hace falta: el broker no devuelve
+        # ninguna cabecera propia que un cliente tenga que leer.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(broker_config.server.cors_allow_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-CSRF-Token"],
+        )
     app.state.config = broker_config
     app.state.db = db
     app.state.repository = repository
@@ -539,10 +574,15 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             error=record.error,
             created_at=datetime.fromisoformat(record.created_at),
             updated_at=datetime.fromisoformat(record.updated_at),
+            # Un adjunto que no se convierte (una imagen) no tiene Markdown que
+            # ofrecer: enlazarlo daría un 409 al primer clic.
             markdown_url=(
-                f"/api/v1/files/{record.id}/markdown" if record.status == "ready" else None
+                f"/api/v1/files/{record.id}/markdown"
+                if record.status == "ready" and record.markdown_path
+                else None
             ),
             describe_images=record.describe_images,
+            ocr=record.ocr,
         )
 
     @app.post("/api/v1/files", response_model=FileAcceptedResponse, status_code=202)
@@ -550,6 +590,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         request: Request,
         file: UploadFile,
         describe_images: bool | None = Form(default=None),
+        ocr: bool = Form(default=False),
     ) -> FileAcceptedResponse:
         """Sube un fichero y lo pone en cola de conversión a Markdown.
 
@@ -576,6 +617,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 file.filename or "fichero",
                 temp_path,
                 describe_images,
+                ocr,
             )
         except (IngestionError, UnsupportedFormat) as exc:
             status = 415 if exc.code in {"INGEST_UNSUPPORTED_FORMAT", "INGEST_CONTENT_MISMATCH"} else 422
@@ -593,6 +635,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             created=created,
             status_url=f"/api/v1/files/{record.id}",
             describe_images=record.describe_images,
+            ocr=record.ocr,
         )
 
     @app.get("/api/v1/files/{file_id}", response_model=FileStateResponse)

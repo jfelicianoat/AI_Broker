@@ -12,7 +12,7 @@ Completada el 2026-06-23.
 2. Filtra por `allowed_providers`, prioriza `preferred_model` y respeta `fallback_allowed`.
 3. Un semáforo global garantiza una sola llamada LLM simultánea en todo el Broker.
 4. Para Ollama, el lifecycle manager comprueba `/api/ps`, reserva capacidad y evita descargar modelos con lease.
-5. La llamada usa `keep_alive: -1`; el bloque `finally` envía `keep_alive: 0` y confirma la descarga antes de liberar el slot.
+5. La llamada usa `keep_alive: -1`; con `processing.unload_after_task` el bloque `finally` envía `keep_alive: 0` y confirma la descarga antes de liberar el slot. Con ese ajuste desactivado el modelo se queda cargado —dos tareas seguidas con el mismo modelo dejan de pagar la recarga— y quien devuelve la memoria es el bucle de inactividad (`processing.idle_unload_seconds`), bajo el mismo lock que la admisión y solo con la máquina de verdad parada: ver [`Phase_6_Operations.md`](Phase_6_Operations.md).
 6. La respuesta normaliza contenido, tokens, coste y latencia. Los errores se persisten con código y `retryable`.
 
 ## Catálogo
@@ -37,6 +37,13 @@ No existen listas de modelos hardcodeadas. Si Ollama, Hugging Face local o DeepS
 - El análisis de compatibilidad de proveedores OpenAI-compatible avanza por tandas acotadas. Con `probe_skip_checked=true`, no repite modelos ya comprobados aunque sean incompatibles.
 - Los modelos sincronizados cuyo nombre indica embeddings se prueban contra `/embeddings` y pueden atender tareas `inference_kind=embedding` si responden con un vector válido.
 - Los modelos de parseo, reranking u otro uso especializado no se prueban contra `/chat/completions`; se clasifican por capacidad para evitar falsos fallos y tráfico innecesario hasta que exista un contrato de ejecución específico.
+- Con `probe_features` (por defecto activo), tras verificar el chat se sondean además visión, JSON estructurado y tools: tres peticiones de un token por modelo operativo. El resultado se persiste en `features` con su fecha, y es la evidencia de más peso del broker — un negativo verificado excluye al modelo aunque models.dev afirme lo contrario (`app.model_capabilities`).
+
+## Respuestas que llegan por el campo equivocado
+
+`rescue_reasoning_content` (por proveedor OpenAI-compatible, activo por defecto) usa `reasoning_content` como respuesta **solo** cuando `content` llega vacío. Hay modelos —y proveedores enteros, según cómo separen el razonamiento— que entregan la contestación completa por ese campo: el proveedor responde `200`, cobra los tokens y su propia interfaz enseña el texto, mientras el broker daba la tarea por fallida por una respuesta que existía y ya estaba pagada.
+
+El rescate **nunca pisa** un contenido válido, y siempre queda marcado: `content_source: "reasoning_content"` en la telemetría de la invocación. Un rescate silencioso haría que un modelo mal empaquetado pasara por sano, que es justo lo contrario de lo que hace falta al evaluarlo. Se apaga por proveedor para poder exigir contenido limpio en una tanda de medición sin cambiar el comportamiento del resto.
 
 ## Errores tipados
 

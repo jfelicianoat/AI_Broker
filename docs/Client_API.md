@@ -437,7 +437,8 @@ Solo con estrategia `single` o `auto`, `inference_kind: "chat"` y sin salida JSO
 
 ## 7. Adjuntar ficheros
 
-Son **tres pasos**, y el segundo no se puede saltar.
+Son **tres pasos**, y el segundo no se puede saltar… salvo con imágenes, que no
+se convierten (ver *Adjuntar imágenes*, al final de esta sección).
 
 ### Paso 1 — subir
 
@@ -447,6 +448,7 @@ Content-Type: multipart/form-data
 
 file=@informe.pdf
 describe_images=false        # opcional
+ocr=false                    # opcional, solo tiene efecto en imágenes
 ```
 
 ```json
@@ -455,7 +457,8 @@ describe_images=false        # opcional
   "status": "received",
   "created": true,
   "status_url": "/api/v1/files/file_abc123",
-  "describe_images": false
+  "describe_images": false,
+  "ocr": false
 }
 ```
 
@@ -463,7 +466,7 @@ describe_images=false        # opcional
 
 #### `describe_images` — el interruptor de las figuras
 
-Decide si las imágenes del documento se extraen y se describen con un modelo de visión para que su contenido acabe en el Markdown.
+Decide si las figuras **embebidas en un documento** se extraen y se describen con un modelo de visión para que su contenido acabe en el Markdown. No afecta a las imágenes que adjuntas sueltas: esas no se convierten nunca.
 
 | valor | efecto |
 |---|---|
@@ -476,6 +479,50 @@ Es la parte cara de la ingesta —una llamada a un modelo por figura, además de
 La respuesta y el estado del fichero devuelven siempre la política **ya resuelta**, así que sabes qué vas a recibir sin consultar la configuración del broker. En el Markdown de un fichero convertido sin descripciones, `meta.images_described` vale `false`: un documento sin descripciones no es lo mismo que un documento sin figuras.
 
 **Efecto sobre la deduplicación**: la política forma parte de la identidad de la conversión. Una conversión *con* descripciones se reutiliza para quien las pide *sin* ellas —contiene todo lo que tendría la otra y algo más—, pero pedirlas cuando lo guardado no las tiene genera una conversión nueva, con su propio `file_id`.
+
+#### Adjuntar imágenes
+
+Una imagen (`.png .jpg .jpeg .webp .tiff .tif .bmp`) se sube igual que cualquier otro fichero, pero **no se convierte a texto**: se adjunta tal cual y la mira el modelo.
+
+- La subida responde ya con `status: "ready"` — no hay conversión que esperar, así que el paso 2 sobra. No hay `markdown_url`.
+- **TIFF y BMP se guardan como PNG** (ningún endpoint de visión los acepta). El `file_id`, el nombre y el contenido visible son los mismos; `meta.transcoded_from` lo deja anotado.
+- Al despachar la tarea, el prompt recibe un manifiesto `<attached_image id name orden>` y la imagen viaja aparte hasta el modelo, en el formato que hable su proveedor.
+- El broker **exige** que el modelo que atienda la tarea tenga visión. Si ninguno de los modelos disponibles para esa tarea la tiene, falla con `VISION_MODEL_UNAVAILABLE` y un mensaje que lo explica. Si el modelo con visión es de cloud, la tarea tiene que permitirlo (`model_requirements.cloud_allowed`, sujeto a la clasificación de datos).
+
+#### Pedir el texto que hay dentro de la imagen (OCR)
+
+Sube la imagen con `ocr=true`:
+
+```http
+POST /api/v1/files
+Content-Type: multipart/form-data
+
+file=@recibo.png
+ocr=true
+```
+
+Esa imagen **sí** se convierte (nace `received`, hay que esperar a `ready`) y su `markdown_url` devuelve el texto reconocido. Es OCR de verdad, sin modelo de por medio: transcribe, no interpreta.
+
+Al adjuntarla a una tarea viajan las dos cosas — la imagen para quien pueda verla, y la transcripción en un bloque `<attached_image_text>`.
+
+**Y si no hay ningún modelo con visión**: cuando la petición va de leer lo que pone en la imagen ("extrae el texto", "¿qué pone aquí?", "transcribe", "hazle un OCR"), el broker corre el OCR en ese momento y responde con el texto en vez de fallar. Para cualquier otra pregunta sobre la imagen ("¿de qué color es el fondo?") sigue fallando con `VISION_MODEL_UNAVAILABLE`: un OCR no contesta eso, y fingir que sí sería peor que el error.
+
+#### Pedir una imagen de salida
+
+Si la petición pide **generar** una imagen ("genera una imagen de…", "dibújame…") o **modificar** una adjunta ("recorta la foto"), el broker solo considera modelos capaces de producir imágenes. Cuando no hay ninguno, la tarea falla con:
+
+```json
+{
+  "code": "IMAGE_GENERATION_UNSUPPORTED",
+  "message": "La petición pide generar una imagen y ningún modelo disponible para esta tarea sabe producir imágenes. …"
+}
+```
+
+Cuando sí lo hay, las imágenes que devuelva se guardan como **artefactos** de la tarea (`image_output`), no dentro del resultado JSON: ese documento se lee entero en cada consulta del estado, y un PNG en base64 dentro lo convertiría en megabytes por sondeo.
+
+**Cómo recogerlas hoy:** el artefacto se escribe en `state/tasks/{task_id}/single/image_NN.png` (o `synthesis/…` si la produjo el árbitro de un mixture) en la máquina del broker (la ruta y el SHA-256 quedan en la tabla `artifacts` y en el evento `artifact.created`). **No hay endpoint de descarga, el estado de la tarea no los enumera y el panel tampoco los enseña todavía**: si tu aplicación no comparte disco con el broker, cuenta con recoger la imagen por fuera de la API. Y `result.assistant_content` en ese caso trae un texto que lo dice (*"el modelo respondió con una imagen; está en los artefactos de la tarea"*): no lo enseñes como si fuera la respuesta al usuario sin más.
+
+La detección es deliberadamente conservadora: "resume la imagen adjunta" o "genera un diagrama de flujo" **no** cuentan como petición de imagen, porque un falso positivo tumbaría una tarea que el broker sabe atender.
 
 ### Paso 2 — esperar a que esté listo
 
@@ -547,7 +594,7 @@ GET /api/v1/tasks/{task_id}
 
 **No hagas lógica sobre los estados intermedios concretos**: son etapas técnicas y pueden cambiar. Trata cualquier estado no terminal como "sigue trabajando". Los terminales sí son contrato.
 
-`waiting_for_memory` (contrato 2.7) merece una nota porque **no es un fallo y no requiere que hagas nada**: la máquina no tiene memoria libre ahora mismo, así que la tarea ha cedido el turno conservando su sitio en la cola y volverá sola. Mientras espera, el broker adelanta a las tareas que sí quepan. Sigue sondeando igual que en `queued`. Si quieres explicarlo en tu interfaz, `GET /api/v1/queue` trae en esa tarea qué modelo pedía y quién ocupa la memoria. La espera no caduca: si algo ajeno al broker retiene la memoria para siempre, la tarea seguirá esperando hasta que la canceles con `POST /api/v1/tasks/{id}/cancel`.
+`waiting_for_memory` (contrato 2.7) merece una nota porque **no es un fallo y no requiere que hagas nada**: la máquina no tiene memoria libre ahora mismo, así que la tarea ha cedido el turno conservando su sitio en la cola y volverá sola. Mientras espera, el broker adelanta a las tareas que sí quepan. Sigue sondeando igual que en `queued`. Si quieres explicarlo en tu interfaz, `GET /api/v1/queue` trae en esa tarea qué modelo pedía y quién ocupa la memoria. La espera no caduca: si algo ajeno al broker retiene la memoria para siempre, la tarea seguirá esperando hasta que la canceles con `DELETE /api/v1/tasks/{id}` (§10).
 
 El caso contrario sí es terminal: si el modelo pedido **pesa más que todo el presupuesto de memoria local configurado** (menos el margen de seguridad), la tarea falla al momento con `VRAM_MODEL_TOO_LARGE` en vez de esperar un turno que no llegaría nunca. Ojo con lo que este error no dice: no habla de la memoria libre real ni de otros procesos, solo compara el peso del modelo con el presupuesto.
 
@@ -629,6 +676,7 @@ Con `synthesized: false`, `model_used` es el proposer que respondió y `consensu
 | `generation` | Parámetros **efectivos**: ver §5.7. Ojo: `max_output_tokens` puede ser menor que el pedido si hubo que recortarlo para caber en la ventana del modelo |
 | `execution_fingerprint` | Con qué configuración se sirvió. Ver §8.2 |
 | `excluded_from_model_learning` | Si esta invocación alimentó o no las métricas del router (§5.8) |
+| `content_source` | De qué campo de la respuesta salió el texto. Ausente o `"content"` es lo normal; `"reasoning_content"` significa que el modelo dejó el contenido vacío y el broker rescató su razonamiento —la respuesta es válida, pero el modelo no la está entregando donde debe, y al **comparar modelos** eso importa—; `"image"`, que contestó solo con una imagen |
 
 No se recoge nada nuevo: es lo que el broker ya guardaba, ahora bajo contrato de cliente en vez de solo bajo el panel de administración. Anunciado en `capabilities.invocation_telemetry`.
 
@@ -757,6 +805,8 @@ Errores **durante la ejecución** no son HTTP: la petición ya se aceptó con `2
 | `PROVIDER_UNAVAILABLE` | Proveedor caído o apagado | **sí** |
 | `PROVIDER_NOT_ALLOWED` / `CLOUD_NOT_ALLOWED` | La frontera de datos bloqueó el modelo | no — revisa §4 |
 | `MODEL_CAPABILITY_MISMATCH` | El modelo no hace lo que pide la tarea (visión, JSON, tools) | no |
+| `VISION_MODEL_UNAVAILABLE` | La tarea lleva imágenes y ningún modelo disponible puede verlas | no — habilita uno con visión |
+| `IMAGE_GENERATION_UNSUPPORTED` | La tarea pide generar o modificar una imagen y nadie sabe producirlas | no |
 | `PROMPT_ECHOED` | El modelo devolvió su prompt en vez de responder | no — el broker lo aparta tras dos veces |
 | `DEGENERATE_OUTPUT` | El modelo se quedó repitiendo una frase hasta el final | no — igual que el anterior |
 | `TASK_TIMEOUT` | Se agotó `execution.timeout_seconds` | según causa |
@@ -768,6 +818,16 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### Después de 2.9 — las imágenes se miran (agosto de 2026)
+
+No sube la versión del contrato: son campos opcionales de subida y códigos de error de ejecución. Pero **sí cambia el comportamiento** de una app que ya adjuntaba imágenes, así que léelo si es tu caso.
+
+- **Una imagen ya no se convierte a texto** (§7). Antes se le hacía OCR y un modelo de visión escribía un párrafo describiéndola, y ese párrafo era lo único que veía el modelo que atendía la tarea. Ahora la imagen viaja entera. Para tu cliente: la subida responde `status: "ready"` de inmediato —el paso 2 sobra— y **no hay `markdown_url`**; si el tuyo lo enlazaba sin comprobar, mira que venga informado antes de pintarlo.
+- **`ocr=true`** al subir (§7): pide el texto que hay dentro de la imagen. Solo entonces una imagen pasa por conversión y tiene `markdown_url`. Nuevo campo `ocr` en la respuesta de subida y en el estado del fichero.
+- **TIFF y BMP se guardan como PNG.** Mismo `file_id` y mismo nombre; `extension` cambia y `meta.transcoded_from` lo anota.
+- **Dos códigos de error nuevos** en ejecución (§11): `VISION_MODEL_UNAVAILABLE` cuando la tarea lleva imágenes y ningún modelo disponible puede verlas, e `IMAGE_GENERATION_UNSUPPORTED` cuando pide generar o modificar una imagen y nadie sabe producirlas. Los dos son deliberados: la alternativa era una respuesta de texto inventada a partir del nombre del fichero, indistinguible de una buena.
+- Si el modelo devuelve imágenes, quedan como **artefactos** de la tarea (`image_output`), no en el resultado JSON.
 
 ### 2.9 — evaluación reproducible
 

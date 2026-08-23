@@ -256,6 +256,7 @@ def model_feature_profile(entry: dict[str, Any]) -> dict[str, Any]:
     claimed = entry.get("catalog") or {}
     for key, targets in (
         ("vision", (("modalities", "image_input"), ("files", "image_file_input"))),
+        ("image_output", (("modalities", "image_output"),)),
         ("json_mode", (("generation", "json_mode"),)),
         ("tools", (("tools", "function_calling"), ("tools", "tool_choice"))),
     ):
@@ -273,6 +274,10 @@ def model_feature_profile(entry: dict[str, Any]) -> dict[str, Any]:
         features["modalities"]["image_input"] = value
         features["files"]["image_file_input"] = value
         notes.append(f"image_input verificado por sondeo contra el endpoint: {value}.")
+    if isinstance(verified.get("image_output"), bool):
+        value = "supported" if verified["image_output"] else "unsupported"
+        features["modalities"]["image_output"] = value
+        notes.append(f"image_output verificado por sondeo contra el endpoint: {value}.")
     if isinstance(verified.get("json_mode"), bool):
         value = "supported" if verified["json_mode"] else "unsupported"
         features["generation"]["json_mode"] = value

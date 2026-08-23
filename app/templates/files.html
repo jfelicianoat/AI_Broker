@@ -46,9 +46,13 @@
             <option value="yes">Describirlas con el modelo de visión</option>
             <option value="no">Omitirlas — conversión mucho más rápida</option>
           </select>
-          <p class="field-hint">Describirlas es, con diferencia, la parte más lenta de la conversión.</p>
+          <p class="field-hint">Describirlas es, con diferencia, la parte más lenta de la conversión. Solo afecta a las figuras dentro de un documento.</p>
         </label>
-        <button class="button" type="submit">Subir y convertir</button>
+        <div class="field">
+          <label><input type="checkbox" name="ocr" value="true"> Reconocer el texto de la imagen (OCR)</label>
+          <p class="field-hint">Solo para imágenes sueltas. Sin marcar, la imagen se adjunta tal cual y la mira un modelo con visión; marcado, además se extrae el texto que haya dentro y queda disponible como Markdown.</p>
+        </div>
+        <button class="button" type="submit">Subir</button>
       </form>
       <details class="formats-details">
         <summary>Formatos admitidos</summary>

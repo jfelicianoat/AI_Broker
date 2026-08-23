@@ -143,6 +143,27 @@ Cada modelo **local de Ollama** lleva a su izquierda un botón `Borrar` que elim
 
 El borrado físico lo ejecuta el runtime de Ollama (`DELETE /api/delete`), no el broker: es lo que garantiza que el almacén quede consistente.
 
+## Memoria de los modelos locales (pantalla Configuración)
+
+Dos controles contiguos en la sección *Configuración* del formulario, que se
+leen juntos o no se entienden:
+
+- **`unload_after_task`** (casilla) — descargar los modelos locales al terminar
+  cada tarea. La etiqueta dice explícitamente que **anula el plazo de
+  inactividad**: son dos ajustes que se pisan, y descubrirlo probando es un mal
+  uso del tiempo de quien opera.
+- **`idle_unload_seconds`** (número, `0 = nunca`) — con el broker parado ese
+  tiempo (sin tareas corriendo *ni en cola*), los modelos locales que nadie use
+  sueltan la memoria. Es el contrapeso de la casilla anterior: sin descargar al
+  terminar cada tarea, dos tareas seguidas con el mismo modelo dejan de pagar
+  la recarga, y este plazo evita que el último se quede residente toda la
+  noche.
+
+Los dos aplican **en caliente**, sin reiniciar: el bucle de inactividad relee la
+configuración en cada vuelta ([`Phase_6_Operations.md`](Phase_6_Operations.md)).
+Ambos aparecen en la revisión de cambios previa a aplicar, con su etiqueta en
+castellano, como el resto de los campos.
+
 ## Seguridad
 
 - Todo prompt, respuesta y error se escapa como texto; no se renderiza Markdown o HTML del modelo sin sanitización explícita.

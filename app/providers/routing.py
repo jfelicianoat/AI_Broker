@@ -16,6 +16,7 @@ from app.config import (
     effective_max_parallel_invocations,
     local_memory_budget_bytes,
 )
+from app.model_capabilities import supports_image_output, supports_vision
 from app.model_enrichment import ModelEnrichment
 from app.model_quarantine import QuarantineEntry, QuarantineKey, quarantine_key
 from app.model_stats import ModelKey, ModelStats
@@ -50,9 +51,10 @@ from app.schemas import (
     ModelReference,
     TaskCreateRequest,
     is_local_deployment,
+    requires_vision,
     uses_tool_loop,
 )
-from app.task_classifier import classify_task_type
+from app.task_classifier import classify_image_intent, classify_task_type
 
 logger = logging.getLogger("ai_broker.routing")
 
@@ -757,6 +759,17 @@ class RoutedModelProvider:
             item for item in catalog
             if required_capability in set(item.get("capabilities") or (["completion"] if required_capability == "completion" else []))
         ]
+        # Capacidades que la petición EXIGE, no que prefiere. Un modelo
+        # solo-texto ante una imagen no falla: contesta a partir del nombre del
+        # fichero como si la hubiera visto, y esa respuesta es indistinguible
+        # de una buena. Lo mismo al revés con la generación: entrega el párrafo
+        # que describe el cartel en vez del cartel.
+        if requires_vision(request):
+            capability_catalog = [item for item in capability_catalog if supports_vision(item)]
+        if classify_image_intent(request) is not None:
+            capability_catalog = [
+                item for item in capability_catalog if supports_image_output(item)
+            ]
         context_catalog = [
             item for item in capability_catalog
             if context_fits_with_capped_output(request, item.get("context_window"))
@@ -781,6 +794,7 @@ class RoutedModelProvider:
 
     async def select(self, request: TaskCreateRequest, count: int, roles: list[str]) -> list[ModelReference]:
         catalog, capability_catalog, context_catalog = await self.eligible_catalog(request)
+        self._require_image_capabilities(request, catalog)
         required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
         required_context = estimate_required_context(request)
         # Idoneidad + selección adaptativa. `context_catalog` sigue siendo el
@@ -880,6 +894,49 @@ class RoutedModelProvider:
         return [ModelReference(provider=ranked_catalog[i % len(ranked_catalog)]["provider"],
                                deployment=ranked_catalog[i % len(ranked_catalog)]["deployment"],
                                model=ranked_catalog[i % len(ranked_catalog)]["name"], role=roles[i]) for i in range(count)]
+
+    async def has_vision_model(self, request: TaskCreateRequest) -> bool:
+        """¿Puede ESTA petición contar con un modelo que mire una imagen?
+
+        Se pregunta antes de expandir los adjuntos, para decidir si la imagen
+        viaja como imagen o degradada a su texto reconocido. La respuesta
+        depende de la petición y no solo del catálogo: un modelo con visión que
+        sea de cloud no existe para una tarea que no permite cloud.
+        """
+        catalog, _, _ = await self.eligible_catalog(request)
+        return any(supports_vision(item) for item in catalog)
+
+    @staticmethod
+    def _require_image_capabilities(
+        request: TaskCreateRequest, catalog: list[dict[str, Any]],
+    ) -> None:
+        """Corta la tarea con un mensaje claro cuando nadie puede atenderla.
+
+        Es la diferencia entre "el broker no tiene ningún modelo que dibuje" y
+        una respuesta de texto haciéndose pasar por una imagen. Se comprueba
+        contra `catalog` —lo que la petición tiene permitido usar, ya aplicada
+        la frontera de datos— y no contra el catálogo entero: si el modelo que
+        podría hacerlo es cloud y la tarea es local, para esta tarea no existe.
+        """
+        intent = classify_image_intent(request)
+        if intent is not None and not any(supports_image_output(item) for item in catalog):
+            verb = "modificar" if intent == "edit" else "generar"
+            raise ProviderError(
+                "IMAGE_GENERATION_UNSUPPORTED",
+                f"La petición pide {verb} una imagen y ningún modelo disponible para "
+                "esta tarea sabe producir imágenes. Habilita un proveedor con un "
+                "modelo de generación de imágenes, o reformula la petición para "
+                "pedir una respuesta de texto.",
+            )
+        if requires_vision(request) and not any(supports_vision(item) for item in catalog):
+            count = len(request.inline_images)
+            plural = "imágenes adjuntas" if count != 1 else "imagen adjunta"
+            raise ProviderError(
+                "VISION_MODEL_UNAVAILABLE",
+                f"La petición lleva {count} {plural} y ningún modelo disponible para "
+                "esta tarea puede verlas. Habilita un modelo con visión (o permite "
+                "cloud, si el que la tiene es de cloud) y vuelve a lanzarla.",
+            )
 
     def _rank_arbiters(
         self, catalog: list[dict[str, Any]], request: TaskCreateRequest

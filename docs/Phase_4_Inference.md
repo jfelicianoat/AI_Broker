@@ -20,6 +20,10 @@ Desde la incorporación del servicio de compresión de prompts ([`Prompt_Compres
 
 El Broker no parsea ni valida el JSON o Markdown de negocio devuelto.
 
+**Multimodalidad (agosto 2026).** Con imágenes adjuntas, el mensaje de usuario deja de ser texto plano y cada adapter lo escribe en su dialecto: Ollama las lleva en un campo `images` del propio mensaje (base64 suelto), los OpenAI-compatibles como lista de partes `text` + `image_url` con data URI. Mandar el formato del otro **no da error**: da una respuesta inventada, que es el peor fallo posible. Sin imágenes, el contenido sigue siendo la cadena de siempre, porque hay servidores compatibles que solo aceptan esa forma. Los bytes viajan en `inline_images`, que se excluye de toda serialización (`request_json`, artefactos, telemetría, estado agéntico persistido): la imagen ya está guardada una vez en la ingesta, y duplicarla en cada volcado serían megabytes de base64 por tarea. Al reanudar un bucle agéntico se readjuntan desde la petición, que se expande de nuevo.
+
+**Respuestas con imagen.** Si el modelo devuelve imágenes (base64 suelto o data URI, según el dialecto), se guardan como artefactos `image_output` de la tarea. Una respuesta **solo** con imagen no es una respuesta vacía: en vez de `INVALID_PROVIDER_RESPONSE`, el contenido pasa a ser un texto que remite a los artefactos, porque el contrato exige contenido y "no ha contestado" sería falso. Una imagen ofrecida como URL remota se ignora: descargarla sería tráfico de salida que la tarea no ha autorizado.
+
 ## Contexto
 
 El preflight usa la ventana descubierta y una cota conservadora: bytes UTF-8 de entrada, schema cuando aplica, `max_output_tokens` y margen de plantilla para chat. Puede rechazar antes que un tokenizer exacto, pero garantiza que no se trunca silenciosamente.

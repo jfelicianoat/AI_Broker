@@ -200,6 +200,22 @@ def attachment_file_id(attachment: ContentAttachment) -> str | None:
     return None
 
 
+class InlineImage(StrictBaseModel):
+    """Una imagen adjunta viajando entera dentro de la petición.
+
+    No es un campo del contrato público: lo rellena el broker al expandir la
+    tarea (app.ingestion.service.expand_request) y lo consumen los adapters de
+    proveedor, cada uno en su dialecto. Un cliente que lo mande se rechaza —ver
+    `reject_broker_managed_fields`—: la única puerta de entrada de bytes al
+    broker es la ingesta, que valida formato, tamaño y contenido.
+    """
+
+    file_id: str = Field(min_length=1, max_length=128)
+    filename: str = Field(min_length=1, max_length=255)
+    media_type: str = Field(min_length=1, max_length=128)
+    data_base64: str = Field(min_length=1)
+
+
 class TaskContent(StrictBaseModel):
     prompt: str = Field(min_length=1)
     attachments: list[ContentAttachment] = Field(default_factory=list)
@@ -523,6 +539,30 @@ class TaskCreateRequest(StrictBaseModel):
     depends_on_group: str | None = Field(
         default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:\-]+$"
     )
+    # Imágenes adjuntas, ya en base64, tal y como llegarán al modelo. Lo pone
+    # el broker en el despacho, nunca el cliente. `exclude=True` mantiene los
+    # bytes fuera de todo lo que se serialice —request_json, artefactos,
+    # telemetría—: la imagen ya está guardada una vez en la ingesta y
+    # duplicarla en cada volcado sería megabytes de base64 por tarea.
+    inline_images: list[InlineImage] = Field(default_factory=list, exclude=True)
+
+    @model_validator(mode="after")
+    def reject_broker_managed_fields(self) -> TaskCreateRequest:
+        """Un cliente no puede inyectar imágenes directamente en la petición.
+
+        `model_copy(update=...)` no revalida, así que la expansión del broker
+        pasa por encima de esta puerta; una petición que llega por la API, no.
+        Sin esto, cualquiera podría meter bytes arbitrarios en el prompt
+        saltándose los límites de tamaño y la validación de formato de la
+        ingesta.
+        """
+        if self.inline_images:
+            raise ValueError(
+                "inline_images is set by the broker when it expands attachments; "
+                "upload images via POST /api/v1/files and reference them as "
+                "broker_file attachments"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_dependencies(self) -> TaskCreateRequest:
@@ -623,6 +663,18 @@ class TaskCreateRequest(StrictBaseModel):
             if self.output.format != OutputFormat.json:
                 raise ValueError("embedding requires output.format=json")
         return self
+
+
+def requires_vision(request: TaskCreateRequest) -> bool:
+    """True si atender esta petición exige mirar una imagen.
+
+    Se responde por los adjuntos ya resueltos, no por el texto del prompt: una
+    tarea lleva imágenes o no las lleva, y eso no es una heurística. Manda el
+    filtro de capacidad del enrutado (app.providers.routing.eligible_catalog):
+    un modelo solo-texto ante una imagen no da error, da una respuesta
+    inventada a partir del nombre del fichero.
+    """
+    return bool(request.inline_images)
 
 
 class TaskAcceptedResponse(StrictBaseModel):
@@ -956,6 +1008,10 @@ class FileAcceptedResponse(StrictBaseModel):
     # resuelta, para que el cliente sepa qué va a recibir sin consultar la
     # configuración del broker.
     describe_images: bool = False
+    # Se pidió reconocer el texto de la imagen. Con `false`, una imagen llega
+    # ya en `ready` (no se convierte); con `true` pasa por el carril y hay que
+    # esperar a que termine, como cualquier otra conversión.
+    ocr: bool = False
 
 
 class FileStateResponse(StrictBaseModel):
@@ -974,6 +1030,8 @@ class FileStateResponse(StrictBaseModel):
     markdown_url: str | None = None
     # Si el Markdown lleva descripciones de las figuras del documento.
     describe_images: bool = False
+    # Si el Markdown de esta imagen es el texto que se le reconoció.
+    ocr: bool = False
 
 
 class LaneOccupancy(StrictBaseModel):

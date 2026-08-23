@@ -323,6 +323,13 @@ class Database:
                 # anteriores a la columna; se asumen convertidas con la
                 # política global vigente (ver IngestionService._reusable_row).
                 self._conn.execute("ALTER TABLE ingested_files ADD COLUMN describe_images INTEGER")
+            if "ocr" not in file_columns:
+                # Reconocimiento de texto PEDIDO al subir una imagen (0/1). Es
+                # lo único que hace que una imagen se convierta —normalmente se
+                # adjunta entera y sin tocar—, así que también entra en la
+                # deduplicación por sha256: reutilizar una subida sin texto
+                # reconocido cuando se pide con él devolvería otra cosa.
+                self._conn.execute("ALTER TABLE ingested_files ADD COLUMN ocr INTEGER")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"

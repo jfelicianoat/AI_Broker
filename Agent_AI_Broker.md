@@ -36,7 +36,7 @@
 
 5. **Dashboard Interactivo:** Gestión visual en tiempo real con HTMX
 
-6. **Ingesta de Adjuntos:** Conversión de documentos/imágenes/audio/vídeo a Markdown antes de la inferencia
+6. **Ingesta de Adjuntos:** Conversión de documentos/audio/vídeo a Markdown antes de la inferencia; las imágenes se adjuntan enteras a un modelo con visión
 
 7. **Ejecución Aislada:** Código generado por modelos ejecutado en sandbox Docker sin red ni acceso al host
 
@@ -567,6 +567,24 @@ En `single`, el progreso se limita a `queued`, `routing`, `generating` y un esta
 
 > **¿Solo quieres integrar una aplicación?** [`docs/Client_API.md`](docs/Client_API.md) es la especificación autocontenida y al día: qué enviar, qué recibir y qué errores esperar, sin tener que reconstruirlo leyendo este histórico de versiones.
 
+### Novedades del contrato 2.9 (16 de agosto de 2026)
+
+`GET /api/v1/capabilities` devuelve `contract_version: "2.9"` y cuatro flags nuevos: `generation_determinism`, `exclude_from_model_learning`, `invocation_telemetry` y `execution_fingerprint`. Todo lo de esta versión es **aditivo y opcional**: un cliente de 2.8 sigue funcionando sin tocar nada.
+
+**Evaluación reproducible.** `generation.seed` y `generation.top_p` viajan hasta el proveedor que sepa honrarlos. Sin ellos el cuerpo que llega al modelo es idéntico al de antes, así que ninguna tarea existente cambia de comportamiento por el hecho de que el campo exista.
+
+**Tráfico que no debe enseñar al broker.** `exclude_from_model_learning: true` marca una tarea como medición: sus invocaciones no alimentan la evidencia operativa del enrutado ni la cuarentena. Sin esto, medir un modelo a propósito con prompts difíciles le baja la fiabilidad al router y puede llegar a apartarlo del catálogo — el que mide acaba modificando lo que mide.
+
+**Telemetría por invocación.** `GET /api/v1/tasks/{id}/invocations` devuelve, invocación a invocación, qué modelo respondió, con qué parámetros **efectivos** (los que se enviaron de verdad, no los pedidos), a qué coste y con qué huella de ejecución. Antes solo existía bajo el panel de administración, lo que obligaba a una app que quisiera auditar a hablar con una superficie que no es contrato.
+
+**Huella de ejecución.** La configuración exacta que produjo una respuesta —cuantización, contexto efectivo, reparto de capas, parámetros del runtime— acompaña al catálogo y a cada invocación. Es lo que permite decir que dos medidas del "mismo" modelo no son comparables: `granite4.1:3b` cargado con 8k de contexto y repartido a CPU no es el mismo experimento que el mismo tag entero en VRAM.
+
+**Estado agregado de una tanda.** `GET /api/v1/groups/{group}` resume las tareas de un `group` en una sola respuesta. Es la contrapartida de las dependencias de 2.8: si mandas cientos de tareas de una tanda, sondearlas una a una es lo que hace lento un cliente que por lo demás está bien escrito.
+
+**`execution_summary`** en el estado de tarea: `served_by` y `fallback_used` tipados, sin tener que parsear `result`.
+
+Detalle para clientes en [`docs/Client_API.md`](docs/Client_API.md) §5.7, §5.8, §5.9, §8.1 y §8.2. Las **imágenes adjuntas** y el **OCR** (agosto de 2026) llegaron después de esta versión y no la suben, porque solo añaden campos opcionales de subida y códigos de error de ejecución: ver la sección de ingesta de adjuntos, más abajo.
+
 ### Novedades del contrato 2.8 (14 de agosto de 2026)
 
 `GET /api/v1/capabilities` devuelve `contract_version: "2.8"`, dos flags nuevos (`task_dependencies: true` y `agent_skills_egress`) y un estado nuevo, `waiting_for_dependencies`.
@@ -666,6 +684,14 @@ Todos los cambios son aditivos: un cliente de contratos anteriores sigue funcion
 
 En el despacho, el Markdown se inyecta en el prompt dentro de `<attached_document id name>` con neutralización anti-inyección y aviso de contenido no confiable; `request_json` conserva el prompt original del cliente. Con adjuntos, la compresión de prompt pasa a `off` salvo override explícito de la tarea. Formatos soportados en `capabilities.ingestion_formats` (agrupados por tipo); flag `file_ingestion: true`. Detalle completo: [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md).
 
+**Imágenes: se adjuntan, no se convierten (agosto 2026).** Una imagen suelta ya no pasa por Docling. Antes se le hacía OCR y un modelo de visión escribía un párrafo describiéndola, y ese párrafo —no la imagen— era lo que veía el modelo que atendía la tarea: lo que la descripción no mencionara se perdía en silencio. Ahora la imagen queda `ready` al subirla (sin conversión, sin `markdown_url`, sin pasar por el carril de ingesta), el prompt recibe un manifiesto `<attached_image id name orden>` y los bytes viajan aparte hasta el adapter, cada uno en su dialecto (Ollama: `images: [b64]`; OpenAI-compatibles: `image_url` con data URI). El campo que los transporta (`inline_images`) lo rellena el broker al expandir y **se rechaza** si llega del cliente: la única puerta de entrada de bytes es la ingesta. Las figuras *embebidas* en un documento siguen describiéndose, que es otra cosa: ahí el resto del documento es texto y la figura tiene que ocupar su sitio en él.
+
+TIFF y BMP se reescriben a PNG al subirlos (cambio de envoltorio, sin pérdida): ningún endpoint de visión los acepta y, tal cual, la tarea moriría con un error del proveedor después de esperar en la cola.
+
+Con imágenes en la tarea, el enrutado **exige** visión y descarta a los demás; si no queda ninguno, la tarea falla con `VISION_MODEL_UNAVAILABLE` — salvo que lo que se pida sea el texto de la imagen, que el broker sabe sacar sin visión (ver más abajo). Si la petición pide *generar* o *modificar* una imagen (clasificador determinista y deliberadamente estrecho: "resume la imagen" o "genera un diagrama" no cuentan), solo son candidatos los modelos que producen imágenes, y sin ninguno la tarea falla con `IMAGE_GENERATION_UNSUPPORTED` diciéndolo, en vez de entregar la descripción del cartel en lugar del cartel. La evidencia de ambas capacidades vive en `app.model_capabilities` con la jerarquía de siempre (sondeo > catálogo externo > nada). Las imágenes que devuelva un modelo se guardan como artefactos `image_output` de la tarea, no en el resultado JSON.
+
+**OCR de imágenes (agosto 2026).** Extraer el texto que hay *dentro* de una imagen es lo único que el broker le hace a una imagen, y solo si se pide. Dos caminos: `POST /api/v1/files` con `ocr=true` (esa imagen sí pasa por el carril; su `markdown_url` sirve el texto y el OCR entra en la dedupe por SHA-256 con la misma regla `>=` que `describe_images`), o al vuelo durante la expansión cuando la petición va de leer la imagen y no hay ningún modelo con visión disponible — ahí la imagen entra como texto en lugar de fallar. El OCR **nunca sustituye** a la imagen cuando hay quien pueda verla: viajan las dos cosas, la imagen y un bloque `<attached_image_text>` con la transcripción literal. Y la degradación se limita a las peticiones de texto: con un "¿de qué color es el fondo?" y sin visión, la tarea sigue fallando, porque un OCR no contesta eso.
+
 **Sandbox de código (skill `run_code`, julio 2026).** La estrategia `agent` (y `proposer_skills` del mixture) acepta la skill `run_code`: el modelo escribe Python y el broker lo ejecuta en un contenedor Docker desechable — sin red, sin ficheros del host, rootfs de solo lectura, usuario sin privilegios, límites de tiempo/memoria/CPU/procesos — devolviendo stdout/stderr/exit code como resultado de tool (el modelo puede corregir y reintentar). Doble opt-in: `run_code` no está en las skills por defecto y requiere `sandbox.enabled` en la configuración del broker; sin sandbox, crear una tarea que la pida devuelve `409 SANDBOX_DISABLED`. Detección: flag `sandbox_run_code` en `capabilities` (y `run_code` aparece en `agent_skills` solo con sandbox activo). Detalle completo: [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md).
 
 **Meta-router de estrategia (`strategy: auto`).** Con `strategy_router.enabled` en la configuración, una tarea con `execution.strategy: "auto"` deja que el broker elija estrategia concreta. La clasificación es **técnica**, no de dominio: necesita datos actuales / cálculo / URL → `agent`; deliberativa (comparar, analizar, prompt largo, datos sensibles) y con presupuesto → `mixture_of_agents`; directa → `single`. La decisión se persiste como evento `strategy.routed` (con señales y motivos), visible en el detalle de la tarea. Router apagado o `strategy: auto` sin él → se resuelve a `single`. Diseñado en tres piezas activables por separado en config: (1) clasificador heurístico, (2) escalado por confianza y (3) aprendizaje adaptativo —las tres implementadas—; `record_cases` guarda los casos desde el principio. Flag `auto_strategy` en `capabilities` (solo true si el router está activo); `auto` aparece en `strategies` solo entonces.
@@ -727,6 +753,7 @@ Skills disponibles (en `capabilities.agent_skills`): `web_search` (DuckDuckGo, s
 - Marcar `cancel_requested` antes del efecto y `cancelled` al confirmarlo.
 - En `finally`, enviar `keep_alive: 0` para descargar el modelo si `unload_after_task` está activo y confirmar su ausencia mediante `/api/ps` antes de entregar el slot a la siguiente tarea.
 - Nunca usar `keep_alive: 0` sobre un modelo con lease activo. Si la descarga falla, marcar el Broker `degraded`, impedir otra carga que exceda la VRAM y reintentar la limpieza.
+- Con `unload_after_task` desactivado, un bucle aparte (`app.maintenance.idle_unload_loop`) descarga los modelos sin lease cuando el broker lleva `idle_unload_seconds` sin tareas corriendo ni en cola. Se ejecuta bajo el mismo lock que la admisión, para que no pueda colarse entre la comprobación de que un modelo ya está cargado y el registro de su lease.
 - Una cancelación repetida devuelve el estado terminal existente.
 
 ### Servicio siempre encendido y salud proactiva

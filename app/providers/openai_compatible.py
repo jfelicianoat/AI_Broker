@@ -13,6 +13,7 @@ import httpx
 from app import execution_fingerprint as fingerprint
 from app.config import OpenAICompatibleProviderConfig
 from app.providers.base import (
+    _IMAGE_ONLY_ANSWER,
     PROBE_HARD_MAX_MODELS,
     AgentTurn,
     CredentialResolver,
@@ -27,10 +28,12 @@ from app.providers.base import (
     enforce_context_limit,
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
+    multimodal_content,
     provider_error_from_http,
     provider_http_error_message,
     request_with_context_capped_output,
     rescued_content,
+    returned_images,
 )
 from app.providers.base import (
     openai_determinism_fields as _determinism_fields,
@@ -635,7 +638,13 @@ class OpenAICompatibleProvider:
                     f"El coste maximo estimado ({estimated_cost:.6f} USD) supera el presupuesto",
                 )
         started = datetime.now(timezone.utc)
-        messages = [{"role": "user", "content": prompt}]
+        # Con imágenes adjuntas el contenido deja de ser una cadena y pasa a ser
+        # la lista de partes del dialecto OpenAI (texto + image_url). Sin ellas
+        # se manda la cadena de siempre: hay servidores compatibles que solo
+        # aceptan esa forma.
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": multimodal_content(prompt, request.inline_images)}
+        ]
         if system:
             messages.insert(0, {"role": "system", "content": system})
         try:
@@ -663,8 +672,13 @@ class OpenAICompatibleProvider:
         content, source = rescued_content(
             message, enabled=self.config.rescue_reasoning_content,
         )
+        images = returned_images(message)
         if content is None:
-            raise self._empty_content_error(message, payload, model)
+            # Un modelo de imagen puede contestar solo con la imagen; eso no es
+            # una respuesta vacía.
+            if not images:
+                raise self._empty_content_error(message, payload, model)
+            content, source = _IMAGE_ONLY_ANSWER, "image"
         if source == "reasoning_content":
             # Se entrega, pero se deja constancia: la respuesta llegó por un
             # campo que no es el que el contrato considera contenido, y eso dice
@@ -691,4 +705,5 @@ class OpenAICompatibleProvider:
             generation=effective_generation(inference_request),
             fingerprint_observed=_observed_fingerprint(payload),
             content_source=source,
+            images=images,
         )
