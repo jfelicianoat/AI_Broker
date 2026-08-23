@@ -143,6 +143,34 @@ Cada modelo **local de Ollama** lleva a su izquierda un botón `Borrar` que elim
 
 El borrado físico lo ejecuta el runtime de Ollama (`DELETE /api/delete`), no el broker: es lo que garantiza que el almacén quede consistente.
 
+## Artefactos de la tarea (pantalla Tareas → detalle)
+
+Panel propio en el detalle de una tarea, con los ficheros que produjo. Nace de
+un agujero: un modelo capaz de generar imágenes las devolvía, el broker las
+guardaba en `state/tasks/…` y la única superficie que podía enseñarlas no las
+enseñaba. Se veía el texto *"el modelo respondió con una imagen"* y ahí acababa
+todo.
+
+- **La imagen se pinta, no se enumera.** Si el modelo dibujó algo, mirarlo es la
+  razón entera de abrir esa pantalla; una fila de tabla con el nombre del
+  fichero no responde a "¿ha salido bien?". El tamaño de presentación es
+  generoso a propósito (hasta 360 px de alto, con enlace al original a tamaño
+  completo): una miniatura obliga a abrir otra pestaña para saber si sirve.
+- **La tabla acompaña, no sustituye**: tipo, nombre, tamaño y fecha de cada
+  artefacto, incluidos los que no son imágenes (`single_output`,
+  `synthesis_output`).
+- **Un artefacto podado se sigue listando**, marcado como "ya no está en disco".
+  La fila es información —existió y la retención se lo llevó—; lo que no se
+  ofrece es un enlace que iba a dar error.
+- Los sirve `/dashboard/tasks/{task_id}/artifacts/{artifact_id}`, con la sesión
+  del panel. La ruta equivalente de `/api/v1` existe para las apps cliente
+  ([`Client_API.md`](Client_API.md) §8.3); duplicarla aquí es lo que evita que
+  mirar un PNG exija ir a buscar un token.
+
+En la pantalla **Ficheros**, la contrapartida: una imagen subida no tiene
+Markdown, así que su fila no ofrecía nada que mirar. Ahora lleva "Ver imagen"
+(`/dashboard/files/{id}/original`).
+
 ## Memoria de los modelos locales (pantalla Configuración)
 
 Dos controles contiguos en la sección *Configuración* del formulario, que se

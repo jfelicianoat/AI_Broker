@@ -784,6 +784,36 @@ class TaskInvocationsResponse(StrictBaseModel):
     items: list[TaskInvocationItem] = Field(default_factory=list)
 
 
+class TaskArtifactItem(StrictBaseModel):
+    """Un fichero que produjo la tarea y que se puede descargar.
+
+    Existe porque había salida que el broker guardaba y nadie podía recoger: una
+    imagen generada por un modelo se escribía en disco y ahí se quedaba, fuera
+    del resultado JSON (que se lee entero en cada sondeo y no puede llevar
+    megabytes de base64) y sin ninguna ruta HTTP que la sirviera. El listado da
+    los metadatos; `download_url` da los bytes.
+    """
+
+    artifact_id: str
+    artifact_type: str
+    filename: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    created_at: datetime
+    download_url: str
+    # Un artefacto cuya fila existe pero cuyo fichero ya no está en disco: lo
+    # podó la retención, o se restauró una copia de la BD sin `state/tasks`. Se
+    # lista igualmente —el registro de que existió es información— pero se dice,
+    # en vez de ofrecer una descarga que va a dar 404.
+    available: bool = True
+
+
+class TaskArtifactsResponse(StrictBaseModel):
+    task_id: str
+    items: list[TaskArtifactItem] = Field(default_factory=list)
+
+
 class TaskStateResponse(StrictBaseModel):
     task_id: str
     kind: TaskKind = TaskKind.inference
@@ -992,6 +1022,10 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # El catálogo y cada invocación declaran la configuración efectiva que
     # produce la respuesta (app.execution_fingerprint).
     execution_fingerprint: bool = False
+    # GET /api/v1/tasks/{id}/artifacts: los ficheros que produjo la tarea se
+    # pueden listar y descargar. Es lo que hace recuperable una imagen generada
+    # por un modelo, que no cabe en `result`.
+    task_artifacts: bool = False
 
 
 class FileAcceptedResponse(StrictBaseModel):
@@ -1206,6 +1240,10 @@ class DashboardTaskDetail(StrictBaseModel):
     error: dict[str, Any] | None
     invocations: list[DashboardInvocationItem]
     events: list[DashboardEventItem]
+    # Ficheros que produjo la tarea. Hasta agosto de 2026 el panel no los
+    # enseñaba: una imagen generada por un modelo estaba en disco y en la BD,
+    # y no se veía por ninguna superficie.
+    artifacts: list[TaskArtifactItem] = Field(default_factory=list)
 
 
 class DashboardLoadedModel(StrictBaseModel):

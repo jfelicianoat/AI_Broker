@@ -49,6 +49,7 @@ Devuelve, entre otros:
 | `file_ingestion` | `bool` | Si puedes adjuntar ficheros |
 | `ingestion_formats` | `{string: [string]}` | Extensiones admitidas **agrupadas por tipo**: la clave es el grupo (`pdf`, `office`, `text`, `image`, `audio`, `video`), el valor su lista de extensiones con punto |
 | `long_context_map_reduce` | `bool` | Si puedes autorizar troceo de documentos largos |
+| `task_artifacts` | `bool` | Si puedes listar y descargar los ficheros que produce una tarea (§8.3) |
 | `max_active_workflows` | `int` | Cuántas inferencias corren a la vez (es 1 por invariante) |
 
 **Ojo con los tres campos `{string: [string]}`.** Son **objetos**, no listas. Es el error de integración más común: un cliente con tipado estricto que declara `ingestion_formats` como array falla al deserializar la respuesta entera y se queda sin ninguna capacidad — no solo sin la de ficheros. Si lo que necesitas es la lista plana de extensiones para filtrar un selector de ficheros, aplana tú los valores del mapa.
@@ -79,7 +80,8 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
   "generation_determinism": true,
   "exclude_from_model_learning": true,
   "invocation_telemetry": true,
-  "execution_fingerprint": true
+  "execution_fingerprint": true,
+  "task_artifacts": true
 }
 ```
 
@@ -520,7 +522,7 @@ Si la petición pide **generar** una imagen ("genera una imagen de…", "dibúja
 
 Cuando sí lo hay, las imágenes que devuelva se guardan como **artefactos** de la tarea (`image_output`), no dentro del resultado JSON: ese documento se lee entero en cada consulta del estado, y un PNG en base64 dentro lo convertiría en megabytes por sondeo.
 
-**Cómo recogerlas hoy:** el artefacto se escribe en `state/tasks/{task_id}/single/image_NN.png` (o `synthesis/…` si la produjo el árbitro de un mixture) en la máquina del broker (la ruta y el SHA-256 quedan en la tabla `artifacts` y en el evento `artifact.created`). **No hay endpoint de descarga, el estado de la tarea no los enumera y el panel tampoco los enseña todavía**: si tu aplicación no comparte disco con el broker, cuenta con recoger la imagen por fuera de la API. Y `result.assistant_content` en ese caso trae un texto que lo dice (*"el modelo respondió con una imagen; está en los artefactos de la tarea"*): no lo enseñes como si fuera la respuesta al usuario sin más.
+**Cómo recogerlas:** `GET /api/v1/tasks/{id}/artifacts` las lista y `download_url` sirve los bytes (§8.3). Y `result.assistant_content` en ese caso trae un texto que lo dice (*"el modelo respondió con una imagen; está en los artefactos de la tarea"*): no lo enseñes como si fuera la respuesta al usuario sin más — el contenido de verdad es el artefacto.
 
 La detección es deliberadamente conservadora: "resume la imagen adjunta" o "genera un diagrama de flujo" **no** cuentan como petición de imagen, porque un falso positivo tumbaría una tarea que el broker sabe atender.
 
@@ -704,6 +706,39 @@ Por eso cada invocación y cada entrada del catálogo (`/api/v1/models/availabil
 
 El conjunto de componentes es fijo: `provider`, `deployment`, `model` (capa declarada); `digest`, `quantization`, `parameter_size`, `family`, `tokenizer`, `chat_template`, `runtime`, `runtime_version` (capa técnica); `system_fingerprint`, `remote_model`, `api_version` (lo que dice de sí mismo un proveedor remoto). Anunciado en `capabilities.execution_fingerprint`.
 
+### 8.3 Artefactos: los ficheros que produce la tarea
+
+```http
+GET /api/v1/tasks/{task_id}/artifacts
+```
+
+```json
+{
+  "task_id": "task_abc",
+  "items": [
+    {
+      "artifact_id": "art_9f2c…",
+      "artifact_type": "image_output",
+      "filename": "image_01.png",
+      "media_type": "image/png",
+      "size_bytes": 184320,
+      "sha256": "…",
+      "created_at": "2026-08-23T09:12:44Z",
+      "download_url": "/api/v1/tasks/task_abc/artifacts/art_9f2c…",
+      "available": true
+    }
+  ]
+}
+```
+
+`GET` sobre `download_url` devuelve los bytes con su `Content-Type`. Misma autorización que el resto de `/api/v1`.
+
+- **Qué hay aquí**: la salida que no cabe en `result`. Hoy, sobre todo, las **imágenes** que devuelve un modelo (`image_output`), y también la copia en disco de la respuesta final (`single_output`, `synthesis_output`). El resultado JSON se lee entero en cada sondeo del estado, así que un PNG en base64 dentro lo convertiría en megabytes por lectura: por eso los binarios van aparte.
+- **`available: false`** significa que la fila existe y el fichero ya no: lo podó `persistence.artifacts_retention_days`, o se restauró una copia de la BD sin `state/tasks`. La descarga responde entonces `410`, no `404` — existió y se borró a propósito, que no es lo mismo que no haber existido nunca. Si tu aplicación guarda referencias a artefactos, cuenta con esto antes que con un 200 perpetuo.
+- **`artifact_id` se resuelve contra la pareja (tarea, artefacto)**: pedir el artefacto de otra tarea da `404` aunque el identificador exista.
+
+Anunciado en `capabilities.task_artifacts`.
+
 ### Cuando falla
 
 `status: "failed"` y `error` con `{code, message, retryable}`. **`retryable` te dice si tiene sentido reintentar**: un `PROVIDER_UNAVAILABLE` transitorio sí, un `CONTEXT_LIMIT_EXCEEDED` no.
@@ -827,7 +862,8 @@ No sube la versión del contrato: son campos opcionales de subida y códigos de 
 - **`ocr=true`** al subir (§7): pide el texto que hay dentro de la imagen. Solo entonces una imagen pasa por conversión y tiene `markdown_url`. Nuevo campo `ocr` en la respuesta de subida y en el estado del fichero.
 - **TIFF y BMP se guardan como PNG.** Mismo `file_id` y mismo nombre; `extension` cambia y `meta.transcoded_from` lo anota.
 - **Dos códigos de error nuevos** en ejecución (§11): `VISION_MODEL_UNAVAILABLE` cuando la tarea lleva imágenes y ningún modelo disponible puede verlas, e `IMAGE_GENERATION_UNSUPPORTED` cuando pide generar o modificar una imagen y nadie sabe producirlas. Los dos son deliberados: la alternativa era una respuesta de texto inventada a partir del nombre del fichero, indistinguible de una buena.
-- Si el modelo devuelve imágenes, quedan como **artefactos** de la tarea (`image_output`), no en el resultado JSON.
+- Si el modelo devuelve imágenes, quedan como **artefactos** de la tarea (`image_output`), no en el resultado JSON, y se recogen con `GET /api/v1/tasks/{id}/artifacts` (§8.3).
+- **`GET /api/v1/tasks/{id}/artifacts`** y la descarga por `download_url`: los ficheros que produce una tarea dejan de ser inalcanzables desde fuera de la máquina del broker. Anunciado en `capabilities.task_artifacts`.
 
 ### 2.9 — evaluación reproducible
 

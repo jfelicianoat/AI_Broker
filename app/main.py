@@ -11,7 +11,7 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request, Response, Uplo
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.admin_auth import (
@@ -83,6 +83,7 @@ from app.schemas import (
     QueueResponse,
     SchedulingPolicy,
     TaskAcceptedResponse,
+    TaskArtifactsResponse,
     TaskCreateRequest,
     TaskGroupStateResponse,
     TaskInvocationsResponse,
@@ -524,6 +525,39 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
 
+    @app.get("/api/v1/tasks/{task_id}/artifacts", response_model=TaskArtifactsResponse)
+    def list_task_artifacts(task_id: str, request: Request) -> TaskArtifactsResponse:
+        """Los ficheros que produjo la tarea, con su URL de descarga.
+
+        Sin esto, una imagen generada por un modelo se guardaba en disco y no
+        había forma de recogerla: no cabe en `result` —ese documento se lee
+        entero en cada sondeo del estado— y ninguna ruta la servía. El listado
+        es barato (una consulta) y la descarga va aparte, que es como se sirve
+        cualquier binario."""
+        verify_admin_access(request, broker_config)
+        try:
+            return repository.list_task_artifacts(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from exc
+
+    @app.get("/api/v1/tasks/{task_id}/artifacts/{artifact_id}")
+    def download_task_artifact(task_id: str, artifact_id: str, request: Request) -> FileResponse:
+        """Los bytes de un artefacto.
+
+        El identificador se resuelve contra la fila de la BD, nunca contra una
+        ruta que venga del cliente: por aquí no hay camino a otro fichero del
+        disco. Un artefacto podado por retención responde 410 y no 404, porque
+        la diferencia importa —existió y se borró a propósito, frente a nunca
+        existió—."""
+        verify_admin_access(request, broker_config)
+        try:
+            path, filename, media_type = repository.artifact_path(task_id, artifact_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="ARTIFACT_NOT_FOUND") from exc
+        if not path.is_file():
+            raise HTTPException(status_code=410, detail="ARTIFACT_GONE")
+        return FileResponse(path, media_type=media_type, filename=filename)
+
     @app.get("/api/v1/groups/{group}", response_model=TaskGroupStateResponse)
     def get_group_state(group: str, request: Request) -> TaskGroupStateResponse:
         """Estado agregado de una tirada etiquetada con `group`.
@@ -827,6 +861,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             exclude_from_model_learning=True,
             invocation_telemetry=True,
             execution_fingerprint=True,
+            task_artifacts=True,
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)

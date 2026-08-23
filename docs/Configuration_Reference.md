@@ -41,11 +41,14 @@ Lo que no cambia sin reiniciar el proceso.
 | `host` | `127.0.0.1` | Interfaz de escucha. Fuera de loopback se activa el arranque *fail-closed* (ver abajo) |
 | `port` | `8765` | Puerto del API y del panel |
 | `workers` | `1` | **Invariante validado**: cualquier otro valor impide arrancar. Con N workers habría N dispatchers y N recuperaciones de arranque sobre la misma SQLite: re-encolado de tareas en ejecución y gasto duplicado. El runner pasa la instancia de la app a Uvicorn, no un import string, precisamente para que no pueda multiplicarse |
-| `cors_enabled` | `false` | **Declarado, sin efecto hoy**: no hay middleware CORS montado. Activarlo no habilita nada |
+| `cors_enabled` | `false` | Permite que una web servida desde otro origen llame al API. Exige `cors_allow_origins` |
+| `cors_allow_origins` | `[]` | Orígenes exactos autorizados (esquema + host + puerto, ≤32) |
 | `admin_token_env` | `AI_BROKER_ADMIN_TOKEN` | Variable de entorno de la que sale el token de administración |
 | `admin_keyring_service` | `ai-broker` | Servicio del keyring donde buscar el token si no está en el entorno |
 | `admin_keyring_username` | `dashboard_admin_token` | Usuario del keyring para ese token |
 | `allow_unauthenticated_lan` | `false` | Único opt-out del arranque fail-closed |
+
+**CORS.** Activarlo sin orígenes **impide arrancar**, y `*` se rechaza: el API viaja con token de administración, y abrirlo a cualquier origen lo entrega a cualquier web que visite quien lo tenga en marcha. Con orígenes declarados se monta el middleware con `allow_credentials=False` —la autenticación es la cabecera `X-Admin-Token`, que la app cliente pone a mano; permitir cookies expondría además la sesión del panel— y con los métodos y cabeceras que el broker usa. Un origen con ruta (`https://app.local/panel`) también se rechaza: el navegador compara esquema+host+puerto, así que una ruta ahí no restringe nada, solo hace que la entrada no case nunca.
 
 **Arranque fail-closed.** Con `host` fuera de loopback y sin token admin (ni en
 entorno ni en keyring), el broker **se niega a arrancar**. Un panel que expone
@@ -229,12 +232,14 @@ Memoria de la máquina y admisión de trabajo local.
 | `gpu_offload_reserve_ratio` | `0.2` | 0–0.9 | Parte del presupuesto que no se dedica a los pesos: caché KV, buffers y contexto. Reservar de menos es lo que hace fallar la carga justo al final, tras leer decenas de GB de disco |
 | `gpu_context_sizing` | `true` | | Pedir el contexto que la tarea necesita en vez de dejar que el runtime reserve el del modelo entero. Solo aplica a la generación de un turno: en el bucle agéntico la conversación crece y reajustar en cada llamada obligaría a recargar el modelo |
 | `gpu_context_minimum_tokens` | `4096` | 512–1e6 | Suelo de lo anterior: los tokenizadores reales no coinciden con la estimación del broker, y quedarse corto trunca la respuesta |
-| `max_loaded_local_models` | `"auto"` | `"auto"` o 1–64 | **Declarado y editable en el panel, pero hoy nadie lo lee.** La admisión la gobierna la memoria, no un contador de modelos |
-| `scheduling_policy` | `adaptive` | | **Declarado, sin efecto hoy.** La política real la elige el `ResourceScheduler` por tarea, y el cliente la pide en `execution.scheduling_policy` |
+| `max_loaded_local_models` | `"auto"` | `"auto"` o ≥1 | Techo por **conteo** de modelos locales cargados a la vez, además del de memoria. `auto` = la capacidad paralela de inferencia. Una tarea que llega con el cupo lleno no falla: cede el turno como ante cualquier falta de memoria |
+| `scheduling_policy` | `adaptive` | `adaptive` \| `parallel` \| `waves` \| `sequential` | Política de planificación por defecto de un mixture `slow` cuyo cliente no la declare. Un `execution.scheduling` explícito manda siempre |
 | `allow_execution_waves` | `true` | | Permitir el plan por oleadas en un mixture `slow` |
 | `memory_wait_seconds` | `20.0` | 1–3600 | Cada cuánto reintenta una tarea en `waiting_for_memory` |
 | `memory_reserve_after` | `5` | 1–100 | Turnos cedidos tras los que la tarea reserva el suyo. Es el freno a la inanición: sin él, una petición de 48 GB nunca correría mientras sigan llegando peticiones de 8 GB |
 | `memory_reserve_window_seconds` | `300.0` | 10–86400 | Cuánto dura esa reserva. Al expirar, la cola vuelve a fluir: si la memoria no se libera jamás, la reserva no puede convertirse en un bloqueo permanente |
+
+**El cupo de modelos no es lo mismo que el de memoria.** La memoria sola no basta en una máquina holgada: cuatro modelos medianos caben y se pelean por el mismo bus y los mismos núcleos, y ejecutarlos a la vez va peor que en serie. Antes de hacer esperar a nadie se descargan los modelos cargados que no estén sirviendo ninguna tarea; solo si los que ocupan el cupo tienen lease se cede el turno, con `LOCAL_MODEL_SLOTS_BUSY` y el motivo `model_slots` en el bloque que ve el panel. Un modelo que **ya** está cargado nunca paga el cupo: no hay carga que hacer.
 
 La espera por memoria **no caduca**, por decisión de producto: no se descarta
 trabajo por un pico de memoria. La tarea queda visible en el panel con quién le
@@ -476,10 +481,12 @@ para que nadie pierda una tarde moviéndolos:
 
 | Clave | Situación |
 |---|---|
-| `server.cors_enabled` | No hay middleware CORS montado |
-| `server.workers` | Solo se valida que sea `1`; el runner no lo propaga a Uvicorn (pasa la instancia de la app, que fuerza un único proceso) |
-| `resources.max_loaded_local_models` | La admisión la gobierna la memoria disponible, no un contador de modelos |
-| `resources.scheduling_policy` | La política real la decide el `ResourceScheduler` por tarea, y el cliente puede pedirla en `execution.scheduling_policy` |
+| `server.workers` | Solo se valida que sea `1`; el runner no lo propaga a Uvicorn (le pasa la instancia de la app, que ya fuerza un único proceso). No es un mando suelto: es el invariante escrito donde se puede comprobar |
+
+`server.cors_enabled`, `resources.max_loaded_local_models` y
+`resources.scheduling_policy` estuvieron en esta lista hasta el 23 de agosto de
+2026, declarados y sin ningún lector. Ya no: los tres hacen lo que dicen, y hay
+tests que lo sostienen (`tests/test_operator_settings.py`).
 
 ---
 

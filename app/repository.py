@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +19,8 @@ from app.schemas import (
     ModelReference,
     QueueItem,
     QueueResponse,
+    TaskArtifactItem,
+    TaskArtifactsResponse,
     TaskCreateRequest,
     TaskExecutionSummary,
     TaskGroupStateResponse,
@@ -1368,6 +1371,65 @@ class TaskRepository:
             finished=(completed + failed + cancelled) == total,
             created_at=_parse_dt(row["created_at"]) if row["created_at"] else None,
             updated_at=_parse_dt(row["updated_at"]) if row["updated_at"] else None,
+        )
+
+    # Tipo MIME por extensión de los artefactos que el broker escribe. Sin
+    # esto, una imagen se descargaría como `application/octet-stream` y el
+    # navegador la ofrecería como fichero en vez de enseñarla, que es justo lo
+    # que hacía falta arreglar.
+    _ARTIFACT_MEDIA_TYPES = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+        ".tiff": "image/tiff", ".md": "text/markdown; charset=utf-8",
+        ".txt": "text/plain; charset=utf-8", ".json": "application/json",
+    }
+
+    def list_task_artifacts(self, task_id: str) -> TaskArtifactsResponse:
+        """Los ficheros que produjo la tarea, con su URL de descarga."""
+        exists = self.db.query_one("SELECT 1 FROM tasks WHERE id = ?", (task_id,))
+        if exists is None:
+            raise KeyError(task_id)
+        rows = self.db.query_all(
+            "SELECT * FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, id ASC",
+            (task_id,),
+        )
+        return TaskArtifactsResponse(
+            task_id=task_id,
+            items=[self._row_to_artifact(task_id, row) for row in rows],
+        )
+
+    def artifact_path(self, task_id: str, artifact_id: str) -> tuple[Path, str, str]:
+        """Ruta en disco, nombre y tipo MIME de un artefacto concreto.
+
+        La fila manda sobre cualquier ruta que venga de fuera: el cliente pide
+        un identificador y el broker resuelve el fichero, así que no hay ningún
+        camino por el que un `..` en la petición alcance el disco.
+        """
+        row = self.db.query_one(
+            "SELECT * FROM artifacts WHERE id = ? AND task_id = ?", (artifact_id, task_id),
+        )
+        if row is None:
+            raise KeyError(artifact_id)
+        path = Path(row["path"])
+        return path, path.name, self._media_type(path)
+
+    @classmethod
+    def _media_type(cls, path: Path) -> str:
+        return cls._ARTIFACT_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+    @classmethod
+    def _row_to_artifact(cls, task_id: str, row: Any) -> TaskArtifactItem:
+        path = Path(row["path"])
+        return TaskArtifactItem(
+            artifact_id=row["id"],
+            artifact_type=row["artifact_type"],
+            filename=path.name,
+            media_type=cls._media_type(path),
+            size_bytes=int(row["size_bytes"] or 0),
+            sha256=row["sha256"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            download_url=f"/api/v1/tasks/{task_id}/artifacts/{row['id']}",
+            available=path.exists(),
         )
 
     def list_task_invocations(self, task_id: str) -> TaskInvocationsResponse:

@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -52,7 +53,12 @@ class ServerConfig(BaseModel):
                     "server.cors_allow_origins no admite '*': el API viaja con token de "
                     "administración y abrirlo a cualquier origen lo entrega a cualquier web"
                 )
-            if not origin.startswith(("http://", "https://")) or origin.rstrip("/") != origin:
+            parsed = urlparse(origin)
+            # Un origen es esquema + host + puerto y nada más. El navegador
+            # compara exactamente eso, así que una ruta aquí no restringe nada:
+            # solo hace que la entrada no case nunca y que el permiso parezca
+            # más estrecho de lo que es.
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query:
                 raise ValueError(
                     f"server.cors_allow_origins: '{origin}' no es un origen válido "
                     "(esquema + host + puerto, sin ruta ni barra final)"

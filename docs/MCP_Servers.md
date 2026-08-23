@@ -94,3 +94,17 @@ Ese texto es **dato externo no confiable**, igual que el de cualquier skill: el 
 ## Tests
 
 `tests/test_mcp.py` levanta un servidor MCP de verdad como subproceso (`tests/fixtures/mcp_echo_server.py`): no se simula el transporte, porque los fallos que importan están justo ahí — framing por líneas, ruido en stdout, procesos que no arrancan. Cubre descubrimiento, llamada, error de herramienta frente a error de protocolo, servidor roto, la frontera de datos y el recorrido completo desde una tarea.
+
+## Codificación del subproceso
+
+MCP habla UTF-8 por contrato, pero un servidor escrito en Python y lanzado en
+Windows no lo sabe: sin que nadie se lo diga, escribe su stdout con la
+codificación ANSI del sistema (cp1252 en un Windows en español). El broker
+decodifica como UTF-8, así que un acento vuelve convertido en `U+FFFD` y el
+resultado llega roto al modelo **sin que falle nada** — el peor tipo de avería,
+la que no se anuncia.
+
+Por eso el broker fuerza `PYTHONIOENCODING=utf-8` y `PYTHONUTF8=1` en el entorno
+de todo servidor que lanza. En un servidor que no sea de Python son dos
+variables que nadie lee. Se aplican **antes** que el `env` declarado en la
+configuración del servidor: quien ponga el suyo manda sobre esto.
