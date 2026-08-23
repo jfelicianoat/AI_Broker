@@ -109,6 +109,38 @@ def convert_image_docling(path: Path, *, ocr_languages: list[str]) -> str:
     return conversion.document.export_to_markdown()
 
 
+def transcode_to_png(data: bytes) -> bytes:
+    """Reescribe una imagen como PNG, sin tocar lo que se ve.
+
+    TIFF y BMP se admiten en la subida porque son formatos de imagen legítimos,
+    pero ningún endpoint de visión los acepta: la petición muere con un error
+    del proveedor a mitad de la tarea, después de haber esperado la cola. PNG
+    lo entienden todos y no pierde nada (sin compresión con pérdida), así que
+    la conversión es de envoltorio, no de contenido — que es justo lo que la
+    política de imágenes prohíbe hacer.
+
+    De un TIFF multipágina se queda el primer fotograma: es lo que ve quien
+    abre el fichero, y mandar solo esa página es más honesto que mandar un
+    formato que el modelo no puede abrir.
+    """
+    try:
+        from PIL import Image
+    except ImportError as error:
+        raise EngineMissing("pillow") from error
+    with Image.open(io.BytesIO(data)) as opened:
+        # Paleta, CMYK, 16 bits por canal... PNG admite RGB/RGBA/L; el resto se
+        # normaliza antes de guardar o Pillow falla al escribir.
+        if opened.mode in {"RGB", "RGBA", "L"}:
+            image = opened.copy()
+        else:
+            image = opened.convert(
+                "RGBA" if "A" in opened.mode or opened.mode == "P" else "RGB"
+            )
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def convert_with_markitdown(path: Path) -> str:
     """Office/EPUB/HTML/IPYNB/MSG a Markdown via MarkItDown."""
     try:

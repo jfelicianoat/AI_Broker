@@ -51,6 +51,7 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'health_local_dependencies_interval_seconds': ('Sondeo de dependencias locales (s)', 'Salud y sondeos'),
     'health_probe_timeout_seconds': ('Timeout de sondeo (s)', 'Salud y sondeos'),
     'health_sqlite_interval_seconds': ('Sondeo de SQLite (s)', 'Salud y sondeos'),
+    'idle_unload_seconds': ('Descargar modelos tras inactividad (s)', 'Configuración'),
     'ingestion_conversion_timeout_seconds': ('Timeout de conversión (s)', 'Ingesta de ficheros'),
     'ingestion_ffmpeg_path': ('Ruta de ffmpeg', 'Ingesta de ficheros'),
     'ingestion_images_api_key_env': ('Variable API key de visión', 'Ingesta de ficheros'),
@@ -195,6 +196,7 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("processing.max_task_attempts", "Reintentos por tarea"),
         ("processing.dispatcher_interval_seconds", "Intervalo del dispatcher"),
         ("processing.unload_after_task", "Descargar modelos al terminar"),
+        ("processing.idle_unload_seconds", "Descargar modelos tras inactividad"),
         ("processing.auto_dispatch", "Despacho automático"),
         ("persistence.events_retention_days", "Retención de eventos"),
         ("persistence.artifacts_retention_days", "Retención de artefactos"),
@@ -398,6 +400,9 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         )
         processing["dispatcher_interval_seconds"] = _float_range_field(
             form, "dispatcher_interval_seconds", minimum=0.01, maximum=60.0
+        )
+        processing["idle_unload_seconds"] = _float_range_field(
+            form, "idle_unload_seconds", minimum=0.0, maximum=86400.0
         )
         processing["unload_after_task"] = _checked(form, "unload_after_task")
         processing["auto_dispatch"] = _checked(form, "auto_dispatch")

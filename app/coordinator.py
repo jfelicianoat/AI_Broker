@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 from dataclasses import dataclass, field
@@ -19,8 +20,11 @@ from app.providers.base import (
     MIN_BYTES_PER_TOKEN,
     ROLE_SYSTEM_PROMPTS,
     estimate_tokens_upper_bound,
+    flatten_multimodal,
+    multimodal_content,
     neutralize_consensus_delimiters,
     role_system_prompt,
+    with_images_reattached,
     with_output_language,
 )
 from app.repository import _utc_now_iso
@@ -347,6 +351,28 @@ class ConsensusCoordinator:
         })
         return False
 
+    async def _vision_available(self, request: TaskCreateRequest) -> bool:
+        """¿Hay algún modelo que pueda mirar las imágenes de esta petición?
+
+        Best-effort: si el proveedor no sabe responder (bootstrap, dobles de
+        test) se asume que sí. Equivocarse por optimismo aquí no rompe nada —la
+        imagen viaja como imagen y, si de verdad no hay quien la vea, el
+        enrutado corta con `VISION_MODEL_UNAVAILABLE`, que es el mensaje
+        correcto. Equivocarse por pesimismo, en cambio, degradaría a OCR una
+        tarea que un modelo con visión podía atender bien.
+        """
+        checker = getattr(self.provider, "has_vision_model", None)
+        if checker is None:
+            return True
+        try:
+            return bool(await checker(request))
+        except Exception:  # noqa: BLE001 - la duda se resuelve a favor de la imagen
+            logger.warning(
+                "task.vision_probe_failed",
+                extra={"event": "task.vision_probe_failed"},
+            )
+            return True
+
     async def process_task(self, repository, task_id: str) -> None:
         # Primero de todo: echar de la máquina a los sondeos en sombra. Son
         # trabajo opcional y su modelo puede estar ocupando la VRAM que esta
@@ -364,8 +390,19 @@ class ConsensusCoordinator:
             return
         if self.ingestion is not None and request.content.attachments:
             try:
-                # En un hilo: la expansión lee de disco el Markdown de cada adjunto.
-                request = await asyncio.to_thread(self.ingestion.expand_request, request)
+                # Con imágenes delante hay que saber si alguien puede mirarlas
+                # ANTES de expandir: de eso depende que la imagen viaje como
+                # imagen o como el texto que se le reconozca.
+                vision_available = True
+                if self.ingestion.has_image_attachments(request):
+                    vision_available = await self._vision_available(request)
+                # En un hilo: la expansión lee de disco el Markdown de cada adjunto
+                # y, en el peor caso, corre un OCR.
+                request = await asyncio.to_thread(
+                    self.ingestion.expand_request,
+                    request,
+                    vision_available=vision_available,
+                )
             except Exception as error:
                 code = getattr(error, "code", "ATTACHMENT_EXPANSION_FAILED")
                 repository.update_task(
@@ -422,11 +459,13 @@ class ConsensusCoordinator:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return
-            if error.code == "VRAM_INSUFFICIENT":
+            if error.code in {"VRAM_INSUFFICIENT", "LOCAL_MODEL_SLOTS_BUSY"}:
                 # No cabe AHORA, pero cabría en la máquina vacía: no es un
                 # fallo. Cede el turno conservando su sitio en la cola y deja
                 # pasar a quien sí quepa. VRAM_MODEL_TOO_LARGE no entra aquí a
                 # propósito: ese no cabe nunca y esperar sería engañar.
+                # `LOCAL_MODEL_SLOTS_BUSY` es el mismo caso con otro motivo: el
+                # cupo de modelos cargados, no los bytes.
                 if self._defer_for_memory(repository, task_id, error):
                     return
             current = repository.get_task(task_id)
@@ -808,6 +847,7 @@ class ConsensusCoordinator:
                 artifact = self.artifacts.write_text(task_id, f"single/final.{suffix}", output.content or "")
                 artifact_type = "single_output"
             repository.record_artifact(task_id, None, invocation_id, artifact_type, artifact)
+            self._record_images_safely(repository, task_id, None, invocation_id, output, "single")
         except Exception as error:
             try:
                 repository.add_event(task_id, "artifact.failed", {"message": str(error)})
@@ -1053,6 +1093,9 @@ class ConsensusCoordinator:
         try:
             artifact = self.artifacts.write_text(task_id, "single/final.md", final_output.content or "")
             repository.record_artifact(task_id, None, invocation_id, "single_output", artifact)
+            self._record_images_safely(
+                repository, task_id, None, invocation_id, final_output, "single",
+            )
         except Exception as error:
             try:
                 repository.add_event(task_id, "artifact.failed", {"message": str(error)})
@@ -1639,13 +1682,19 @@ class ConsensusCoordinator:
         # congelada y la contabilidad acumulada de tramos anteriores.
         saved_state = repository.load_agent_state(task_id) if client_tool_names else None
         if saved_state and saved_state.get("resumed"):
-            messages = list(saved_state.get("messages") or [])
+            # El historial se guardó sin los bytes de las imágenes; vuelven aquí
+            # desde la petición, que se expande de nuevo en cada reanudación.
+            messages = with_images_reattached(
+                list(saved_state.get("messages") or []), request.inline_images,
+            )
             iteration_offset = int(saved_state.get("iteration") or 0)
             prior = saved_state.get("accumulated") or {}
         else:
             messages = [
                 {"role": "system", "content": with_output_language(self._AGENT_SYSTEM_PROMPT, request)},
-                {"role": "user", "content": self.provider_user_prompt(request)},
+                {"role": "user", "content": multimodal_content(
+                    self.provider_user_prompt(request), request.inline_images,
+                )},
             ]
             iteration_offset = 0
             prior = {}
@@ -1696,7 +1745,7 @@ class ConsensusCoordinator:
 
         if loop.stop_reason == "waiting_for_tools":
             agent_state = {
-                "messages": loop.messages,
+                "messages": flatten_multimodal(loop.messages),
                 "pending_tool_calls": loop.pending_tool_calls,
                 "iteration": loop.iteration,
                 "accumulated": {
@@ -1908,6 +1957,9 @@ class ConsensusCoordinator:
             lambda: self.artifacts.write_markdown(
                 task_id, "synthesis/final.md", synthesis.output.content or ""
             ),
+        )
+        self._record_images_safely(
+            repository, task_id, run_id, None, synthesis.output, "synthesis",
         )
 
         warnings = [self._skipped_proposer_warning(item) for item in skipped_proposers]
@@ -2277,7 +2329,10 @@ class ConsensusCoordinator:
                 {"role": "system", "content": with_output_language(
                     f"{system}\n\n{self._AGENT_SYSTEM_PROMPT}", invocation_request,
                 )},
-                {"role": "user", "content": self.provider_user_prompt(invocation_request)},
+                {"role": "user", "content": multimodal_content(
+                    self.provider_user_prompt(invocation_request),
+                    invocation_request.inline_images,
+                )},
             ]
             try:
                 loop = await self._run_agent_loop(
@@ -2513,6 +2568,31 @@ class ConsensusCoordinator:
             update={"max_cost_usd": maximum / wave_size}
         )
         return invocation_request.model_copy(update={"model_requirements": requirements})
+
+    def _record_images_safely(
+        self,
+        repository,
+        task_id: str,
+        run_id: str | None,
+        invocation_id: str | None,
+        output: ModelOutput,
+        folder: str,
+    ) -> None:
+        """Guarda como artefactos las imágenes que devolvió el modelo.
+
+        No van en el resultado JSON a propósito: ese documento se lee entero en
+        cada consulta del estado de la tarea, y un PNG en base64 dentro lo
+        convertiría en megabytes por lectura. Como artefacto se descarga cuando
+        alguien lo pide, que es como se sirve el resto de la salida.
+        """
+        for ordinal, image in enumerate(output.images, start=1):
+            self._record_artifact_safely(
+                repository, task_id, run_id, invocation_id, "image_output",
+                lambda o=ordinal, img=image, f=folder: self.artifacts.write_bytes(
+                    task_id, f"{f}/image_{o:02d}{img.extension}",
+                    base64.b64decode(img.data_base64),
+                ),
+            )
 
     def _record_artifact_safely(
         self,

@@ -13,7 +13,16 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8765
     workers: int = 1
+    # Permite que una web servida desde OTRO origen llame al API del broker.
+    # Apagado por defecto: sin CORS, el navegador ya impide que una página
+    # cualquiera hable con el broker de quien la visita.
     cors_enabled: bool = False
+    # Orígenes exactos autorizados (esquema + host + puerto). Sin comodín a
+    # propósito: `*` obligaría a servir el API sin credenciales para no
+    # entregarle el token a cualquier web, y eso deja de ser un permiso para
+    # ser un agujero. Por eso activar `cors_enabled` sin esta lista es un error
+    # de configuración y no un "permitir todo" silencioso.
+    cors_allow_origins: list[str] = Field(default_factory=list, max_length=32)
     # Token de administración: si existe (env o keyring), las mutaciones y las
     # lecturas con prompts/resultados (API y dashboard) exigen credencial admin.
     admin_token_env: str | None = Field(default="AI_BROKER_ADMIN_TOKEN", max_length=120)
@@ -23,6 +32,33 @@ class ServerConfig(BaseModel):
     # loopback sin token admin (p. ej. una demo en LAN aislada). Sin este flag,
     # el broker se niega a arrancar expuesto a la red sin credencial.
     allow_unauthenticated_lan: bool = False
+
+    @model_validator(mode="after")
+    def validate_cors_origins(self) -> ServerConfig:
+        """CORS activado sin orígenes no habilita nada; decirlo es mejor que
+        dejar una casilla marcada que no hace nada (que es lo que era hasta
+        agosto de 2026)."""
+        if not self.cors_enabled:
+            return self
+        origins = [item.strip() for item in self.cors_allow_origins if item.strip()]
+        if not origins:
+            raise ValueError(
+                "server.cors_enabled requiere server.cors_allow_origins con al menos "
+                "un origen exacto (p. ej. https://mi-app.local:3000)"
+            )
+        for origin in origins:
+            if origin == "*":
+                raise ValueError(
+                    "server.cors_allow_origins no admite '*': el API viaja con token de "
+                    "administración y abrirlo a cualquier origen lo entrega a cualquier web"
+                )
+            if not origin.startswith(("http://", "https://")) or origin.rstrip("/") != origin:
+                raise ValueError(
+                    f"server.cors_allow_origins: '{origin}' no es un origen válido "
+                    "(esquema + host + puerto, sin ruta ni barra final)"
+                )
+        self.cors_allow_origins = origins
+        return self
 
     @model_validator(mode="after")
     def validate_single_worker(self) -> ServerConfig:
@@ -52,6 +88,14 @@ class ProcessingConfig(BaseModel):
     task_timeout_seconds: int = 300
     max_task_attempts: int = Field(default=3, ge=1, le=100)
     unload_after_task: bool = True
+    # Segundos que un modelo local puede quedarse en memoria con el broker
+    # parado antes de que se le devuelva la máquina al usuario. Es el
+    # contrapeso de unload_after_task=false: sin descargar al terminar cada
+    # tarea, dos tareas seguidas con el mismo modelo dejan de pagar la
+    # recarga, pero el último modelo usado se queda residente para siempre
+    # (keep_alive: -1) aunque nadie vuelva a pedir nada en toda la noche.
+    # 0 = no descargar nunca por inactividad.
+    idle_unload_seconds: float = Field(default=0.0, ge=0.0, le=86400.0)
     auto_dispatch: bool = True
     dispatcher_interval_seconds: float = Field(default=0.1, gt=0, le=60)
     provider_mode: Literal["real", "bootstrap"] = "real"
@@ -82,10 +126,12 @@ class PromptCompressionConfig(BaseModel):
 
 
 class IngestionImagesConfig(BaseModel):
-    # Descripción de figuras/imágenes embebidas con un LLM de visión vía un
-    # endpoint OpenAI-compatible (LM Studio, Ollama /v1...). La descripción se
-    # inserta en el Markdown en la posición de la figura; los modelos solo-texto
-    # reciben así el contenido visual del documento.
+    # Descripción de figuras EMBEBIDAS en un documento con un LLM de visión. La
+    # descripción se inserta en el Markdown en la posición de la figura; los
+    # modelos solo-texto reciben así el contenido visual del documento.
+    #
+    # No afecta a las imágenes adjuntadas sueltas: esas viajan enteras hasta un
+    # modelo con visión y no se describen nunca.
     enabled: bool = False
     base_url: str = Field(default="http://127.0.0.1:11434/v1", min_length=1, max_length=512)
     model: str = Field(default="", max_length=128)
@@ -111,10 +157,13 @@ class IngestionConfig(BaseModel):
     """Ingesta de ficheros adjuntos: conversión a Markdown antes de inferencia.
 
     PDF (y escaneos, con OCR por página) via Docling; Office/EPUB/HTML via
-    MarkItDown; texto/código passthrough; imágenes por OCR + descripción de
-    visión; audio/vídeo por transcripción Whisper. Los motores se importan en
-    perezoso: si falta el paquete, el fichero falla con ENGINE_MISSING sin
-    afectar al arranque del broker.
+    MarkItDown; texto/código passthrough; audio/vídeo por transcripción
+    Whisper. Los motores se importan en perezoso: si falta el paquete, el
+    fichero falla con ENGINE_MISSING sin afectar al arranque del broker.
+
+    Las imágenes sueltas NO se convierten: se adjuntan tal cual y las mira un
+    modelo con visión (ver app.ingestion.detection.ATTACH_ENGINE). `images`, de
+    aquí abajo, gobierna otra cosa: las figuras embebidas en un documento.
     """
     enabled: bool = True
     storage_dir: str = "state/files"
@@ -266,8 +315,23 @@ class ResourceConfig(BaseModel):
     # aunque la cuenta salga menor: los tokenizadores reales no coinciden con
     # la estimación del broker, y quedarse corto trunca la respuesta.
     gpu_context_minimum_tokens: int = Field(default=4096, ge=512, le=1_000_000)
+    # Techo de modelos locales cargados a la vez, por encima del de memoria.
+    # La memoria sola no siempre basta: en una máquina de memoria unificada
+    # generosa caben cuatro modelos medianos que se pelean por el mismo bus y
+    # por los mismos núcleos, y ejecutarlos a la vez va peor que en serie. Este
+    # es el freno por conteo para esos casos.
+    #
+    # "auto" = el mismo número que la capacidad paralela de inferencia
+    # (effective_max_parallel_invocations): si el broker no va a lanzar más de N
+    # invocaciones a la vez, tener cargados más de N modelos solo ocupa memoria
+    # que la siguiente tarea va a necesitar. Una tarea que llega con el techo
+    # lleno no falla: espera como ante cualquier otra falta de memoria.
     max_loaded_local_models: int | str = "auto"
-    scheduling_policy: str = "adaptive"
+    # Política de planificación por defecto para un mixture `slow` cuyo cliente
+    # no la declare. No pisa a quien la pide: `execution.scheduling` explícito
+    # manda siempre. Es el ajuste que permite a un operador decir "en esta
+    # máquina, escalonad" sin tener que tocar todas las apps cliente.
+    scheduling_policy: Literal["adaptive", "parallel", "waves", "sequential"] = "adaptive"
     allow_execution_waves: bool = True
     # --- Espera por memoria (app.repository.defer_task_for_memory) ---
     # Una tarea que no cabe AHORA pero sí cabría en la máquina vacía no es un
@@ -703,6 +767,20 @@ def effective_max_parallel_invocations(config: BrokerConfig) -> int:
     )
     # Estimación conservadora de arranque hasta tener telemetría real por modelo.
     return max(1, min(3, int(usable_vram // 18)))
+
+
+def effective_max_loaded_local_models(config: BrokerConfig) -> int:
+    """Cuántos modelos locales pueden estar cargados a la vez.
+
+    `auto` se ata a la capacidad paralela de inferencia y no a un número
+    inventado: si el broker nunca va a lanzar más de N invocaciones a la vez,
+    el modelo N+1 cargado no acelera nada y ocupa la memoria que la siguiente
+    tarea va a necesitar. Nunca baja de 1, o el broker no podría cargar nada.
+    """
+    configured = config.resources.max_loaded_local_models
+    if isinstance(configured, int):
+        return max(1, configured)
+    return max(1, effective_max_parallel_invocations(config))
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

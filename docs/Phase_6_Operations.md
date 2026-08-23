@@ -75,6 +75,60 @@ persistence:
 
 Los ficheros ingeridos se podan con fila y directorio (`state/files/{id}/`). Una tarea encolada que referencie un fichero podado fallará en el despacho: retención corta con colas largas es mala combinación.
 
+## Descarga de modelos locales por inactividad (agosto 2026)
+
+Un bucle propio (`app.maintenance.idle_unload_loop`, arrancado en el lifespan
+junto a los dos dispatchers y con el mismo evento de parada) devuelve la
+memoria de los modelos locales cuando el broker lleva un rato sin nada que
+hacer.
+
+```yaml
+processing:
+  unload_after_task: false     # no descargar al terminar cada tarea
+  idle_unload_seconds: 900.0   # 0 = no descargar nunca por inactividad
+```
+
+**Por qué existe.** Los dos extremos son malos. Descargar al terminar cada
+tarea hace que dos tareas seguidas con el mismo modelo paguen la carga dos
+veces y —peor— deja el ranking ciego al modelo caliente: cuando la siguiente
+tarea enruta ya no hay nada cargado que preferir, y el término de carga en frío
+de la fórmula de tiempo esperado ([`Phase_9_Speed_And_Lanes.md`](Phase_9_Speed_And_Lanes.md)
+§2) deja de distinguir. No descargar nunca tiene el defecto simétrico: el
+último modelo usado se queda residente con `keep_alive: -1` toda la noche
+aunque nadie vuelva a pedir nada. El plazo se pone entre los dos.
+
+**Qué cuenta como estar parado.** `repository.has_unfinished_task()`, que es
+más ancho que los leases del proveedor a propósito: dentro de un mixture hay
+instantes sin ningún lease vivo —entre dos olas, mientras arbitra— y descargar
+ahí recargaría el mismo modelo dos frases después; y una tarea en cola todavía
+sin turno es trabajo que llega. El precio de esa anchura es que una tarea parada
+mucho tiempo esperando dependencias o herramientas mantiene el modelo
+residente. Es el error preferido: cuesta memoria, mientras que el contrario
+cuesta esperas.
+
+**Detalles que importan al operar:**
+
+- La descarga corre **bajo el mismo lock que la admisión** de Ollama. Entre que
+  se comprueba que un modelo ya está cargado y queda anotado su lease no puede
+  colarse una descarga, o la tarea pagaría una carga en frío que el router ya
+  había descontado del tiempo estimado.
+- Un solo lease vivo aborta la ronda entera: si algo se está ejecutando, la
+  máquina no está inactiva.
+- Un modelo que se niega a descargar no impide intentar los demás; se registra
+  `ollama.idle_unload_failed` y se sigue.
+- Con `unload_after_task: true` el plazo no hace nada (no queda nunca nada que
+  reclamar) y se anula sin gastar sondeos.
+- Los dos ajustes se releen en cada vuelta: se cambian desde el panel con el
+  broker en marcha, sin reiniciar. Por eso el bucle se arranca siempre que haya
+  un Ollama al que preguntar, no solo cuando el plazo está puesto.
+- El sondeo se deduce del plazo (`idle_poll_seconds`: un cuarto del plazo,
+  entre 1 y 30 s), así que no hay un intervalo más que configurar.
+- Ni el runtime caído ni la BD ocupada matan el bucle: el fallo se registra
+  (`maintenance.idle_unload_failed`) y se reintenta a la vuelta siguiente.
+- Al descargar queda `maintenance.idle_models_unloaded` con los modelos
+  liberados, que es la traza que explica por qué la siguiente tarea tardó más
+  de lo habitual en arrancar.
+
 ## Pendiente de fase 6
 
 - Retencion avanzada de backups.

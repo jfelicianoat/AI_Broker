@@ -447,7 +447,7 @@ def create_dashboard_router(
                 "created_at": record.created_at,
                 "markdown_url": (
                     f"/dashboard/files/{record.id}/markdown"
-                    if record.status == "ready"
+                    if record.status == "ready" and record.markdown_path
                     else None
                 ),
             })
@@ -520,6 +520,7 @@ def create_dashboard_router(
                 upload.filename or "fichero",
                 temp_path,
                 _describe_images_choice(form_fields.get("describe_images")),
+                form_fields.get("ocr") in {"1", "true", "on", "yes"},
             )
         except ValueError as error:  # IngestionError / UnsupportedFormat
             return _template_response(

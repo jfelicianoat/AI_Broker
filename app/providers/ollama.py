@@ -13,20 +13,27 @@ from typing import Any
 import httpx
 
 from app import execution_fingerprint as fingerprint
-from app.config import BrokerConfig, local_memory_budget_bytes
+from app.config import (
+    BrokerConfig,
+    effective_max_loaded_local_models,
+    local_memory_budget_bytes,
+)
 from app.providers.base import (
+    _IMAGE_ONLY_ANSWER,
     AgentTurn,
     ModelOutput,
     ProviderError,
     ToolCall,
     _CatalogCache,
     _estimation_text,
+    content_text,
     effective_generation,
     enforce_context_limit,
     estimate_required_context,
     provider_error_from_http,
     provider_http_error_message,
     request_with_context_capped_output,
+    returned_images,
 )
 from app.schemas import OutputFormat, TaskCreateRequest
 
@@ -289,6 +296,13 @@ class OllamaLifecycleManager:
         occupied = sum(self._footprint(item) for item in running)
         return occupied + sum(size for name, size in self._reserved_sizes.items() if name not in names)
 
+    def _loaded_models(self, names: set[str]) -> set[str]:
+        """Modelos que ocupan un sitio ahora mismo: los que el runtime dice
+        tener cargados más los que otra invocación ya reservó y todavía no
+        aparecen en `/api/ps`. Sin los reservados, dos tareas que arrancan a la
+        vez pasarían las dos el mismo hueco."""
+        return {name for name in names | set(self._reserved_sizes) if name}
+
     async def _ensure_capacity(self, model: str, estimated_size: int) -> None:
         running = await self.running()
         budget = local_memory_budget_bytes(self.config)
@@ -305,7 +319,12 @@ class OllamaLifecycleManager:
         occupied = self._occupied(running, running_names)
         if any(item.get("name") == model for item in running):
             return
-        if occupied + estimated_size <= budget:
+        # Techo por conteo, además del de memoria. La memoria sola no basta en
+        # una máquina holgada: cuatro modelos medianos caben y se pelean por el
+        # mismo bus, y ejecutarlos a la vez va peor que en serie.
+        slots = effective_max_loaded_local_models(self.config)
+        loaded = self._loaded_models(running_names)
+        if occupied + estimated_size <= budget and len(loaded) < slots:
             return
         for item in running:
             name = str(item.get("name") or item.get("model") or "")
@@ -314,6 +333,30 @@ class OllamaLifecycleManager:
         refreshed = await self.running()
         refreshed_names = {str(item.get("name") or item.get("model") or "") for item in refreshed}
         occupied = self._occupied(refreshed, refreshed_names)
+        loaded = self._loaded_models(refreshed_names)
+        if occupied + estimated_size <= budget and len(loaded) >= slots:
+            # Cabe en memoria, pero no queda sitio en el cupo de modelos y los
+            # que lo ocupan tienen lease: son tareas corriendo, no basura. Es
+            # exactamente el mismo caso que la falta de memoria —cede el turno
+            # y vuelve—, con otro motivo, y por eso lleva código propio en vez
+            # de disfrazarse de VRAM_INSUFFICIENT en los logs.
+            error = ProviderError(
+                "LOCAL_MODEL_SLOTS_BUSY",
+                f"No hay sitio para cargar {model}: ya hay {len(loaded)} modelos locales "
+                f"cargados y el límite es {slots} (resources.max_loaded_local_models)",
+                retryable=True,
+            )
+            error.memory_block = {  # type: ignore[attr-defined]
+                "reason": "model_slots",
+                "model": model,
+                "needed_bytes": estimated_size,
+                "occupied_bytes": occupied,
+                "budget_bytes": budget,
+                "loaded_models": len(loaded),
+                "model_slots": slots,
+                "holders": sorted(loaded),
+            }
+            raise error
         if occupied + estimated_size > budget:
             # Retryable y con el detalle de quién ocupa: el coordinador lo
             # traduce en un aplazamiento con turno cedido, y el panel puede
@@ -381,6 +424,48 @@ class OllamaLifecycleManager:
             raise ProviderError("MODEL_UNLOAD_FAILED", f"Ollama no descargó {model}")
         except httpx.HTTPError as error:
             raise ProviderError("MODEL_UNLOAD_FAILED", str(error), retryable=True) from error
+
+    async def unload_idle(self) -> list[str]:
+        """Devuelve la memoria de los modelos que no está usando nadie.
+
+        La llama el bucle de inactividad (app.maintenance.idle_unload_loop).
+        Se ejecuta bajo el MISMO lock que la admisión, y eso es el fondo del
+        asunto: entre que `_ensure_capacity` comprueba que un modelo ya está
+        cargado y el lease queda anotado no puede colarse una descarga, o la
+        tarea pagaría una carga en frío que el router ya había descontado del
+        tiempo estimado —y la estimación pasaría a mentir justo en el caso que
+        más se repite.
+
+        Un solo lease vivo aborta la ronda entera, no solo la de ese modelo: si
+        hay algo ejecutándose, la máquina no está inactiva y aquí no hay nada
+        que reclamar.
+
+        Un modelo que se niega a descargar no impide intentar los demás: cada
+        uno ocupa su memoria por separado y liberar tres de cuatro sigue siendo
+        liberar. Se devuelven los que sí salieron.
+        """
+        async with self._lock:
+            if self._leases:
+                return []
+            unloaded: list[str] = []
+            for item in await self.running():
+                name = str(item.get("name") or item.get("model") or "")
+                if not name:
+                    continue
+                try:
+                    await self.unload(name)
+                except ProviderError as error:
+                    logger.warning(
+                        "ollama.idle_unload_failed",
+                        extra={
+                            "event": "ollama.idle_unload_failed",
+                            "model": name,
+                            "detail": str(error),
+                        },
+                    )
+                    continue
+                unloaded.append(name)
+            return unloaded
 
     async def resource_snapshot(self) -> dict[str, Any]:
         running = await self.running()
@@ -735,7 +820,14 @@ class OllamaProvider:
         think_disabled = _thinking_disabled(
             entry.get("capabilities"), inference_request.generation.max_output_tokens
         )
-        messages = [{"role": "user", "content": prompt}]
+        user_message: dict[str, Any] = {"role": "user", "content": prompt}
+        if request.inline_images:
+            # Ollama no usa el formato multimodal de OpenAI: las imágenes van en
+            # un campo `images` del propio mensaje, como base64 suelto. Mandar
+            # el formato equivocado no da error, da una respuesta inventada a
+            # partir del texto — ver app.ingestion.engines.describe_image.
+            user_message["images"] = [image.data_base64 for image in request.inline_images]
+        messages = [user_message]
         if system:
             messages.insert(0, {"role": "system", "content": system})
         plan = self._offload_plan(entry)
@@ -774,14 +866,21 @@ class OllamaProvider:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
-        content = (payload.get("message") or {}).get("content")
+        message = payload.get("message") or {}
+        content = message.get("content")
+        images = returned_images(message)
         if not isinstance(content, str) or not content.strip():
-            raise _empty_content_error(payload, think_disabled)
+            # Un modelo que genera imágenes puede contestar solo con la imagen.
+            # Eso no es una respuesta vacía: es la respuesta.
+            if not images:
+                raise _empty_content_error(payload, think_disabled)
+            content = _IMAGE_ONLY_ANSWER
         return ModelOutput(
             content=content, tokens_input=int(payload.get("prompt_eval_count") or 0),
             tokens_output=int(payload.get("eval_count") or 0), cost_usd=0.0,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             generation=effective_generation(inference_request),
+            images=images,
         )
 
     async def chat_tools(
@@ -857,6 +956,20 @@ class OllamaProvider:
         for item in messages:
             if item.get("role") == "tool":
                 converted.append({"role": "tool", "content": item.get("content") or ""})
+            elif isinstance(item.get("content"), list):
+                # Contenido multimodal en el dialecto OpenAI (texto + image_url).
+                # Ollama no lo entiende: quiere el texto plano y las imágenes en
+                # un campo aparte, en base64 suelto.
+                images = [
+                    part["image_url"]["url"].split(",", 1)[-1]
+                    for part in item["content"]
+                    if isinstance(part, dict) and part.get("type") == "image_url"
+                    and isinstance(part.get("image_url"), dict)
+                ]
+                message = {**item, "content": content_text(item["content"])}
+                if images:
+                    message["images"] = images
+                converted.append(message)
             else:
                 converted.append(item)
         return converted

@@ -12,7 +12,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Un nivel más abajo:** es un servicio que corre en tu propio ordenador (no depende de ninguna nube para funcionar), expone una API y un panel web local, y gestiona una cola de tareas de inferencia. Cada tarea declara qué necesita (privacidad, coste máximo, formato de salida) y el broker decide qué modelo o modelos la ejecutan, entre los que tengas en Ollama, LM Studio o proveedores de API como DeepSeek o NVIDIA.
 
-**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.6) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
+**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.9) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
 
 ## 2. Qué sabe hacer
 
@@ -24,7 +24,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 | Estrategia `mixture_of_agents` | Varios modelos proponen, un árbitro sintetiza la mejor respuesta |
 | Estrategia `agent` | El modelo usa herramientas (buscar en web, leer URLs, calcular, ejecutar código) en bucle hasta resolver |
 | Estrategia `auto` | El meta-router clasifica la petición y elige la estrategia por ti |
-| Ficheros adjuntos | PDF (incluso escaneados, con OCR), Office, imágenes, audio y vídeo → Markdown |
+| Ficheros adjuntos | PDF (incluso escaneados, con OCR), Office, audio y vídeo → Markdown; las imágenes van enteras a un modelo con visión |
 | Sandbox de código | El agente ejecuta Python real en contenedores Docker desechables y aislados |
 | Selección adaptativa | Los modelos se eligen por evidencia real: fiabilidad, latencia y coste históricos |
 
@@ -37,9 +37,9 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 ## 3. Ficheros adjuntos: de documento a conocimiento
 
-**Para empezar:** puedes darle al broker un PDF de 200 páginas, la foto de un documento, un Excel o la grabación de una reunión. Él lo convierte a texto ordenado, y ese texto acompaña a tu pregunta cuando llega al modelo. Si el PDF es un escaneo, lo "lee" con OCR; si es un vídeo, extrae el audio y lo transcribe; si el documento tiene gráficos, un modelo de visión los describe y la descripción queda insertada en su sitio.
+**Para empezar:** puedes darle al broker un PDF de 200 páginas, una foto, un Excel o la grabación de una reunión. Los documentos los convierte a texto ordenado, y ese texto acompaña a tu pregunta cuando llega al modelo: si el PDF es un escaneo, lo "lee" con OCR; si es un vídeo, extrae el audio y lo transcribe; si el documento tiene gráficos, un modelo de visión los describe y la descripción queda insertada en su sitio. **Las fotos no se convierten:** viajan enteras hasta un modelo que sepa mirarlas, porque cambiar una imagen por un párrafo que la describe pierde en silencio todo lo que el párrafo no mencione.
 
-**El flujo:** subes el fichero (`POST /api/v1/files` o la página **Ficheros** del panel) → el broker lo convierte en segundo plano (`received → converting → ready/failed`) → creas la tarea referenciando el `file_id` → al despachar, el Markdown del documento se inyecta en el prompt. Subir dos veces el mismo fichero no repite el trabajo (dedupe por SHA-256), y cada fichero listo muestra sus **tokens estimados** para que elijas modelo con conocimiento de causa.
+**El flujo:** subes el fichero (`POST /api/v1/files` o la página **Ficheros** del panel) → el broker lo convierte en segundo plano (`received → converting → ready/failed`) → creas la tarea referenciando el `file_id` → al despachar, el Markdown del documento se inyecta en el prompt. Una imagen se salta el paso del medio: nace `ready` y lo que se inyecta es un manifiesto, mientras los bytes viajan aparte. Subir dos veces el mismo fichero no repite el trabajo (dedupe por SHA-256), y cada fichero listo muestra sus **tokens estimados** para que elijas modelo con conocimiento de causa.
 
 | Tipo | Formatos | Motor |
 |---|---|---|
@@ -47,11 +47,15 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 | Office / eBook / web | `.docx .xlsx .pptx .epub .msg .html .htm .ipynb` | MarkItDown |
 | Texto y marcado | `.txt .md .rst .adoc .org .tex .log` | passthrough |
 | Código y datos | `.py .js .ts .sql .json .yaml .csv .tsv` y más | passthrough en fence |
-| Imagen | `.png .jpg .jpeg .webp .tiff .bmp` | OCR + descripción por LLM de visión |
+| Imagen | `.png .jpg .jpeg .webp .tiff .tif .bmp` | ninguno: se adjunta entera a un modelo con visión (OCR solo si lo pides) |
 | Audio | `.mp3 .wav .m4a .flac .ogg .opus .aac` | faster-whisper local |
 | Vídeo | `.mp4 .mkv .mov .avi .webm .m4v .wmv` | ffmpeg (extrae audio) + faster-whisper |
 
 **Detalle técnico:** la validación de subida comprueba extensión **y** magic bytes (un `.pdf` que no empieza por `%PDF` se rechaza con `INGEST_CONTENT_MISMATCH`), sanea nombres contra path traversal y aplica límites de tamaño/páginas/timeout. La detección escaneo-vs-nativo es por página, no por documento. Las figuras extraídas de un PDF se envían una a una a un endpoint OpenAI-compatible de visión con el texto adyacente como contexto, y la descripción sustituye al marcador en la posición original (`> **[Figura N — descripción generada por IA]:** …`). En el despacho, el Markdown se inyecta dentro de `<attached_document>` con neutralización de delimitadores (el documento no puede cerrar su propio tag) y una advertencia explícita al modelo de que es contenido no confiable con posibles errores de OCR; el `request_json` persistido conserva el prompt original del cliente. Con adjuntos, la compresión de prompts pasa a `off` salvo override explícito: comprimir tablas o código de un documento los corrompería. Los motores (Docling, MarkItDown, faster-whisper) se importan en perezoso: si falta uno, solo ese fichero falla con `ENGINE_MISSING` y el broker sigue operando. Corpus dorado de regresión en `tests/fixtures/ingestion/`.
+
+**Imágenes adjuntas (agosto 2026):** una imagen suelta no pasa por ningún motor. Queda `ready` al subirla (sin conversión, sin `markdown_url`, sin ocupar el carril de ingesta); en el despacho el prompt recibe un manifiesto `<attached_image id name orden>` y los bytes viajan aparte hasta el adapter, cada uno en su dialecto (Ollama: `images: [b64]`; OpenAI-compatibles: `image_url` con data URI). TIFF y BMP se reescriben a PNG al subirlos —ningún endpoint de visión los acepta, y sin ese cambio de envoltorio la tarea moriría con un error del proveedor después de esperar en la cola—. Con imágenes en la tarea, el enrutado **exige** visión y descarta a los demás candidatos: un modelo solo-texto ante una imagen no falla, contesta a partir del nombre del fichero. Sin ningún modelo capaz, la tarea falla con `VISION_MODEL_UNAVAILABLE` en vez de con una respuesta inventada.
+
+**OCR y generación de imágenes:** extraer el texto que hay *dentro* de una imagen es lo único que el broker le hace a una imagen, y solo si se pide (`ocr=true` al subirla, o al vuelo cuando la petición va de leer la imagen y no hay ningún modelo con visión disponible: ahí la imagen entra como texto en lugar de tumbar la tarea). El OCR nunca sustituye a la imagen cuando hay quien pueda verla: viajan las dos cosas. En el otro sentido, si la petición pide *generar* o *modificar* una imagen (clasificador determinista y deliberadamente estrecho), solo compiten los modelos que producen imágenes, y sin ninguno la tarea falla con `IMAGE_GENERATION_UNSUPPORTED` diciéndolo, en vez de entregar la descripción del cartel en lugar del cartel. Las imágenes que devuelva un modelo se guardan como artefactos `image_output` de la tarea, no en el resultado JSON.
 
 ## 4. Sandbox: código de la IA sin riesgo para tu máquina
 
@@ -96,7 +100,7 @@ La salida rechazada se guarda en la invocación con su coste real, que es la ún
 
 **Para empezar:** los modelos locales compiten por la memoria de tu tarjeta gráfica. El broker actúa de árbitro: calcula qué cabe, reserva sitio antes de lanzar nada, y si no caben todos a la vez, los ejecuta por tandas.
 
-**Detalle técnico:** un solo workflow activo global (`max_active_workflows: 1`, validado en config); dentro de un mixture `slow`, el `ResourceScheduler` decide `parallel`/`waves`/`sequential` según la VRAM reservable (`local_vram_budget_gb` − margen de seguridad), con leases de VRAM por modelo (en máquinas de memoria unificada, `unified_memory_budget_gb` declara el pool completo y pasa a ser el techo de admisión, de modo que un modelo mayor que la VRAM se reparte con la RAM compartida en vez de rechazarse) y `max_parallel_invocations` (`auto` = fórmula conservadora compartida entre planificador y semáforo de ejecución del router, para que el plan nunca prometa paralelismo que el router no concede). Los proveedores cloud no consumen VRAM pero sí presupuesto (`max_cost_usd` preventivo y acumulado) y cuotas. `unload_after_task` descarga modelos al terminar.
+**Detalle técnico:** un solo workflow activo global (`max_active_workflows: 1`, validado en config); dentro de un mixture `slow`, el `ResourceScheduler` decide `parallel`/`waves`/`sequential` según la VRAM reservable (`local_vram_budget_gb` − margen de seguridad), con leases de VRAM por modelo (en máquinas de memoria unificada, `unified_memory_budget_gb` declara el pool completo y pasa a ser el techo de admisión, de modo que un modelo mayor que la VRAM se reparte con la RAM compartida en vez de rechazarse) y `max_parallel_invocations` (`auto` = fórmula conservadora compartida entre planificador y semáforo de ejecución del router, para que el plan nunca prometa paralelismo que el router no concede). Los proveedores cloud no consumen VRAM pero sí presupuesto (`max_cost_usd` preventivo y acumulado) y cuotas. `unload_after_task` descarga modelos al terminar cada tarea; con él desactivado, dos tareas seguidas que usan el mismo modelo dejan de pagar la recarga (y el ranking vuelve a ver el modelo caliente, que es lo que le permite preferirlo), y `idle_unload_seconds` pone el plazo tras el cual un broker parado —sin tareas corriendo ni en cola— devuelve esa memoria.
 
 ## 7. Compresión de prompts
 
@@ -153,9 +157,12 @@ python -m venv .venv
 
 | Capacidad | Requisito |
 |---|---|
-| Ingesta de documentos/imágenes/audio | `pip install "ai-broker[ingestion]"` (Docling, MarkItDown, faster-whisper) |
+| Ingesta de documentos/audio | `pip install "ai-broker[ingestion]"` (Docling, MarkItDown, faster-whisper) |
 | Transcripción de vídeo | Además, `ffmpeg` (PATH o `ingestion.transcription.ffmpeg_path`) |
-| Descripción de figuras | Un endpoint OpenAI-compatible con modelo de visión (p. ej. LM Studio) |
+| Descripción de figuras de un documento | Un endpoint OpenAI-compatible con modelo de visión (p. ej. LM Studio) |
+| Adjuntar imágenes a una tarea | Un modelo con visión disponible para esa tarea; sin él, `VISION_MODEL_UNAVAILABLE` |
+| Subir TIFF o BMP | Pillow (llega con los extras de ingesta): se reescriben a PNG al subirlos |
+| OCR de imágenes (`ocr=true`) | Docling con `ingestion.ocr_enabled` |
 | Sandbox `run_code` | Docker Desktop en marcha + `docker build -t ai-broker-sandbox:latest sandbox/` |
 | DeepSeek / NVIDIA cloud | Clave en keyring: `python -c "import getpass,keyring; keyring.set_password('ai-broker','deepseek_api_key',getpass.getpass())"` |
 
@@ -213,14 +220,16 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | `/api/v1/tasks/{id}` | GET | Estado, progreso y resultado |
 | `/api/v1/tasks/{id}` | DELETE | Cancelación idempotente |
 | `/api/v1/tasks/{id}/tool_results` | POST | Resolver tools del cliente y reanudar (`waiting_for_tools`) |
-| `/api/v1/files` | POST | Subir fichero adjunto (multipart, `202`, dedupe SHA-256) |
+| `/api/v1/tasks/{id}/invocations` | GET | Telemetría por invocación: modelo, parámetros efectivos, coste y huella |
+| `/api/v1/groups/{group}` | GET | Estado agregado de una tanda de tareas (`group`) |
+| `/api/v1/files` | POST | Subir fichero adjunto (multipart, `202`, dedupe SHA-256; campos `describe_images` y `ocr`) |
 | `/api/v1/files/{id}` | GET | Estado de conversión, metadatos, tokens estimados |
-| `/api/v1/files/{id}/markdown` | GET | Markdown resultante (cuando `ready`) |
+| `/api/v1/files/{id}/markdown` | GET | Markdown resultante (cuando `ready`; una imagen sin OCR no tiene) |
 | `/api/v1/queue` | GET / PATCH | Snapshot de cola (con `kind` por carril) / reordenar pendientes |
 | `/api/v1/models` | GET | Catálogo con compatibilidad y capacidades sondeadas |
 | `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
 | `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo |
-| `/api/v1/capabilities` | GET | Contrato 2.6: estrategias, presets, `derived_data_boundary`, `work_lanes`, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, flags del router |
+| `/api/v1/capabilities` | GET | Contrato 2.9: estrategias, presets, `derived_data_boundary`, `work_lanes`, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, `mcp_servers`, `task_dependencies`, `generation_determinism`, `invocation_telemetry`, `execution_fingerprint`, flags del router |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/api/v1/dashboard/*` | GET | Read models: summary (con `lanes`), tasks (filtrable por `kind`), resources |
 | `/api/v1/dispatcher/tick` | POST | Tick manual del carril de inferencia (el dispatcher es autónomo) |
@@ -234,21 +243,24 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 ```
 ├── app/
 │   ├── main.py                # FastAPI app (factory) + endpoints API
-│   ├── schemas.py             # Contrato Pydantic completo (v2.6)
+│   ├── schemas.py             # Contrato Pydantic completo (v2.9)
 │   ├── coordinator.py         # Orquestación: single, mixture, agent, auto
 │   ├── strategy_router.py     # Meta-router: clasificador + aprendizaje
 │   ├── skills.py              # Skills del agente (web, URL, cálculo, código)
+│   ├── mcp.py                 # Servidores MCP (stdio) como herramientas
 │   ├── sandbox.py             # Ejecutor Docker aislado (skill run_code)
 │   ├── ingestion/             # Ficheros adjuntos: detección, motores, servicio
 │   ├── providers/             # Ollama, DeepSeek, OpenAI-compatible, routing
 │   ├── resource_scheduler.py  # Planificación de VRAM y oleadas
+│   ├── model_capabilities.py  # ¿Ve imágenes? ¿Las produce? Evidencia del enrutado
+│   ├── model_quarantine.py    # Aparta modelos que dejaron de dar salida usable
 │   ├── model_enrichment.py    # Catálogo externo models.dev
 │   ├── prompt_compressor.py   # Compresión de prompts
 │   ├── repository.py          # Acceso a datos (tareas, cola, invocaciones)
 │   ├── db.py                  # SQLite WAL + esquema + event sourcing
 │   ├── dashboard*.py          # Read models, rutas, formularios y filtros del panel
 │   ├── artifacts.py           # Artefactos atómicos con SHA-256
-│   ├── maintenance.py         # Backup/restore y podas de retención
+│   ├── maintenance.py         # Backup/restore, podas y descarga por inactividad
 │   └── templates/ static/     # Panel: Jinja2 + CSS/JS locales
 ├── sandbox/Dockerfile         # Imagen del sandbox (pandas, numpy, matplotlib)
 ├── scripts/                   # Runner, servicio Windows, backup, readiness
@@ -266,7 +278,8 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | [`Deployment_Guide.md`](Deployment_Guide.md) | Despliegue completo en Windows |
 | [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md) | Ingesta de ficheros adjuntos |
 | [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md) | Sandbox de ejecución de código |
-| [`docs/Client_API.md`](docs/Client_API.md) | **Especificación para aplicaciones cliente** (contrato 2.6, autocontenida) |
+| [`docs/Client_API.md`](docs/Client_API.md) | **Especificación para aplicaciones cliente** (contrato 2.9, autocontenida) |
+| [`docs/Configuration_Reference.md`](docs/Configuration_Reference.md) | **Referencia completa de `broker_config.yaml`**, sección por sección |
 | [`docs/Phase_9_Speed_And_Lanes.md`](docs/Phase_9_Speed_And_Lanes.md) | Tiempo esperado, sondeo en sombra y carriles de trabajo |
 | [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) | Panel operativo (normativo para las pantallas) |
 | [`docs/System_Prompts.md`](docs/System_Prompts.md) | **Prompts que escribe el Broker** (roles del consenso, árbitro, agente, juez, map-reduce) |

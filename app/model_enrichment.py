@@ -71,6 +71,7 @@ def _optional_number(value: Any) -> float | None:
 def _model_info(provider_id: str, model_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     modalities = payload.get("modalities") or {}
     inputs = [str(item).lower() for item in modalities.get("input") or []]
+    outputs = [str(item).lower() for item in modalities.get("output") or []]
     limit = payload.get("limit") or {}
     cost = payload.get("cost") or {}
     try:
@@ -81,6 +82,10 @@ def _model_info(provider_id: str, model_id: str, payload: dict[str, Any]) -> dic
         "catalog_provider": provider_id,
         "catalog_id": model_id,
         "vision": "image" in inputs,
+        # La otra mitad de la pregunta: no si el modelo VE imágenes, sino si
+        # las PRODUCE. De aquí sale la única evidencia que tiene el broker de
+        # que puede atender un "genérame una ilustración".
+        "image_output": "image" in outputs,
         "tools": bool(payload.get("tool_call")),
         "json_mode": bool(payload.get("structured_output")),
         "context_window": context_window,
@@ -214,6 +219,7 @@ class ModelEnrichment:
             "catalog_provider": info["catalog_provider"],
             "catalog_id": info["catalog_id"],
             "vision": info["vision"],
+            "image_output": info["image_output"],
             "tools": info["tools"],
             "json_mode": info["json_mode"],
             "knowledge_cutoff": info["knowledge_cutoff"],

@@ -59,7 +59,8 @@ Lo que un producto vecino no podría copiar honestamente:
 
 - Cuatro estrategias: `single`, `mixture_of_agents` (presets `fast`/`slow`), `agent` (tool-calling con guardarraíles) y `auto` (meta-router con clasificador determinista, escalado por confianza y aprendizaje adaptativo persistido en `routing_cases`).
 - Consenso de hasta dos rondas (`max_rounds`): la segunda solo se paga si el juez de confianza no da por buena la síntesis de la primera, y no puede dejar la tarea peor que si no se hubiera intentado.
-- Ingesta de adjuntos a Markdown: PDF (con OCR por página), Office, eBook, imágenes, audio y vídeo. Dedupe por SHA-256, tokens estimados por fichero.
+- Ingesta de adjuntos a Markdown: PDF (con OCR por página), Office, eBook, audio y vídeo. Dedupe por SHA-256, tokens estimados por fichero.
+- Imágenes adjuntas sin convertir: viajan enteras al modelo, que el enrutado exige con visión (`VISION_MODEL_UNAVAILABLE` si no hay ninguno). OCR opcional del texto que contienen, como añadido y nunca como sustituto. Las imágenes que devuelve un modelo se guardan como artefactos de la tarea.
 - Sandbox Docker desechable para código generado por modelos.
 - Cliente MCP sobre stdio (off por defecto): herramientas de terceros para el bucle agéntico, con espacio de nombres propio y frontera de datos declarada por servidor y obligatoria.
 - Guardarraíles del bucle agéntico que no tiran trabajo pagado: turno de cierre sin herramientas al agotar iteraciones, recorte de resultados de herramienta antiguos cuando la conversación deja de caber en la ventana, y rescate de lo último dicho al agotar presupuesto o contexto.
@@ -76,7 +77,7 @@ Lo que un producto vecino no podría copiar honestamente:
 - **Auto-refresco por bloque** con backoff exponencial, pausa con pestaña oculta y banner de conexión persistente en lugar de tormenta de toasts.
 - **Sin métricas de streaming:** no se muestran tokens, tokens/s ni porcentaje de generación **en directo**. Los proveedores actuales usan `stream=false` y devuelven esas cifras al terminar. Durante una llamada individual la barra es indeterminada, y así debe seguir. (El ritmo en tokens/s del panel de Enrutamiento es otra cosa: es la media histórica de invocaciones ya cerradas, no un contador en vivo.)
 - **Un solo workflow activo de inferencia** (`max_active_workflows: 1`), invariante validado en la configuración. Desde los carriles de trabajo hay un segundo carril, el de **conversiones** (`ingestion.max_concurrent`), que corre en paralelo sin consumir ese slot: subir un PDF no puede congelar la cola de respuestas. La UI muestra la ocupación de ambos; nunca "trabajadores".
-- **Contrato Pydantic estricto** (v2.6, `extra="forbid"`). El panel es un cliente del broker: consulta estado, encola inferencias ya preparadas, reordena y cancela. No llama a proveedores directamente.
+- **Contrato Pydantic estricto** (v2.9, `extra="forbid"`). El panel es un cliente del broker: consulta estado, encola inferencias ya preparadas, reordena y cancela. No llama a proveedores directamente.
 
 **Terminología del producto** (no traducir ni suavizar en la UI): tarea, cola, slot LLM, proponente, árbitro, quórum, estrategia, preset, deployment, invocación, evento, artefacto, skill, sandbox, adjunto, ingesta, VRAM reservable, oleada, huella de señales, caso de enrutamiento.
 

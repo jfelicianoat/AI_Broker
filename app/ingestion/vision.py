@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import BrokerConfig
+from app.model_capabilities import vision_evidence
 
 
 @dataclass(frozen=True)
@@ -38,21 +39,6 @@ class VisionTarget:
     # De dónde sale la certeza de que este modelo ve imágenes. Viaja hasta los
     # metadatos del fichero para que el panel pueda declararlo.
     evidence: str
-
-
-def _vision_evidence(entry: dict[str, Any]) -> str | None:
-    """`probe` si el sondeo lo verificó, `catalog` si solo lo declara
-    models.dev, None si no hay razón para creer que ve imágenes.
-
-    Un negativo verificado excluye aunque el catálogo afirme lo contrario:
-    es la misma regla que aplica la página de Modelos.
-    """
-    features = entry.get("features") or {}
-    if "vision" in features:
-        return "probe" if features["vision"] else None
-    if (entry.get("catalog") or {}).get("vision"):
-        return "catalog"
-    return None
 
 
 def _provider_endpoint(config: BrokerConfig, provider_id: str) -> tuple[str, str | None, str] | None:
@@ -95,7 +81,7 @@ def select_vision_target(
 
     tiers: dict[str, list[VisionTarget]] = {"probe": [], "catalog": []}
     for entry in catalog:
-        evidence = _vision_evidence(entry)
+        evidence = vision_evidence(entry)
         if evidence is None:
             continue
         endpoint = _provider_endpoint(config, str(entry.get("provider") or ""))

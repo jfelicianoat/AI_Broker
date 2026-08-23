@@ -46,6 +46,18 @@ _MAX_RESULT_CHARS = 8_000
 _MAX_NOISE_LINES = 50
 _ENV_REFERENCE_PREFIX = "env:"
 
+# MCP habla UTF-8 por contrato, pero un hijo de Python en Windows no lo sabe: si
+# nadie se lo dice, escribe su stdout con la codificación ANSI del sistema
+# (cp1252 en un Windows en español). El broker decodifica como UTF-8, así que un
+# acento vuelve convertido en U+FFFD y el resultado que lee el modelo llega roto
+# sin que falle nada — el peor tipo de avería, la que no se anuncia.
+#
+# `PYTHONIOENCODING` arregla al hijo de Python; `PYTHONUTF8` cubre además a los
+# que abren ficheros por su cuenta. En un servidor que no sea de Python son dos
+# variables de más que nadie lee. Van ANTES del `env` del servidor a propósito:
+# quien configure el suyo manda sobre esto.
+_UTF8_CHILD_ENV = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+
 
 class MCPError(RuntimeError):
     """Fallo hablando con un servidor MCP; su mensaje viaja al modelo."""
@@ -210,7 +222,7 @@ class MCPRegistry:
 
     async def _spawn(self, server: _Server) -> None:
         command = shutil.which(server.config.command) or server.config.command
-        environment = {**os.environ}
+        environment = {**os.environ, **_UTF8_CHILD_ENV}
         for key, value in server.config.env.items():
             if value.startswith(_ENV_REFERENCE_PREFIX):
                 # `env:NOMBRE` toma el valor del entorno del broker: así una

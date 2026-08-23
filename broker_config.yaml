@@ -19,7 +19,8 @@ processing:
   queue_max_size: 1000
   task_timeout_seconds: 3000
   max_task_attempts: 3
-  unload_after_task: true
+  unload_after_task: false
+  idle_unload_seconds: 900.0
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
   provider_mode: real
@@ -114,16 +115,7 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    prose:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
+    code: []
     long_context:
     - '*-coder*'
     - '*_coder*'
@@ -134,7 +126,16 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
-    code: []
+    prose:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -207,6 +208,7 @@ providers:
     probe_features: true
     input_cost_per_million: 0.0
     output_cost_per_million: 0.0
+    rescue_reasoning_content: true
     models:
     - name: google/gemma-4-31b
       context_window: 32768
@@ -430,7 +432,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-08-16T19:44:50.984146+00:00'
+      compatibility_checked_at: '2026-08-23T07:31:22.133364+00:00'
       compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
         {"error":{"message":"Failed to load model \"laguna-s-2.1-heretic-i1\". Error:
         Model loading was stopped due to insufficient system resources. Under the
@@ -535,6 +537,7 @@ providers:
     probe_features: true
     input_cost_per_million: 0.0
     output_cost_per_million: 0.0
+    rescue_reasoning_content: true
     models:
     - name: 01-ai/yi-large
       context_window: 128000
@@ -606,7 +609,7 @@ providers:
       capabilities:
       - embedding
       compatibility: error
-      compatibility_checked_at: '2026-08-15T07:41:18.548098+00:00'
+      compatibility_checked_at: '2026-08-23T07:31:56.041920+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/embeddings:
         {"error":"Something went wrong with the request."}'
       features: {}
@@ -2107,6 +2110,19 @@ providers:
         json_mode: true
         tools: true
       features_checked_at: '2026-08-11T17:34:06.573062+00:00'
+    - name: moonshotai/kimi-k3
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-23T07:31:58.247116+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+      features_checked_at: '2026-08-23T07:35:50.978689+00:00'
   - id: HCNSEC
     enabled: true
     adapter: openai_compatible
@@ -2129,6 +2145,7 @@ providers:
     probe_features: true
     input_cost_per_million: 70.0
     output_cost_per_million: 70.0
+    rescue_reasoning_content: true
     models:
     - name: auto
       context_window: 128000
@@ -2482,3 +2499,30 @@ providers:
         json_mode: true
         tools: true
       features_checked_at: '2026-08-15T07:45:33.865386+00:00'
+    - name: glm-4.5-air
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-23T07:52:37.446627+00:00'
+      compatibility_error: null
+      features:
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-23T08:00:32.079148+00:00'
+    - name: Qwen3.8-35B-A3B
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-23T08:00:32.338382+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-08-23T08:00:40.526115+00:00'

@@ -49,6 +49,20 @@ class ResourceScheduler:
     def __init__(self, config: BrokerConfig) -> None:
         self.config = config
 
+    def effective_scheduling(self, request: TaskCreateRequest) -> SchedulingPolicy:
+        """La política que gobierna esta tarea: la del cliente si la declaró, y
+        si no, la que el operador haya puesto en `resources.scheduling_policy`.
+
+        La diferencia entre "el cliente pidió adaptive" y "el cliente no dijo
+        nada" no se puede leer en el valor —el contrato rellena `adaptive` en
+        los dos casos—, así que se mira `model_fields_set`, que es lo único que
+        distingue un campo enviado de uno puesto por defecto. Sin eso, el ajuste
+        del operador sería inalcanzable: nunca llegaría una petición sin valor.
+        """
+        if "scheduling" in request.execution.model_fields_set:
+            return request.execution.scheduling
+        return SchedulingPolicy(self.config.resources.scheduling_policy)
+
     def plan(
         self, request: TaskCreateRequest, footprints: list[ModelFootprint] | None = None
     ) -> ResourcePlan:
@@ -65,7 +79,8 @@ class ResourceScheduler:
 
         count = request.execution.max_proposers
         labels = [f"proposer_{index}" for index in range(1, count + 1)]
-        if request.execution.scheduling == SchedulingPolicy.sequential:
+        scheduling = self.effective_scheduling(request)
+        if scheduling == SchedulingPolicy.sequential:
             return ResourcePlan(
                 mode=SchedulingMode.sequential,
                 waves=[[label] for label in labels],
@@ -74,7 +89,7 @@ class ResourceScheduler:
             )
         max_parallel = self._max_parallel_invocations()
 
-        if request.execution.scheduling == SchedulingPolicy.parallel and max_parallel < count:
+        if scheduling == SchedulingPolicy.parallel and max_parallel < count:
             raise ResourcePlanningError(
                 f"parallel requires {count} slots but only {max_parallel} are safely available"
             )
@@ -160,7 +175,7 @@ class ResourceScheduler:
         if mode is not SchedulingMode.parallel:
             # Escalonar es la respuesta correcta salvo que el cliente haya
             # pedido paralelo estricto: ahí prefiere enterarse a esperar.
-            if request.execution.scheduling == SchedulingPolicy.parallel:
+            if self.effective_scheduling(request) == SchedulingPolicy.parallel:
                 total = sum(item.size_bytes for item in footprints)
                 raise ResourcePlanningError(
                     f"parallel requires {_gb(total)} GB of local memory "

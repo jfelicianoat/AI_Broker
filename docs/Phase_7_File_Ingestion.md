@@ -2,10 +2,11 @@
 
 Fecha: 19 de julio de 2026
 
-El broker acepta ficheros (documentos, imágenes, audio y vídeo), los convierte a
-Markdown en segundo plano y los inyecta en el prompt de las tareas que los
-referencian. El modelo destino siempre recibe texto: el mapeo es sin pérdida
-respecto al contrato existente y funciona con cualquier proveedor.
+El broker acepta ficheros (documentos, imágenes, audio y vídeo). Los documentos
+—y el audio y el vídeo— se convierten a Markdown en segundo plano y se inyectan
+en el prompt de las tareas que los referencian. **Las imágenes sueltas no se
+convierten**: se adjuntan tal cual y las mira un modelo con visión, que el
+enrutado exige (ver *Imágenes adjuntas*, más abajo).
 
 ## Flujo
 
@@ -44,7 +45,7 @@ POST /api/v1/files  (multipart)          POST /api/v1/tasks
 | Office/eBook/HTML | `.docx .xlsx .pptx .epub .msg .html .htm .ipynb` | MarkItDown |
 | Texto y marcado | `.txt .md .rst .adoc .org .tex .log` | passthrough |
 | Código y datos | `.py .js .ts .java .c .cpp .cs .go .rs .rb .php .sql .sh .ps1 .bat .ini .toml .cfg .yaml .yml .json .xml .csv .tsv` | passthrough en fence |
-| Imagen | `.png .jpg .jpeg .webp .tiff .tif .bmp` | Docling OCR + descripción visión |
+| Imagen | `.png .jpg .jpeg .webp .tiff .tif .bmp` | ninguno: se adjunta sin convertir (OCR solo a petición) |
 | Audio | `.mp3 .wav .m4a .flac .ogg .opus .aac` | faster-whisper |
 | Vídeo | `.mp4 .mkv .mov .avi .webm .m4v .wmv` | ffmpeg (extrae audio) + faster-whisper |
 
@@ -53,7 +54,100 @@ falla (`ENGINE_MISSING` con hint `pip install "ai-broker[ingestion]"`); el
 broker arranca y opera igual. La transcripción de vídeo exige además `ffmpeg`
 en el PATH (o `ingestion.transcription.ffmpeg_path`).
 
+## Imágenes adjuntas
+
+Una imagen suelta ya no pasa por Docling. Antes se le hacía OCR y se le pedía a
+un modelo de visión un párrafo que la describiera, y ese párrafo —no la imagen—
+era lo que llegaba al modelo que atendía la tarea: todo lo que la descripción no
+mencionara se perdía, sin que nadie lo notara. Ahora:
+
+- Al subirla queda `ready` directamente (no hay Markdown que esperar, así que
+  tampoco entra en el carril de conversión ni tiene `markdown_url`). La única
+  excepción es pedir OCR (más abajo).
+- **TIFF y BMP se reescriben a PNG** al subirlos. Ningún endpoint de visión los
+  acepta, así que si viajaran tal cual la tarea moriría con un error del
+  proveedor *después* de esperar en la cola. Es un cambio de envoltorio, sin
+  pérdida, y se paga una vez: `extension` pasa a `.png`, el nombre original se
+  conserva y `meta.transcoded_from` deja constancia. De un TIFF multipágina se
+  guarda el primer fotograma. Requiere Pillow (viene con los extras de
+  ingesta); sin él la subida se rechaza con `INGEST_ENGINE_MISSING` en vez de
+  fallar más tarde.
+- En el despacho, `expand_request` mete en el prompt un manifiesto
+  `<attached_image id name orden>` —qué es, en qué orden va— y los bytes viajan
+  aparte, en `inline_images`, hasta el adapter del proveedor: Ollama los recibe
+  en `images: [b64]`; los OpenAI-compatibles, como `image_url` con data URI.
+  Mandar el formato del otro no da error, da una respuesta inventada.
+- `inline_images` no es parte del contrato público: una petición que lo traiga
+  se rechaza. La única puerta de entrada de bytes es la ingesta, que valida
+  formato, magic bytes y tamaño.
+
+### Capacidad exigida al modelo
+
+Con imágenes en la tarea, `eligible_catalog` descarta todo modelo sin visión, y
+si no queda ninguno la tarea falla con `VISION_MODEL_UNAVAILABLE` y un mensaje
+que lo explica. La evidencia de "ve imágenes" está en `app.model_capabilities` y
+sigue la jerarquía de siempre: sondeo contra el endpoint > catálogo externo
+(models.dev) > nada. Un negativo verificado excluye aunque models.dev afirme lo
+contrario.
+
+### OCR: el texto que hay DENTRO de la imagen
+
+Adjuntar la imagen y describirla es una cosa; extraer lo que pone en ella es
+otra, y el broker la sabe hacer **sin modelo de visión**. Hay dos caminos:
+
+1. **Pedido al subir** — `POST /api/v1/files` con `ocr=true` (solo tiene efecto
+   en imágenes). Esa imagen sí pasa por el carril de conversión: nace
+   `received`, y al terminar su `markdown_url` sirve el texto reconocido.
+   `meta.ocr_chars` dice cuánto se reconoció. La imagen original se conserva
+   intacta — el OCR es un añadido, nunca un reemplazo — y al adjuntarla a una
+   tarea viajan **las dos cosas**: la imagen (para quien pueda verla) y un
+   bloque `<attached_image_text>` con la transcripción literal.
+   El OCR forma parte de la identidad de la subida para la dedupe por SHA-256,
+   con la misma regla `>=` que `describe_images`: la subida *con* texto sirve a
+   quien lo pide *sin* él, pero no al revés.
+2. **Al vuelo, como último recurso** — si la petición va de leer lo que pone en
+   la imagen (`classify_ocr_intent`: "extrae el texto", "qué pone en", "hazle un
+   OCR", "transcribe"…) y **no hay ningún modelo con visión** disponible para
+   esa tarea, la expansión corre el OCR en ese momento y la imagen entra como
+   texto en vez de como imagen. Es peor que verla, pero es una respuesta donde
+   antes había un `VISION_MODEL_UNAVAILABLE`.
+
+La degradación se limita a ese caso. Con un "¿de qué color es el fondo?" y sin
+modelo de visión, la tarea **sigue fallando**: un OCR no contesta esa pregunta, y
+cambiar la imagen por su texto sería fingir que se ha atendido la petición. El
+coordinador consulta `RoutedModelProvider.has_vision_model(request)` antes de
+expandir; si no puede responder, asume que sí hay visión (equivocarse por
+optimismo solo lleva al mensaje de error correcto, equivocarse por pesimismo
+degradaría una tarea que se podía atender bien).
+
+El motor es el mismo Docling que ya hace el OCR de los PDF escaneados, sin LLM
+de por medio: de eso va pedir OCR, de sacar lo que pone y no de que alguien lo
+interprete.
+
+### Peticiones que piden una imagen de salida
+
+`app.task_classifier.classify_image_intent` detecta si la petición pide *generar*
+una imagen ("genera una imagen de…", "dibújame…") o *modificar* la adjunta
+("recorta la foto"). En ese caso solo son candidatos los modelos que producen
+imágenes (`modalities.output` con `image` en models.dev); si no hay ninguno, la
+tarea falla con `IMAGE_GENERATION_UNSUPPORTED` diciéndolo, en vez de entregar la
+descripción del cartel en lugar del cartel.
+
+El clasificador es deliberadamente estrecho: un falso positivo tumba una tarea
+que el broker sabía atender ("resume la imagen adjunta" no pide una imagen
+nueva), y ese daño es peor que el de un falso negativo. Quedan fuera a propósito
+"logo", "icono" y "diagrama": se piden tanto como imagen como en formatos que un
+modelo de texto sí escribe (SVG, Mermaid).
+
+Cuando el modelo sí devuelve una imagen (base64 en `message.images`, en
+cualquiera de los dos dialectos), se guarda como artefacto de la tarea
+(`image_output`), no en el resultado JSON: ese documento se lee entero en cada
+consulta del estado.
+
 ## Descripción de figuras (documentos con gráficos)
+
+Esto sigue vigente y es otra cosa: aquí la figura está **embebida** en un
+documento cuyo resto es texto, y tiene que ocupar su sitio en él.
 
 Con `ingestion.images.enabled`, las figuras que Docling extrae de un PDF se
 envían una a una a un LLM de visión (endpoint OpenAI-compatible; configurado
@@ -120,10 +214,23 @@ ingestion:
 
 ## Persistencia
 
-Tabla `ingested_files` (id, sha256, filename, kind, engine, status,
-error_json, original_path, markdown_path, meta_json). Los ficheros viven en
-`state/files/{file_id}/` (`original.*` + `converted.md`). Las conversiones
-interrumpidas por un reinicio se relanzan en el arranque (idempotentes).
+Tabla `ingested_files` (id, sha256, filename, extension, kind, engine,
+size_bytes, status, error_json, original_path, markdown_path, meta_json,
+`describe_images`, `ocr`). Las dos últimas son columnas añadidas por migración
+(`ALTER TABLE` idempotente en `app.db`) y entran en la deduplicación por
+SHA-256: describen *qué* conversión se guardó, no solo de qué fichero venía.
+Las filas anteriores a cada columna valen `NULL` y se asumen convertidas con la
+política global vigente, que es la mejor aproximación disponible.
+
+Los ficheros viven en `state/files/{file_id}/` (`original.*` + `converted.md`).
+Una imagen adjuntada sin OCR **no tiene `converted.md`** ni `markdown_path`: su
+directorio guarda solo el original, y su `markdown_url` viene a `null` tanto en
+la API como en el panel — enlazarlo daría un 409 al primer clic.
+
+Las conversiones interrumpidas por un reinicio se relanzan en el arranque
+(idempotentes). Una imagen que quedara en `received` de una versión anterior a
+este cambio no vuelve a Docling: al reanudar se marca `ready` con motor
+`attach`, porque ya no es un documento que convertir.
 
 ## Panel del dashboard (2026-07-19)
 
@@ -131,8 +238,22 @@ Página **Ficheros** (`/dashboard/files`, nav propia): formulario de subida
 (multipart + CSRF, errores renderizados en la propia página), tabla con
 auto-refresco cada 5 s (fragmento HTMX `/dashboard/fragments/files`) que
 muestra tipo/motor/tamaño/tokens estimados/estado, enlace "Ver Markdown" para
-los `ready` y botón "Borrar" (elimina fila y directorio; avisa de que las
-tareas encoladas que lo referencien fallarán).
+los `ready` **que tengan Markdown** y botón "Borrar" (elimina fila y
+directorio; avisa de que las tareas encoladas que lo referencien fallarán).
+
+El formulario tiene dos controles de política, y conviene no confundirlos
+porque suenan parecido y gobiernan cosas distintas:
+
+- **Desplegable "figuras del documento"** (`describe_images`) — las figuras
+  *embebidas* en un PDF o un DOCX. No toca a las imágenes sueltas.
+- **Casilla "Reconocer el texto de la imagen (OCR)"** (`ocr`) — solo para
+  imágenes sueltas. Sin marcar, la imagen se adjunta tal cual y la mira un
+  modelo con visión; marcada, además se extrae el texto que haya dentro y
+  queda disponible como Markdown.
+
+El botón dice "Subir" y no "Subir y convertir": con una imagen no hay nada que
+convertir, y prometerlo dejaba al usuario esperando un estado que no iba a
+cambiar.
 
 ## Retención y estimación de tokens (2026-07-19)
 

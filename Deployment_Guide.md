@@ -174,6 +174,11 @@ pip install "ai-broker[ingestion]"
 #   winget install Gyan.FFmpeg
 # y si no queda en el PATH, apunta ingestion.transcription.ffmpeg_path
 # del broker_config.yaml al ffmpeg.exe instalado.
+#
+# Las IMÁGENES no necesitan nada de esto: se adjuntan sin convertir y las mira
+# un modelo con visión. Solo dos casos usan motor — subir un TIFF o un BMP
+# (se reescriben a PNG con Pillow, que llega con estos extras) y pedir OCR
+# del texto de una imagen (Docling, con ingestion.ocr_enabled).
 
 # OPCIONAL — Sandbox de código (skill run_code del agente):
 # requiere Docker Desktop (WSL2) instalado y en marcha, y la imagen:
@@ -654,6 +659,7 @@ processing:
   queue_max_size: 1000
   task_timeout_seconds: 300
   unload_after_task: true
+  idle_unload_seconds: 0.0
   auto_dispatch: true
   dispatcher_interval_seconds: 0.1
   provider_mode: "real"
@@ -682,6 +688,8 @@ health:
   external_providers_interval_seconds: 300
   disk_free_alert_gb: 10
 ```
+
+**Sobre los dos ajustes de memoria de `processing`.** `unload_after_task: true` es el valor conservador: cada tarea deja la máquina como la encontró. El precio es que dos tareas seguidas con el mismo modelo pagan la carga dos veces, y que el ranking del router no llega a ver nunca un modelo caliente al que preferir. La alternativa es `unload_after_task: false` con `idle_unload_seconds` puesto a un plazo (por ejemplo `900.0`): los modelos se quedan cargados entre tareas y se descargan solos cuando el broker lleva ese tiempo sin tareas corriendo ni en cola. Con `unload_after_task: true` el plazo no hace nada. Los dos se editan desde el panel y aplican en caliente; el detalle operativo está en [`docs/Phase_6_Operations.md`](docs/Phase_6_Operations.md). La referencia completa del YAML, sección por sección, está en [`docs/Configuration_Reference.md`](docs/Configuration_Reference.md): el bloque de aquí arriba es el mínimo normativo del MVP, no la lista de todo lo configurable.
 
 Las claves se almacenan con `keyring` en Windows Credential Manager. `.env` puede aportar una clave inicial que se migra y elimina del entorno operativo; nunca se persiste en SQLite o YAML. Los precios y presupuestos deben revisarse antes de activar un proveedor externo.
 
@@ -717,7 +725,7 @@ El Broker consulta primero `DEEPSEEK_API_KEY` y después Credential Manager. Si 
 12. Mantener un archivo bloqueado y verificar tres reintentos antes de `FILE_LOCKED`; después desbloquearlo y reprocesarlo manualmente.
 13. Interrumpir el Orchestrator después del commit `STAGED` y antes/después de `os.replace`; ambos reinicios deben recuperar el fichero sin duplicarlo.
 14. Enviar fixtures inválidos en cada frontera y verificar rechazo inmediato, mensaje de campo y ausencia de efectos parciales.
-15. Verificar que al finalizar o cancelar una tarea se envía `keep_alive: 0`, `/api/ps` confirma la descarga y la siguiente tarea no comienza antes de liberar VRAM.
+15. Con `unload_after_task: true`, verificar que al finalizar o cancelar una tarea se envía `keep_alive: 0`, `/api/ps` confirma la descarga y la siguiente tarea no comienza antes de liberar VRAM. Con el ajuste desactivado y `idle_unload_seconds` puesto, verificar lo contrario: el modelo sigue en `/api/ps` entre dos tareas seguidas, y desaparece solo tras el plazo con la cola vacía (log `maintenance.idle_models_unloaded`).
 16. Detener Ollama y bloquear SQLite por separado; validar estados `degraded`/`unavailable`, readiness y recuperación automática.
 
 ### Empaquetado

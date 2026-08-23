@@ -109,6 +109,134 @@ LONG_CONTEXT_TOKEN_THRESHOLD = 6000
 
 TASK_TYPES = ("code", "long_context", "prose")
 
+# --------------------------------------------------- peticiones sobre imágenes
+#
+# Producir una imagen es una capacidad, no un estilo de respuesta: un modelo de
+# texto al que se le pide un logotipo no falla, entrega un párrafo describiendo
+# el logotipo que no ha hecho. Detectar aquí la intención permite exigir esa
+# capacidad al enrutar y, cuando no hay ningún modelo que la tenga, decirlo en
+# vez de entregar el sucedáneo.
+#
+# El criterio es deliberadamente estrecho: un falso positivo tumba una tarea
+# que el broker sabía atender ("resume la imagen adjunta" no pide una imagen
+# nueva), y ese daño es peor que el de un falso negativo, que como mucho
+# devuelve texto donde se quería un dibujo.
+
+_IMAGE_NOUNS = (
+    "imagen", "imagenes", "foto", "fotos", "fotografia", "fotografias",
+    "ilustracion", "ilustraciones", "dibujo", "dibujos", "retrato", "boceto",
+    "wallpaper", "avatar",
+    "image", "images", "picture", "pictures", "photo", "photos",
+    "illustration", "drawing", "artwork", "sketch",
+)
+# Fuera quedan a propósito "logo", "icono", "cartel" y "diagrama": se piden
+# tanto como imagen como en formatos que un modelo de texto sí sabe escribir
+# (SVG, Mermaid), y exigir por ellos un modelo de imagen convertiría en
+# irresoluble una tarea que hoy se atiende bien.
+
+# Verbos que solo se usan para hacer una imagen, sin necesidad de que el objeto
+# esté nombrado ("dibújame un gato" no dice "imagen" por ninguna parte). La
+# lista es corta porque casi todos los candidatos tienen otro uso: "ilustra con
+# un ejemplo", "renderiza el HTML", "draw a conclusion".
+_IMAGE_ONLY_VERBS = ("dibuja", "dibujar", "pinta", "pintar")
+
+# Verbos de encargo genéricos: solo cuentan si el objeto es una imagen y está
+# cerca ("genera una imagen de…", no "haz un resumen de la imagen").
+_IMAGE_CREATE_VERBS = (
+    "genera", "generar", "crea", "crear", "haz", "disena", "disenar",
+    "elabora", "produce", "generate", "create", "make", "design", "draw",
+    "paint", "illustrate",
+)
+
+# Operaciones sobre una imagen que ya existe. Igual de estrechas: fuera quedan
+# "cambia", "convierte" y "transforma", que aparecen mucho más en peticiones
+# que NO quieren una imagen de vuelta ("convierte la imagen a texto").
+_IMAGE_EDIT_VERBS = (
+    "edita", "editar", "modifica", "modificar", "retoca", "retocar",
+    "recorta", "recortar", "redimensiona", "escala", "amplia", "rota",
+    "gira", "voltea", "difumina", "desenfoca", "colorea", "restaura",
+    "mejora", "edit", "modify", "crop", "resize", "rotate", "blur",
+    "colorize", "upscale", "enhance", "restore",
+)
+
+# Encargos de edición que no nombran la imagen porque no hace falta: solo se
+# le hacen a una.
+_IMAGE_EDIT_PHRASES = (
+    "quita el fondo", "quitale el fondo", "elimina el fondo", "borra el fondo",
+    "remove the background", "quita la marca de agua",
+)
+
+_DETERMINERS = r"(?:el|la|los|las|un|una|unos|unas|este|esta|estos|estas|ese|esa|mi|mis|the|this|these|a|an|my)"
+
+# Verbo de creación + hasta tres palabras + sustantivo de imagen. El hueco es
+# corto a propósito: "haz un resumen de la imagen" mete cuatro palabras entre
+# el verbo y el sustantivo y se queda fuera, que es justo lo que se quiere.
+_IMAGE_CREATE_RE = re.compile(
+    rf"(?<!\w)(?:{'|'.join(_IMAGE_CREATE_VERBS)}){_ENCLITICS}(?!\w)"
+    rf"(?:\W+\w+){{0,3}}\W+(?:{'|'.join(_IMAGE_NOUNS)})(?!\w)"
+)
+_IMAGE_ONLY_VERB_RE = _word_pattern(_IMAGE_ONLY_VERBS, _ENCLITICS)
+# Verbo de edición + determinante opcional + la imagen, sin hueco libre: el
+# objeto tiene que ser ella ("recorta la foto"), no algo que la acompaña
+# ("modifica el código según la imagen adjunta").
+_IMAGE_EDIT_RE = re.compile(
+    rf"(?<!\w)(?:{'|'.join(_IMAGE_EDIT_VERBS)}){_ENCLITICS}(?!\w)"
+    rf"(?:\W+{_DETERMINERS})?\W+(?:{'|'.join(_IMAGE_NOUNS)})(?!\w)"
+)
+_IMAGE_EDIT_PHRASE_RE = re.compile(
+    "|".join(re.escape(_fold(phrase)) for phrase in _IMAGE_EDIT_PHRASES)
+)
+
+
+# Peticiones de "dime qué pone aquí". Cuentan por separado de todo lo anterior
+# porque tienen una salida que el broker sabe producir SIN modelo de visión: el
+# OCR local. Es el único caso en el que una imagen puede degradarse a texto sin
+# traicionar la petición — si la pregunta fuera "¿de qué color es el gato?", el
+# texto reconocido no contestaría nada.
+_OCR_TERMS = (
+    "ocr", "transcribe", "transcribir", "transcripcion", "transcribeme",
+    "reconocimiento optico", "optical character",
+)
+_OCR_PHRASES = (
+    "extrae el texto", "extraer el texto", "extraeme el texto", "saca el texto",
+    "sacar el texto", "lee el texto", "leer el texto", "leeme el texto",
+    "dime que pone", "que pone en", "que dice el texto", "que texto tiene",
+    "texto de la imagen", "texto de la foto", "texto que aparece",
+    "extract the text", "read the text", "text in the image", "what does it say",
+    "copia el texto", "pasame el texto", "pasa a texto",
+)
+_OCR_TERMS_RE = _word_pattern(_OCR_TERMS)
+_OCR_PHRASES_RE = re.compile("|".join(re.escape(_fold(item)) for item in _OCR_PHRASES))
+
+
+def classify_ocr_intent(request: TaskCreateRequest) -> bool:
+    """True si lo que se pide es el texto que hay dentro de la imagen.
+
+    Generoso a propósito, al revés que `classify_image_intent`: aquí el falso
+    positivo solo hace que se intente un OCR de más, mientras que el falso
+    negativo deja la tarea sin respuesta cuando no hay modelo con visión.
+    """
+    text = _fold(request_text(request.content.prompt))
+    return bool(_OCR_TERMS_RE.search(text) or _OCR_PHRASES_RE.search(text))
+
+
+def classify_image_intent(request: TaskCreateRequest) -> str | None:
+    """"generate" | "edit" | None: qué quiere la petición que SALGA una imagen.
+
+    "edit" solo cuando además hay una imagen adjunta sobre la que operar. Sin
+    ella no se asciende a "generate": "recorta la foto" sin foto no es un
+    encargo de dibujar nada, es una petición a la que le falta el adjunto, y
+    tratarla como generación la tumbaría con un error sobre modelos de imagen
+    en vez de dejar que el modelo pida lo que falta.
+    """
+    text = _fold(request_text(request.content.prompt))
+    has_image = bool(getattr(request, "inline_images", None))
+    if has_image and (_IMAGE_EDIT_RE.search(text) or _IMAGE_EDIT_PHRASE_RE.search(text)):
+        return "edit"
+    if _IMAGE_ONLY_VERB_RE.search(text) or _IMAGE_CREATE_RE.search(text):
+        return "generate"
+    return None
+
 
 def request_text(prompt: str) -> str:
     """Lo que el usuario pide de verdad, sin los bloques de contexto adjunto."""
