@@ -23,11 +23,13 @@ from app.config import (
     ServerConfig,
     load_config,
 )
+from app.dashboard_forms import _build_dashboard_config
 from app.dashboard_web import load_dashboard_resources
 from app.main import create_app
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.resource_scheduler import ResourceScheduler
+from app.startup import timeout_coherence_warnings
 
 
 class ConcurrencyProbeProvider(BootstrapModelProvider):
@@ -2413,6 +2415,65 @@ def test_single_rejects_slow_preset(tmp_path: Path) -> None:
     assert response.json()["code"] == "CONTRACT_VALIDATION_FAILED"
 
 
+def test_task_without_timeout_inherits_configured_default(tmp_path: Path) -> None:
+    """La petición que calla hereda el plazo del operador; la que lo fija, manda.
+
+    Es la diferencia entre poder cambiar el plazo por defecto desde el YAML y
+    tener que editar el esquema: sin esto, el default del contrato era el techo
+    real de toda tarea que no lo enviara.
+    """
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-default-timeout.db")),
+        processing=ProcessingConfig(
+            auto_dispatch=False,
+            provider_mode="bootstrap",
+            default_task_timeout_seconds=1800,
+        ),
+    )
+    with TestClient(create_app(config)) as client:
+        heredado = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "test:timeout:inherited",
+                "content": {"prompt": "Sin plazo propio"},
+                "execution": {"strategy": "single"},
+            },
+        ).json()
+        propio = client.post(
+            "/api/v1/tasks",
+            json={
+                "idempotency_key": "test:timeout:explicit",
+                "content": {"prompt": "Con plazo propio"},
+                "execution": {"strategy": "single", "timeout_seconds": 45},
+            },
+        ).json()
+        repository = client.app.state.repository
+        assert repository.get_task_request(heredado["task_id"]).execution.timeout_seconds == 1800
+        assert repository.get_task_request(propio["task_id"]).execution.timeout_seconds == 45
+
+
+def test_dashboard_config_form_updates_default_task_timeout(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-default-timeout-form.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    updated = _build_dashboard_config(
+        config,
+        {
+            "task_timeout_seconds": "3000",
+            "default_task_timeout_seconds": "2400",
+            "queue_max_size": "1000",
+        },
+    )
+    assert updated.processing.default_task_timeout_seconds == 2400
+    # Un formulario sin el campo conserva el valor guardado: el guard de
+    # presencia es lo que impide que un POST parcial lo baje al mínimo.
+    intacto = _build_dashboard_config(
+        updated, {"task_timeout_seconds": "3000", "queue_max_size": "1000"}
+    )
+    assert intacto.processing.default_task_timeout_seconds == 2400
+
+
 def test_execution_timeout_cancels_provider_and_persists_typed_error(tmp_path: Path) -> None:
     config = BrokerConfig(
         persistence=PersistenceConfig(database=str(tmp_path / "broker-timeout.db")),
@@ -3012,6 +3073,52 @@ def test_prune_terminal_task_events(tmp_path: Path) -> None:
     }
     assert prune_terminal_task_events(db, older_than_days=0) == 0
     db.close()
+
+
+def test_default_timeouts_are_coherent_out_of_the_box() -> None:
+    """El techo de fábrica deja alcanzable el plazo de fábrica.
+
+    Con el techo por debajo, default_task_timeout_seconds sería decorativo:
+    subirlo no cambiaría nada y el broker mataría la tarea antes.
+    """
+    processing = BrokerConfig().processing
+    assert processing.task_timeout_seconds >= processing.default_task_timeout_seconds
+    assert not timeout_coherence_warnings(BrokerConfig())
+
+
+def test_timeout_coherence_warnings_name_the_knob_that_cuts_first() -> None:
+    from app.config import OllamaConfig, OpenAICompatibleProviderConfig, ProvidersConfig
+
+    techo_bajo = BrokerConfig(
+        processing=ProcessingConfig(task_timeout_seconds=300, default_task_timeout_seconds=2400),
+        providers=ProvidersConfig(ollama=OllamaConfig(enabled=False)),
+    )
+    avisos = timeout_coherence_warnings(techo_bajo)
+    assert len(avisos) == 1
+    assert "default_task_timeout_seconds=2400" in avisos[0]
+    assert "task_timeout_seconds=300" in avisos[0]
+
+    proveedor_corto = BrokerConfig(
+        processing=ProcessingConfig(task_timeout_seconds=3000, default_task_timeout_seconds=2400),
+        providers=ProvidersConfig(
+            ollama=OllamaConfig(enabled=False),
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="lmstudio", enabled=True, base_url="http://localhost:1234",
+                    deployment="local", timeout_seconds=300.0,
+                ),
+                # Cloud: no se compara. Una espera de 40 minutos contra un
+                # servicio remoto no es un modelo cargando desde disco.
+                OpenAICompatibleProviderConfig(
+                    id="nvidia", enabled=True, base_url="https://example",
+                    deployment="cloud", timeout_seconds=60.0,
+                ),
+            ],
+        ),
+    )
+    avisos = timeout_coherence_warnings(proveedor_corto)
+    assert len(avisos) == 1
+    assert "providers.custom[lmstudio].timeout_seconds=300 s" in avisos[0]
 
 
 def test_vram_budget_mismatch_detection() -> None:

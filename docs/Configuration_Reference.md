@@ -88,7 +88,8 @@ El motor de la cola y la memoria de los modelos locales.
 | `max_active_workflows` | `1` | `== 1` | **Invariante validado**. Un solo workflow de inferencia activo en todo el broker |
 | `max_parallel_invocations` | `"auto"` | `"auto"` o `>= 1` | Invocaciones simultáneas dentro de un mixture `slow`. `auto` usa la fórmula conservadora compartida entre el planificador y el semáforo del router: si divergieran, el plan prometería un paralelismo que el router no concede |
 | `queue_max_size` | `1000` | | Tope de la cola |
-| `task_timeout_seconds` | `300` | | Plazo por defecto de una tarea (el cliente puede fijar el suyo) |
+| `task_timeout_seconds` | `3000` | 1–86400 | **Techo** del plazo de una tarea: ninguna pasa de aquí, pida lo que pida. Por encima de `default_task_timeout_seconds` a propósito — por debajo lo dejaría de adorno |
+| `default_task_timeout_seconds` | `2400` | 1–86400 | Plazo que se le pone a la petición que no trae `execution.timeout_seconds`. El plazo efectivo es el **menor** de este y `task_timeout_seconds`: subir uno solo no cambia nada. 2400 y no 600 porque un modelo local grande paga la carga desde disco dentro de su primera invocación |
 | `max_task_attempts` | `3` | 1–100 | Intentos antes de `TASK_RETRY_LIMIT_EXCEEDED`. Cada arranque devuelve a `queued` las tareas que estaban activas, con `attempt+1` |
 | `unload_after_task` | `true` | | Descargar los modelos locales al terminar cada tarea |
 | `idle_unload_seconds` | `0.0` | 0–86400 | Segundos de broker parado tras los que se descargan los modelos locales. `0` = nunca |
@@ -96,6 +97,8 @@ El motor de la cola y la memoria de los modelos locales.
 | `dispatcher_interval_seconds` | `0.1` | >0, ≤60 | Cada cuánto mira el dispatcher si hay trabajo |
 | `provider_mode` | `real` | `real` \| `bootstrap` | `bootstrap` sustituye a los proveedores reales por uno de arranque, para levantar el broker sin ningún runtime instalado |
 | `dependency_wait_seconds` | `2.0` | 0.1–3600 | Cada cuánto reintenta una tarea en `waiting_for_dependencies`. Corto a propósito: lo que la bloquea está en esta misma cola y suele terminar en segundos |
+
+> **El plazo de una tarea es una cadena, no un número.** Se corta por el primero que venza: `execution.timeout_seconds` de la petición (o `processing.default_task_timeout_seconds` si no lo trae), el techo `processing.task_timeout_seconds`, y el `timeout_seconds` del proveedor que atiende la invocación. Subir uno solo no sirve de nada si otro corta antes; el arranque avisa (`config.timeout_incoherent`) y el error `TASK_TIMEOUT` nombra cuál mandó (`timeout_bound_by`).
 
 **Los dos ajustes de memoria se leen juntos.** `unload_after_task: true` deja la
 máquina como la encontró después de cada tarea; el precio es que dos tareas
@@ -407,7 +410,7 @@ claves.
 |---|---|---|
 | `enabled` | `true` | |
 | `base_url` | `http://127.0.0.1:11434` | |
-| `timeout_seconds` | `300` | Plazo de inferencia |
+| `timeout_seconds` | `2400` | Plazo de inferencia. Alineado con `processing.default_task_timeout_seconds` y no en 300 como los proveedores remotos: Ollama es siempre local y ahí la espera larga es un modelo cargando desde disco, no un fallo |
 | `unload_timeout_seconds` | `10` | Plazo de la descarga de un modelo |
 | `catalog_cache_seconds` | `5.0` | TTL del catálogo (`/api/tags` + `/api/show`) |
 
@@ -437,7 +440,7 @@ usar los nombres reservados `ollama`, `deepseek` ni `bootstrap`.
 | `adapter` | `openai_compatible` | Único valor admitido hoy |
 | `display_name` | `null` | Nombre para el panel |
 | `base_url` | *(obligatorio)* | |
-| `timeout_seconds` | `300` | |
+| `timeout_seconds` | `300` (remoto) / `2400` (`deployment: local`) | Un proveedor local que no declare el suyo hereda el plazo por defecto de una tarea; un valor explícito se respeta siempre |
 | `api_key_env` | `NVIDIA_API_KEY` | Ojo con el defecto heredado: en un proveedor que no sea NVIDIA, ponlo o vacíalo explícitamente |
 | `keyring_service` | `ai-broker` | |
 | `keyring_username` | `null` → `{id}_api_key` | Se rellena solo con el id del proveedor |

@@ -43,6 +43,12 @@
     <label class="field">
       <span>Timeout global por tarea (segundos)</span>
       <input name="task_timeout_seconds" value="{{ config.processing.task_timeout_seconds }}" inputmode="numeric">
+      <small>Techo absoluto: ninguna tarea pasa de aquí, pida el plazo que pida.</small>
+    </label>
+    <label class="field">
+      <span>Plazo por defecto de una tarea (segundos)</span>
+      <input name="default_task_timeout_seconds" value="{{ config.processing.default_task_timeout_seconds }}" inputmode="numeric">
+      <small>Lo que se le da a la petición que no trae su propio <code>execution.timeout_seconds</code>. El plazo real es el menor de este y el techo de arriba, así que subir solo uno de los dos no cambia nada. Súbelo si un modelo local grande muere por timeout mientras aún se carga desde disco.</small>
     </label>
     <label class="field">
       <span>Máx. invocaciones paralelas slow</span>

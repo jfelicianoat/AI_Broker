@@ -92,6 +92,7 @@ from app.schemas import (
     TaskStatus,
     ToolResultsRequest,
     UsageResponse,
+    apply_default_timeout,
     classification_allows_cloud,
     run_code_available,
 )
@@ -99,6 +100,7 @@ from app.startup import (
     auto_start_local_provider_servers,
     detect_total_vram_gb,
     ensure_admin_credential_for_exposed_host,
+    timeout_coherence_warnings,
     vram_budget_mismatch,
     zero_cost_cloud_providers,
 )
@@ -170,6 +172,11 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                         ),
                     },
                 )
+        for aviso in timeout_coherence_warnings(broker_config):
+            logger.warning(
+                "config.timeout_incoherent",
+                extra={"event": "config.timeout_incoherent", "detail": aviso},
+            )
         for provider_id in zero_cost_cloud_providers(broker_config):
             logger.warning(
                 "providers.cloud_zero_cost",
@@ -417,6 +424,12 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
     def create_task(payload: TaskCreateRequest, response: Response, request: Request) -> TaskAcceptedResponse:
         verify_admin_access(request, broker_config)
+        # Antes de cualquier otra cosa: la petición que no trae plazo hereda el
+        # del operador, y lo hace aquí para que se persista con la tarea en vez
+        # de resolverse cada vez que alguien lea el plazo.
+        payload = apply_default_timeout(
+            payload, broker_config.processing.default_task_timeout_seconds
+        )
         if not broker_config.sandbox.enabled and (
             "run_code" in payload.execution.agent.skills
             or "run_code" in payload.execution.proposer_skills

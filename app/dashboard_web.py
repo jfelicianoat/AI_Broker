@@ -370,7 +370,7 @@ def create_dashboard_router(
             {
                 "models": catalog,
                 "catalog_error": catalog_error,
-                "form": _prompt_tester_defaults(),
+                "form": _prompt_tester_defaults(config.processing.default_task_timeout_seconds),
                 "errors": [],
                 "request_preview": None,
                 "impact_preview": None,
@@ -1026,7 +1026,9 @@ def create_dashboard_router(
         payload: TaskCreateRequest | None = None
         agent_catalog, _ = await models()
         try:
-            payload = _build_prompt_tester_request(form)
+            payload = _build_prompt_tester_request(
+                form, config.processing.default_task_timeout_seconds
+            )
             if not config.sandbox.enabled and (
                 "run_code" in payload.execution.agent.skills
                 or "run_code" in payload.execution.proposer_skills
@@ -1072,7 +1074,7 @@ def create_dashboard_router(
             {
                 "models": catalog,
                 "catalog_error": catalog_error,
-                "form": {**_prompt_tester_defaults(), **form},
+                "form": {**_prompt_tester_defaults(config.processing.default_task_timeout_seconds), **form},
                 "errors": errors,
                 "request_preview": request_preview,
                 "impact_preview": impact_preview,

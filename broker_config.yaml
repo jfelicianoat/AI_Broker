@@ -3,6 +3,7 @@ server:
   port: 8765
   workers: 1
   cors_enabled: false
+  cors_allow_origins: []
   admin_token_env: AI_BROKER_ADMIN_TOKEN
   admin_keyring_service: ai-broker
   admin_keyring_username: dashboard_admin_token
@@ -18,6 +19,7 @@ processing:
   max_parallel_invocations: auto
   queue_max_size: 1000
   task_timeout_seconds: 3000
+  default_task_timeout_seconds: 2400
   max_task_attempts: 3
   unload_after_task: false
   idle_unload_seconds: 900.0
@@ -170,7 +172,7 @@ providers:
   ollama:
     enabled: true
     base_url: http://127.0.0.1:11434
-    timeout_seconds: 300.0
+    timeout_seconds: 2400.0
     unload_timeout_seconds: 10.0
     catalog_cache_seconds: 5.0
   deepseek:
@@ -191,7 +193,7 @@ providers:
     adapter: openai_compatible
     display_name: LM Studio
     base_url: http://127.0.0.1:1234/v1
-    timeout_seconds: 300.0
+    timeout_seconds: 2400.0
     api_key_env: null
     keyring_service: ai-broker
     keyring_username: lmstudio_api_key
@@ -333,16 +335,14 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-08-15T07:42:34.782488+00:00'
-      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
-        {"error":{"message":"Failed to load model \"qwen/qwen3-coder-30b\". Error:
-        Engine protocol startup was aborted.","type":"invalid_request_error","param":"model","code":null}}'
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-25T07:15:51.058875+00:00'
+      compatibility_error: null
       features:
         vision: false
         json_mode: false
         tools: true
-      features_checked_at: '2026-07-16T19:40:11.820365+00:00'
+      features_checked_at: '2026-08-25T07:16:19.623917+00:00'
     - name: qwen/qwen3.6-35b-a3b
       context_window: 32768
       input_cost_per_million: 0.0
@@ -515,6 +515,75 @@ providers:
         json_mode: false
         tools: true
       features_checked_at: '2026-08-06T21:44:28.357231+00:00'
+    - name: qwen3.8-27b-obliterated
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-25T07:10:23.321560+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-25T07:10:32.539237+00:00'
+    - name: huihui-qwen3.8-27b-abliterated
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-25T07:10:32.539278+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-25T07:12:00.976539+00:00'
+    - name: qwen3.8-27b-uncensored
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-25T07:12:00.976718+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-25T07:12:58.945842+00:00'
+    - name: gemma-4-e4b-it-obliterated
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-08-25T07:15:25.026994+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":"Engine protocol predict stream returned an error: {\"code\":500,\"message\":\"The
+        model produced output that does not match the expected peg-gemma4 format\",\"type\":\"server_error\"}"}'
+      features: {}
+      features_checked_at: null
+    - name: qwen3.8-27b-heretic-abliterated-uncensored
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-08-25T07:13:12.995033+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-08-25T07:14:03.584064+00:00'
   - id: nvidia
     enabled: true
     adapter: openai_compatible

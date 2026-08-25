@@ -98,6 +98,45 @@ def zero_cost_cloud_providers(config: BrokerConfig) -> list[str]:
     return zero
 
 
+def timeout_coherence_warnings(config: BrokerConfig) -> list[str]:
+    """Plazos configurados que cortan antes que el plazo de la tarea.
+
+    Existe porque el plazo de una tarea no es un número sino el menor de una
+    cadena —techo del broker, plazo por defecto, timeout HTTP del proveedor— y
+    subir el que no era es exactamente lo que pasó cuando una tarea moría a los
+    600 s con el techo en 3000. Ninguno de estos casos es ilegal (un techo está
+    para cortar), así que se avisa y se sigue; el error de TASK_TIMEOUT nombra
+    después cuál mandó de verdad.
+
+    El timeout del proveedor solo se compara para los despliegues locales: es
+    ahí donde la espera larga es legítima (un modelo grande cargando desde
+    disco) y no un servicio remoto colgado.
+    """
+    processing = config.processing
+    efectivo = min(processing.default_task_timeout_seconds, processing.task_timeout_seconds)
+    avisos: list[str] = []
+    if processing.default_task_timeout_seconds > processing.task_timeout_seconds:
+        avisos.append(
+            f"processing.default_task_timeout_seconds={processing.default_task_timeout_seconds} s "
+            f"no se alcanza nunca: processing.task_timeout_seconds={processing.task_timeout_seconds} s "
+            "es el techo y manda sobre él (el plazo efectivo es el menor de los dos)"
+        )
+    locales: list[tuple[str, float]] = []
+    if config.providers.ollama.enabled:
+        locales.append(("providers.ollama.timeout_seconds", config.providers.ollama.timeout_seconds))
+    for item in config.providers.custom:
+        if item.enabled and is_local_deployment(item.deployment):
+            locales.append((f"providers.custom[{item.id}].timeout_seconds", item.timeout_seconds))
+    for clave, valor in locales:
+        if valor < efectivo:
+            avisos.append(
+                f"{clave}={valor:g} s aborta la llamada antes de que venza el plazo de la tarea "
+                f"({efectivo} s): un modelo local grande que tarde más en cargar y responder "
+                "fallará por el proveedor, no por el plazo"
+            )
+    return avisos
+
+
 async def auto_start_local_provider_servers(config: BrokerConfig, logger: logging.Logger) -> None:
     for provider in config.providers.custom:
         if not provider.enabled or not provider.auto_start:
