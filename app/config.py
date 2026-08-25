@@ -9,6 +9,19 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+# El default del contrato y el del operador son el mismo número a propósito:
+# quien no configura nada obtiene lo que el esquema promete.
+from app.schemas import DEFAULT_TASK_TIMEOUT_SECONDS
+
+# Techo por defecto de una tarea. Está POR ENCIMA del plazo por defecto a
+# propósito y esa es toda su razón de ser: el plazo efectivo es el menor de los
+# dos, así que un techo por debajo dejaría default_task_timeout_seconds de
+# adorno —subirlo no haría nada— que es exactamente la trampa que costó
+# encontrar por qué una tarea moría a los 600 s. Bajarlo por debajo del plazo
+# por defecto sigue siendo legítimo (un techo está para cortar), pero el
+# arranque lo avisa: ver app.startup.timeout_coherence_warnings.
+DEFAULT_TASK_TIMEOUT_CEILING_SECONDS = 3000
+
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
@@ -91,7 +104,19 @@ class ProcessingConfig(BaseModel):
     max_active_workflows: int = 1
     max_parallel_invocations: int | str = "auto"
     queue_max_size: int = 1000
-    task_timeout_seconds: int = 300
+    # Techo del plazo: ninguna tarea puede pasar de aquí, pida lo que pida.
+    task_timeout_seconds: int = Field(
+        default=DEFAULT_TASK_TIMEOUT_CEILING_SECONDS, ge=1, le=86400
+    )
+    # Plazo que se le pone a la tarea cuya petición no trae `execution.
+    # timeout_seconds`. Antes ese default era un número fijo en el esquema y no
+    # había forma de cambiarlo sin tocar código: un modelo local grande moría
+    # por timeout mientras aún se cargaba desde disco. El plazo real es el
+    # MENOR de este y task_timeout_seconds, así que subir uno sin mirar el otro
+    # no cambia nada.
+    default_task_timeout_seconds: int = Field(
+        default=DEFAULT_TASK_TIMEOUT_SECONDS, ge=1, le=86400
+    )
     max_task_attempts: int = Field(default=3, ge=1, le=100)
     unload_after_task: bool = True
     # Segundos que un modelo local puede quedarse en memoria con el broker
@@ -568,7 +593,13 @@ class LoggingConfig(BaseModel):
 class OllamaConfig(BaseModel):
     enabled: bool = True
     base_url: str = "http://127.0.0.1:11434"
-    timeout_seconds: float = Field(default=300, gt=0)
+    # Deadline HTTP de la inferencia. Alineado con el plazo por defecto de una
+    # tarea y no en 300 como los proveedores remotos: Ollama es siempre local y
+    # ahí la espera larga es legítima —un modelo grande cargando desde disco no
+    # ha fallado, está trabajando—. Por debajo del plazo de la tarea, quien
+    # cortaría sería este número, y el error diría "el proveedor falló" en vez
+    # de "se acabó el plazo".
+    timeout_seconds: float = Field(default=DEFAULT_TASK_TIMEOUT_SECONDS, gt=0)
     unload_timeout_seconds: float = Field(default=10, gt=0)
     catalog_cache_seconds: float = Field(default=5.0, ge=0)
 
@@ -611,6 +642,8 @@ class OpenAICompatibleProviderConfig(BaseModel):
     adapter: Literal["openai_compatible"] = "openai_compatible"
     display_name: str | None = Field(default=None, max_length=120)
     base_url: str = Field(min_length=1, max_length=512)
+    # 300 es el default de un proveedor REMOTO; uno local que no declare el
+    # suyo se sube al plazo por defecto de una tarea (ver validate_provider_id).
     timeout_seconds: float = Field(default=300, gt=0)
     api_key_env: str | None = Field(default="NVIDIA_API_KEY", max_length=120)
     keyring_service: str = Field(default="ai-broker", max_length=120)
@@ -656,6 +689,18 @@ class OpenAICompatibleProviderConfig(BaseModel):
             self.api_key_env = None
         if self.keyring_username is None:
             self.keyring_username = f"{self.id}_api_key"
+        if (
+            self.deployment == "local"
+            and "timeout_seconds" not in self.model_fields_set
+            and self.timeout_seconds < DEFAULT_TASK_TIMEOUT_SECONDS
+        ):
+            # Un proveedor local que no declara plazo hereda el de la tarea, no
+            # el de un servicio remoto: cargar un modelo grande desde disco
+            # tarda minutos y cortar a los 300 s convertía "está cargando" en
+            # "el proveedor falló". Solo cuando NO se ha elegido a mano: un 300
+            # explícito sigue siendo una decisión y se respeta (el arranque la
+            # avisa, ver app.startup.timeout_coherence_warnings).
+            self.timeout_seconds = float(DEFAULT_TASK_TIMEOUT_SECONDS)
         return self
 
 

@@ -22,6 +22,7 @@ from app.config import (
 from app.logging_config import configure_logging
 from app.providers.base import infer_openai_compatible_capabilities
 from app.schemas import (
+    DEFAULT_TASK_TIMEOUT_SECONDS,
     DataClassification,
     ModelReference,
     OutputFormat,
@@ -106,6 +107,7 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'task_affinity_exclude_code': ('Apartar en código', 'Idoneidad por tipo de tarea'),
     'task_affinity_exclude_long_context': ('Apartar en contexto largo', 'Idoneidad por tipo de tarea'),
     'task_affinity_exclude_prose': ('Apartar en prosa', 'Idoneidad por tipo de tarea'),
+    'default_task_timeout_seconds': ('Plazo por defecto de una tarea (segundos)', 'Configuración'),
     'task_timeout_seconds': ('Timeout global por tarea (segundos)', 'Configuración'),
     'unified_memory_budget_gb': ('Presupuesto memoria unificada (GB)', 'Configuración'),
     'vram_safety_margin_gb': ('Margen seguridad VRAM (GB)', 'Configuración'),
@@ -128,7 +130,7 @@ def _field_label(key: str) -> str:
 
 
 
-def _prompt_tester_defaults() -> dict[str, str]:
+def _prompt_tester_defaults(default_timeout_seconds: int = DEFAULT_TASK_TIMEOUT_SECONDS) -> dict[str, str]:
     return {
         "input_mode": "prompt",
         "prompt": "",
@@ -145,7 +147,7 @@ def _prompt_tester_defaults() -> dict[str, str]:
         # Opt-in: por defecto el probador sigue enseñando al router, como
         # siempre. Se marca cuando se está reproduciendo un fallo a propósito.
         "exclude_from_model_learning": "",
-        "timeout_seconds": "600",
+        "timeout_seconds": str(default_timeout_seconds),
         "max_cost_usd": "",
         "priority": "100",
         "single_model": "",
@@ -183,6 +185,7 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
     updated_data = updated.model_dump(mode="json")
     checks = [
         ("processing.task_timeout_seconds", "Timeout global por tarea"),
+        ("processing.default_task_timeout_seconds", "Plazo por defecto de una tarea"),
         ("processing.queue_max_size", "Tamaño máximo de cola"),
         ("processing.max_parallel_invocations", "Máx. invocaciones paralelas slow"),
         ("resources.local_vram_budget_gb", "Presupuesto VRAM local"),
@@ -361,6 +364,13 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
     processing["task_timeout_seconds"] = _int_range_field(
         form, "task_timeout_seconds", minimum=30, maximum=86400
     )
+    # Guard de presencia (como el de unified_memory_budget_gb): sin él, un
+    # formulario que no traiga el campo —cliente antiguo, POST parcial— lo
+    # dejaría en el mínimo y toda tarea sin plazo propio moriría en 30 s.
+    if form.get("default_task_timeout_seconds") is not None:
+        processing["default_task_timeout_seconds"] = _int_range_field(
+            form, "default_task_timeout_seconds", minimum=30, maximum=86400
+        )
     processing["queue_max_size"] = _int_range_field(
         form, "queue_max_size", minimum=1, maximum=100000
     )
@@ -856,7 +866,10 @@ def _apply_probe_results(
     provider_config.models = list(updated_by_name.values())
 
 
-def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
+def _build_prompt_tester_request(
+    form: dict[str, str],
+    default_timeout_seconds: int = DEFAULT_TASK_TIMEOUT_SECONDS,
+) -> TaskCreateRequest:
     prompt = form.get("prompt", "")
     if not prompt.strip():
         raise PromptTesterError("El prompt no puede estar vacio.")
@@ -907,7 +920,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "strategy": "single",
             "preset": "fast",
             "scheduling": "sequential",
-            "timeout_seconds": _int_field(form, "timeout_seconds", 600),
+            "timeout_seconds": _int_field(form, "timeout_seconds", default_timeout_seconds),
             "long_context": "map_reduce" if _checked(form, "long_context_map_reduce") else "fail",
         }
         model_requirements = {
@@ -947,7 +960,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "max_proposers": len(proposers),
             "max_judges": 1,
             "max_rounds": 1,
-            "timeout_seconds": _int_field(form, "timeout_seconds", 600),
+            "timeout_seconds": _int_field(form, "timeout_seconds", default_timeout_seconds),
             "proposer_skills": proposer_skills,
             "selection": {
                 "mode": "manual",
@@ -982,7 +995,7 @@ def _build_prompt_tester_request(form: dict[str, str]) -> TaskCreateRequest:
             "strategy": "agent",
             "preset": "fast",
             "scheduling": "sequential",
-            "timeout_seconds": _int_field(form, "timeout_seconds", 600),
+            "timeout_seconds": _int_field(form, "timeout_seconds", default_timeout_seconds),
             "agent": {
                 "skills": skills,
                 "max_iterations": _int_range_field(form, "agent_max_iterations", minimum=1, maximum=20),

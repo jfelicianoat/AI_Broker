@@ -341,7 +341,7 @@ Un grupo sin ninguna tarea devuelve `404 GROUP_NOT_FOUND` en vez de ceros, para 
 ## 6. Elegir estrategia
 
 ```json
-{ "execution": { "strategy": "single", "timeout_seconds": 600 } }
+{ "execution": { "strategy": "single", "timeout_seconds": 2400 } }
 ```
 
 | Estrategia | Qué hace | Presets |
@@ -355,7 +355,7 @@ Campos comunes:
 
 | Campo | Default | Notas |
 |---|---|---|
-| `timeout_seconds` | `600` | Plazo total de la tarea |
+| `timeout_seconds` | `processing.default_task_timeout_seconds` (2400) | Plazo total de la tarea. Omitirlo hereda el plazo configurado en el broker; el techo `processing.task_timeout_seconds` manda sobre ambos |
 | `long_context` | `"fail"` | Ver §6.4 |
 | `scheduling` | `adaptive` | Solo relevante en `mixture_of_agents/slow` |
 

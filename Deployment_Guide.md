@@ -658,7 +658,8 @@ processing:
   max_active_workflows: 1
   max_parallel_invocations: "auto"
   queue_max_size: 1000
-  task_timeout_seconds: 300
+  task_timeout_seconds: 3000          # techo: manda sobre el plazo de abajo
+  default_task_timeout_seconds: 2400  # plazo si la petición no trae el suyo
   unload_after_task: true
   idle_unload_seconds: 0.0
   auto_dispatch: true
@@ -669,7 +670,7 @@ providers:
   ollama:
     enabled: true
     base_url: "http://127.0.0.1:11434"
-    timeout_seconds: 300
+    timeout_seconds: 2400   # local: no debe cortar antes que el plazo de la tarea
     unload_timeout_seconds: 10
   deepseek:
     enabled: false

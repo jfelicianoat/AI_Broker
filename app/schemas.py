@@ -397,6 +397,17 @@ class AgentExecutionConfig(StrictBaseModel):
         return self
 
 
+# Plazo que se le da a una tarea cuya petición no trae el suyo. Es el default
+# del contrato y también el del mando del operador
+# (processing.default_task_timeout_seconds), que es lo que el API aplica de
+# verdad: así el número se puede cambiar sin tocar código.
+#
+# 2400 y no 600: un modelo local grande paga la carga desde disco DENTRO de su
+# primera invocación, y varios minutos de carga agotaban el plazo antes de que
+# generase el primer token. El techo sigue siendo processing.task_timeout_seconds.
+DEFAULT_TASK_TIMEOUT_SECONDS = 2400
+
+
 class ExecutionConfig(StrictBaseModel):
     strategy: ExecutionStrategy = ExecutionStrategy.single
     preset: ExecutionPreset = ExecutionPreset.fast
@@ -411,7 +422,7 @@ class ExecutionConfig(StrictBaseModel):
     max_proposers: int = Field(default=3, ge=1, le=5)
     max_judges: int = Field(default=1, ge=0, le=2)
     max_rounds: int = Field(default=1, ge=1, le=2)
-    timeout_seconds: int = Field(default=600, ge=1)
+    timeout_seconds: int = Field(default=DEFAULT_TASK_TIMEOUT_SECONDS, ge=1)
     early_stop: bool = True
     selection: SelectionPolicy = Field(default_factory=SelectionPolicy)
     agent: AgentExecutionConfig = Field(default_factory=AgentExecutionConfig)
@@ -663,6 +674,25 @@ class TaskCreateRequest(StrictBaseModel):
             if self.output.format != OutputFormat.json:
                 raise ValueError("embedding requires output.format=json")
         return self
+
+
+def apply_default_timeout(request: TaskCreateRequest, default_seconds: int) -> TaskCreateRequest:
+    """Pone el plazo del operador a la petición que no trajo el suyo.
+
+    Se aplica al ENTRAR (antes de persistir la tarea), no al ejecutarla, para
+    que el plazo que se ve en la petición guardada, en el panel y en el error
+    de timeout sea el mismo que se aplicó. Distingue "no lo pidió" de "pidió
+    justo este número" por `model_fields_set`, igual que la frontera de datos
+    hace con `agent.skills`: un cliente que fija su plazo manda sobre el
+    default del operador, y quien calla hereda la configuración del broker.
+
+    No es el plazo definitivo: processing.task_timeout_seconds sigue siendo el
+    techo y el coordinador se queda con el menor de los dos.
+    """
+    if "timeout_seconds" in request.execution.model_fields_set:
+        return request
+    execution = request.execution.model_copy(update={"timeout_seconds": default_seconds})
+    return request.model_copy(update={"execution": execution})
 
 
 def requires_vision(request: TaskCreateRequest) -> bool:

@@ -431,6 +431,18 @@ class ConsensusCoordinator:
             # tarea que sí estaba generando: son dos problemas distintos y la
             # salida de cada uno también.
             stalled = self._timeout_context(repository, task_id)
+            # Qué mando cortó la tarea. Decir "súbele el timeout" sin nombrar
+            # cuál de los dos manda mandaba a tocar el que no era: el plazo
+            # efectivo es el menor, y subir el otro no cambia nada.
+            cap = self.scheduler.config.processing.task_timeout_seconds
+            pedido = request.execution.timeout_seconds
+            binding = (
+                f"processing.task_timeout_seconds ({cap} s), el techo del broker"
+                if cap <= pedido else
+                f"execution.timeout_seconds de la petición ({pedido} s), cuyo valor "
+                "cuando no se envía es processing.default_task_timeout_seconds"
+            )
+            detail = stalled["detail"]
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
@@ -439,9 +451,11 @@ class ConsensusCoordinator:
                     "code": "TASK_TIMEOUT",
                     "message": (
                         f"La tarea superó el timeout efectivo de {effective_timeout} segundos"
-                        f"{stalled['detail']}"
+                        f"{detail if detail.endswith('.') else detail + '.'} "
+                        f"El plazo lo fijó {binding}: súbelo o usa un modelo menor."
                     ),
                     "retryable": True,
+                    "timeout_bound_by": binding,
                     **stalled["context"],
                 },
                 clear_queue_position=True,
@@ -2865,7 +2879,7 @@ class ConsensusCoordinator:
             "detail": (
                 f". Se quedó esperando a {identidad} en el rol '{pendiente.role}', que nunca "
                 "respondió. En un modelo local grande, lo habitual es que siga cargando desde "
-                "disco: súbele processing.task_timeout_seconds o usa un modelo menor."
+                "disco."
             ),
             "context": {
                 "stalled_at": "invocation",
