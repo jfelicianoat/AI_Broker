@@ -1313,6 +1313,20 @@ class HealthResponse(StrictBaseModel):
     dependencies: dict[str, HealthDependency]
 
 
+class AuthCheckResponse(StrictBaseModel):
+    """Respuesta de `GET /api/v1/auth/check`.
+
+    `authenticated` solo puede ser True: llegar a la respuesta significa que
+    el guard dejó pasar. Lo que de verdad aporta el endpoint es
+    `auth_required`, que distingue "tu credencial vale" de "este broker no
+    pide ninguna" — sin ese matiz un cliente da por bueno cualquier token
+    contra un broker sin token configurado.
+    """
+
+    authenticated: Literal[True] = True
+    auth_required: bool
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 

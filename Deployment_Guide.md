@@ -710,6 +710,7 @@ El Broker consulta primero `DEEPSEEK_API_KEY` y después Credential Manager. Si 
 - Permitir TCP 8765 exclusivamente desde la subred privada o desde la IP de la máquina principal.
 - No configurar redirección de puertos en el router.
 - Escuchar fuera de loopback exige token admin (env `AI_BROKER_ADMIN_TOKEN` o keyring): sin credencial el broker rechaza el arranque. Con token configurado, las mutaciones y las lecturas que contienen prompts/resultados (API y dashboard) piden credencial; `server.allow_unauthenticated_lan: true` es el único opt-out y queda registrado con warning. Si el servicio sale de la LAN, TLS pasa a ser obligatorio antes del despliegue.
+- Queda alcanzable sin credencial un conjunto acotado de metadatos: `/health*`, `/api/v1/capabilities`, `/api/v1/models*` y el `GET` de `/api/v1/queue`. Ni prompts, ni resultados, ni uso, ni recursos, ni la documentación del API (`/docs`, `/redoc` y `/openapi.json` exigen credencial). Para verificar el token de un cliente desde la LAN, `GET /api/v1/auth/check` (`403` si no vale); comprobarlo contra `/health` no prueba nada porque responde `200` a cualquiera.
 
 ### Pruebas de aceptación previas al uso
 

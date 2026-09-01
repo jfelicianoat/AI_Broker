@@ -11,7 +11,12 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request, Response, Uplo
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.openapi.docs import (
+    get_redoc_html,
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.admin_auth import (
@@ -65,6 +70,7 @@ from app.schemas import (
     AGENT_SKILLS,
     DEFAULT_AGENT_SKILLS,
     EGRESS_AGENT_SKILLS,
+    AuthCheckResponse,
     BrokerCapabilitiesResponse,
     DashboardResourcesResponse,
     DashboardSummaryResponse,
@@ -307,7 +313,17 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             await provider.close()
             db.close()
 
-    app = FastAPI(title="AI Broker", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="AI Broker",
+        version="0.1.0",
+        lifespan=lifespan,
+        # Las rutas de documentación las registra FastAPI en `setup()` y no
+        # admiten dependencias, así que se apagan aquí y se vuelven a declarar
+        # más abajo detrás del guard admin.
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+    )
     if broker_config.server.cors_enabled:
         # Solo los orígenes declarados, y sin credenciales de navegador: la
         # autenticación del API es la cabecera `X-Admin-Token`, que la app
@@ -878,7 +894,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)
-    def get_usage(month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$")) -> UsageResponse:
+    def get_usage(
+        request: Request,
+        month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    ) -> UsageResponse:
+        # Gasto, tokens y latencias por proveedor: no lleva prompts, pero
+        # describe cuánto y con quién trabajas. Protegido desde 2026-09.
+        verify_admin_access(request, broker_config)
         selected_month = month or datetime.now(timezone.utc).strftime("%Y-%m")
         try:
             return dashboard_queries.usage(selected_month)
@@ -887,8 +909,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/api/v1/dashboard/summary", response_model=DashboardSummaryResponse)
     def dashboard_summary(
+        request: Request,
         window_hours: int = Query(default=24, ge=1, le=24 * 90),
     ) -> DashboardSummaryResponse:
+        # Volumen, tasa de exito y coste agregados. Sus vecinos de
+        # /api/v1/dashboard/* siempre exigieron credencial; este no, sin que
+        # hubiera decisión escrita detrás. Protegido desde 2026-09.
+        verify_admin_access(request, broker_config)
         return dashboard_queries.summary(
             window_hours=window_hours, lane_capacities=lane_capacities(broker_config),
         )
@@ -923,8 +950,68 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
 
     @app.get("/api/v1/dashboard/resources", response_model=DashboardResourcesResponse)
-    async def dashboard_resources() -> DashboardResourcesResponse:
+    async def dashboard_resources(request: Request) -> DashboardResourcesResponse:
+        # Presupuesto de VRAM, modelos cargados y paralelismo: inventario del
+        # hardware de quien hospeda el broker. Protegido desde 2026-09.
+        verify_admin_access(request, broker_config)
         return await load_dashboard_resources(provider, scheduler, broker_config)
+
+    @app.get("/api/v1/auth/check", response_model=AuthCheckResponse)
+    def auth_check(request: Request) -> AuthCheckResponse:
+        """Comprueba una credencial admin sin efectos secundarios.
+
+        Existe porque sin él no había forma barata de validar un token: un
+        cliente que quería comprobarlo acababa llamando a /health o
+        /capabilities —abiertos a propósito— y daba por bueno cualquier
+        cadena. Con token configurado responde 403 a quien no lo traiga.
+
+        `auth_required=false` es el otro medio caso: el broker no pide
+        credencial (loopback sin token, u opt-out LAN), así que el cliente
+        debe decir "este broker no exige token" en vez de "token válido".
+        """
+        verify_admin_access(request, broker_config)
+        try:
+            configured = resolve_admin_token(broker_config) is not None
+        except AdminTokenLookupError:
+            # verify_admin_access ya decidió que se podía pasar: en loopback
+            # (o con el opt-out) un keyring roto equivale a "sin token"; fuera
+            # de ahí habría respondido 503 y no se llega a esta línea.
+            configured = False
+        return AuthCheckResponse(auth_required=configured)
+
+    # --- Documentación del API, detrás de credencial -------------------------
+    # FastAPI la sirve abierta por defecto. El esquema enumera cada ruta, sus
+    # parámetros y sus modelos: es el mapa del broker, y no tiene por qué
+    # leerlo quien no puede usarlo.
+    #
+    # Swagger UI y ReDoc piden `/openapi.json` desde el navegador y no pueden
+    # añadir la cabecera `X-Admin-Token`, así que abrir /docs a mano exige la
+    # cookie de sesión del panel (pasar antes por /dashboard/login). Un cliente
+    # programático usa la cabecera contra /openapi.json y no necesita la UI.
+
+    @app.get("/openapi.json", include_in_schema=False)
+    def openapi_schema(request: Request) -> JSONResponse:
+        verify_admin_access(request, broker_config)
+        return JSONResponse(app.openapi())
+
+    @app.get("/docs", include_in_schema=False)
+    def swagger_ui(request: Request) -> HTMLResponse:
+        verify_admin_access(request, broker_config)
+        return get_swagger_ui_html(
+            openapi_url="/openapi.json",
+            title=f"{app.title} - API",
+            oauth2_redirect_url="/docs/oauth2-redirect",
+        )
+
+    @app.get("/docs/oauth2-redirect", include_in_schema=False)
+    def swagger_ui_oauth2_redirect(request: Request) -> HTMLResponse:
+        verify_admin_access(request, broker_config)
+        return get_swagger_ui_oauth2_redirect_html()
+
+    @app.get("/redoc", include_in_schema=False)
+    def redoc_ui(request: Request) -> HTMLResponse:
+        verify_admin_access(request, broker_config)
+        return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - API")
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

@@ -95,13 +95,40 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 ## 3. Autenticación
 
-Si el broker tiene token admin configurado, **todas** las rutas `/api/v1/*` lo exigen:
+Si el broker tiene token admin configurado, lo exigen todas las rutas que envían trabajo o devuelven contenido:
 
 ```http
 X-Admin-Token: <token>
 ```
 
 Un broker en loopback sin token configurado acepta peticiones sin cabecera. Un broker que escucha fuera de loopback **no arranca** sin token, salvo opt-out explícito. Si recibes `401`/`403`, es esto.
+
+### Qué responde sin credencial
+
+Un puñado de rutas contesta `200` siempre, con token o sin él. Son metadatos —estado, catálogo, forma del contrato— y no llevan prompts, resultados, gasto ni inventario de hardware:
+
+`/health`, `/health/live`, `/health/ready`, `/api/v1/capabilities`, `/api/v1/models`, `/api/v1/models/availability`, `/api/v1/models/context` y `GET /api/v1/queue` (solo ids, estados y posiciones; reordenar con `PATCH` sí exige credencial).
+
+Todo lo demás bajo `/api/v1/*` pide credencial: crear y leer tareas, artefactos, ficheros, uso, resúmenes del panel y recursos. También `/openapi.json`, `/docs` y `/redoc`: el esquema enumera cada ruta, parámetro y modelo del broker. Swagger UI no puede poner la cabecera `X-Admin-Token` por su cuenta, así que abrir `/docs` en un navegador exige haber pasado antes por `/dashboard/login`; desde código, `GET /openapi.json` con la cabecera funciona igual que cualquier otra ruta.
+
+### Cómo validar un token
+
+**No uses `/health` ni `/api/v1/capabilities` para comprobar una credencial.** Responden `200` a cualquiera, así que una pantalla de conexión construida sobre ellas da por bueno un token inventado y el fallo real no aparece hasta la primera tarea. Para eso está:
+
+```http
+GET /api/v1/auth/check
+```
+
+```json
+{ "authenticated": true, "auth_required": true }
+```
+
+- `200` con `auth_required: true` — tu credencial vale.
+- `200` con `auth_required: false` — el broker **no pide ninguna credencial** (loopback sin token, u opt-out LAN). No significa que tu token sea correcto: significa que da igual lo que envíes. Dilo así en tu interfaz.
+- `403 ADMIN_AUTH_REQUIRED` — falta el token o no es el correcto.
+- `503 ADMIN_AUTH_BACKEND_UNAVAILABLE` — el llavero del sistema falla; reintentar con otro token no arregla nada.
+
+No tiene efectos secundarios ni cuesta nada, pero sigue siendo una comprobación de arranque y de reintento tras un `403`, no algo que hacer antes de cada petición.
 
 **El token cambia en cada arranque del broker** salvo que se fije `AI_BROKER_ADMIN_TOKEN` desde fuera. Para una app de larga vida eso significa que un `403` a mitad de trabajo casi nunca es un fallo de integración: es que el broker se ha reiniciado. Trátalo como "hay que renovar credencial y reintentar", no como tarea fallida — **tus tareas siguen ahí**. En particular, una tarea en `waiting_for_tools` sobrevive intacta al reinicio, con su conversación congelada, y te espera. Lo que sí se toca en el arranque son las tareas que estaban ejecutándose: se reencolan, o fallan con `RECOVERY_AMBIGUOUS_REMOTE_CALL` si tenían una llamada remota en vuelo que pudo facturarse.
 

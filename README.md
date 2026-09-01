@@ -137,6 +137,7 @@ La salida rechazada se guarda en la invocación con su coste real, que es la ún
 - **Enlaces cotejados:** los que cita un agente se comparan con los que consultó de verdad; los que no salen de ninguna consulta se marcan en `result.agent.citations.unsupported`. Determinista, sin otro modelo opinando.
 - **Sandbox:** el código generado por modelos jamás toca el host (sección 4).
 - **Panel:** CSRF de doble envío + validación `Origin`/`Referer`, cabeceras CSP/`X-Frame-Options`/`nosniff`, sesión admin con cookie HttpOnly y caducidad deslizante. Con token admin configurado (env `AI_BROKER_ADMIN_TOKEN` o keyring `ai-broker/dashboard_admin_token`), toda lectura con prompts/resultados exige credencial. Arranque fail-closed: el broker se niega a escuchar fuera de loopback sin token (opt-out explícito `allow_unauthenticated_lan`).
+- **Superficie sin credencial:** solo metadatos —`/health*`, `/api/v1/capabilities`, `/api/v1/models*` y el `GET` de `/api/v1/queue` (ids, estados y posiciones)—. Nunca prompts, resultados, uso, recursos ni el esquema OpenAPI (`/openapi.json`, `/docs` y `/redoc` piden credencial, al contrario que por defecto en FastAPI). El reparto está enumerado ruta a ruta en `tests/test_auth_surface.py`: un endpoint nuevo sin clasificar rompe el test en vez de nacer abierto. Para comprobar una credencial, `GET /api/v1/auth/check`; validar contra `/health` da por bueno cualquier token.
 - **Credenciales:** claves de API en variables de entorno o Windows Credential Manager (keyring), nunca en el YAML.
 - **Logs:** JSON Lines con rotación; el access log no registra cuerpos, prompts ni respuestas.
 
@@ -236,6 +237,7 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | `/api/v1/dashboard/*` | GET | Read models: summary (con `lanes`), tasks (filtrable por `kind`), resources |
 | `/api/v1/dispatcher/tick` | POST | Tick manual del carril de inferencia (el dispatcher es autónomo) |
 | `/api/v1/dispatcher/ingestion/tick` | POST | Tick manual del carril de conversiones |
+| `/api/v1/auth/check` | GET | Valida la credencial admin: `200` con `auth_required`, `403` si no vale |
 | `/health` `/health/live` `/health/ready` | GET | Salud detallada, liveness, readiness |
 
 **Detalle técnico del contrato:** validación Pydantic estricta (`extra="forbid"`; inválido → `422 CONTRACT_VALIDATION_FAILED` con campos). Idempotencia por `idempotency_key` + hash canónico del cuerpo: mismo cuerpo → `200` con la tarea original; cuerpo distinto → `409 IDEMPOTENCY_CONFLICT`. Adjuntos: solo `type: "broker_file"` con `file_id` (por `metadata.file_id` o `uri: broker://files/{id}`); ficheros no listos → `409 ATTACHED_FILE_NOT_READY`. Estados de progreso: `queued → routing/planning/resource_planning → generating|proposing → (evaluating) → synthesizing → completed`, más `waiting_for_tools`, el `converting` del carril de ingesta, y terminales `completed|failed|cancelled` desde cualquier estado. Recuperación al arranque: tareas activas vuelven a `queued` con `attempt+1` hasta `max_task_attempts` (después `failed` con `TASK_RETRY_LIMIT_EXCEEDED`). Guía de integración completa: [`Agent_AI_Broker.md`](Agent_AI_Broker.md).
