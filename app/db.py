@@ -310,6 +310,17 @@ class Database:
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN fingerprint_hash TEXT")
             if "fingerprint_json" not in invocation_columns:
                 self._conn.execute("ALTER TABLE model_invocations ADD COLUMN fingerprint_json TEXT")
+            if "prompt_compression_json" not in invocation_columns:
+                # Compresión de prompt pedida y aplicada de verdad en esta
+                # invocación ({requested, effective}). Va en la fila y no se
+                # deriva de `tasks` al leer porque el broker fuerza `off` en las
+                # invocaciones que procesan contenido generado —fragmentos de
+                # map-reduce, síntesis de segunda ronda, juez de confianza—: la
+                # política de la tarea no describe lo que le pasó a cada
+                # llamada. NULL en filas previas, que es lo que son: sin dato.
+                self._conn.execute(
+                    "ALTER TABLE model_invocations ADD COLUMN prompt_compression_json TEXT"
+                )
             file_columns = {
                 row["name"] for row in self._conn.execute("PRAGMA table_info(ingested_files)").fetchall()
             }

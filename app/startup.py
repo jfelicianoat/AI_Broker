@@ -11,7 +11,12 @@ import logging
 from typing import Any
 from urllib.parse import urlparse
 
-from app.admin_auth import LOOPBACK_HOSTS, AdminTokenLookupError, resolve_admin_token
+from app.admin_auth import (
+    LOOPBACK_HOSTS,
+    AdminTokenLookupError,
+    publish_session_admin_token,
+    resolve_admin_token,
+)
 from app.config import BrokerConfig
 from app.schemas import is_local_deployment
 
@@ -79,6 +84,59 @@ def ensure_admin_credential_for_exposed_host(config: BrokerConfig) -> None:
             "Guarda un token (env o keyring) o activa server.allow_unauthenticated_lan=true "
             "bajo tu responsabilidad."
         )
+
+
+def publish_admin_credential_for_local_clients(
+    config: BrokerConfig, logger: logging.Logger,
+) -> None:
+    """Publica el token de esta sesión para los procesos co-ubicados.
+
+    Se llama desde create_app y no desde scripts/run_broker.py a propósito: el
+    broker no siempre arranca por ahí (uvicorn directo, un servicio de Windows,
+    los tests), y una credencial que solo aparece por una de las vías es una
+    credencial en la que un cliente no puede confiar. Aquí se resuelve el token
+    efectivo —el que run_broker acaba de poner en el entorno, o el que el
+    operador fijó— y se publica ese.
+
+    Un fallo NO tumba el arranque: el broker sirve igual y quien está delante
+    tiene el token en consola. Lo que no puede es pasar callando, porque el
+    síntoma en el otro extremo son 403 sin explicación.
+    """
+    if config.server.publish_session_token == "none":
+        return
+    try:
+        token = resolve_admin_token(config)
+    except AdminTokenLookupError as error:
+        logger.warning(
+            "admin.session_token_publish_failed",
+            extra={"event": "admin.session_token_publish_failed", "detail": str(error)},
+        )
+        return
+    if not token:
+        logger.warning(
+            "admin.session_token_publish_skipped",
+            extra={
+                "event": "admin.session_token_publish_skipped",
+                "reason": "no_token_configured",
+            },
+        )
+        return
+    try:
+        username = publish_session_admin_token(config, token)
+    except Exception as error:
+        logger.warning(
+            "admin.session_token_publish_failed",
+            extra={"event": "admin.session_token_publish_failed", "detail": str(error)},
+        )
+        return
+    logger.info(
+        "admin.session_token_published",
+        extra={
+            "event": "admin.session_token_published",
+            "service": config.server.admin_keyring_service,
+            "username": username,
+        },
+    )
 
 
 def zero_cost_cloud_providers(config: BrokerConfig) -> list[str]:

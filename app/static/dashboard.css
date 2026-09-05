@@ -133,6 +133,19 @@ a { color: inherit; }
 .button.compact { min-height: 30px; font-size: var(--text-body); }
 .button:focus-visible, .link-button:focus-visible, a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
+/* Barra de selección de la cola. Casilla de 18px y texto de dato (no de
+   etiqueta): es un control que se usa a ojo, fila por fila, y el objetivo de
+   clic pequeño es justo lo que hace fallar la selección múltiple. */
+.queue-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border-soft); background: var(--well); }
+.queue-toolbar .table-filter { width: 260px; }
+.queue-selection { color: var(--text-4); font-size: var(--text-body); font-variant-numeric: tabular-nums; }
+.queue-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-left: auto; }
+.select-cell { width: 34px; padding-right: 0; }
+.select-cell input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--teal); cursor: pointer; }
+.select-cell input[type="checkbox"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+tbody tr:has(.select-cell input:checked) { background: var(--teal-fill); }
+.queue-no-matches { margin: 0; padding: 14px 16px; color: var(--muted); font-size: var(--text-body); }
+
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: var(--text-body); font-variant-numeric: tabular-nums; }
 th { height: 40px; color: var(--muted); text-align: left; font-weight: 560; background: var(--elevated); border-bottom: 1px solid var(--border); white-space: nowrap; }
@@ -156,9 +169,10 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .badge-completed { border-color: var(--green-line); background: var(--green-fill); color: var(--green-ink); }
 .badge-failed { border-color: var(--red-line); background: var(--red-fill); color: var(--red-ink); }
 .badge-cancelled { border-color: var(--muted-line); background: var(--raised); color: var(--text-4); }
-/* Esperando memoria no es un fallo: comparte la familia ámbar de "en cola",
-   que es lo que de verdad es — una tarea pendiente de turno. */
-.badge-waiting_for_memory { border-color: var(--amber-line); background: var(--amber-fill); color: var(--amber-ink); }
+/* Esperar memoria o dependencias no es un fallo: comparten la familia ámbar
+   de "en cola", que es lo que de verdad son — tareas pendientes de turno. */
+.badge-waiting_for_memory,
+.badge-waiting_for_dependencies { border-color: var(--amber-line); background: var(--amber-fill); color: var(--amber-ink); }
 .memory-wait { display: block; margin-top: 4px; color: var(--text-3); }
 .badge-degraded { border-color: var(--amber-line); color: var(--amber-ink); }
 .badge-unavailable { border-color: var(--red-line); color: var(--red-ink); }

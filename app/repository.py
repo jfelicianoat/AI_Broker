@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,13 @@ from app.artifacts import ArtifactRecord
 from app.db import Database, dumps_json, loads_json
 from app.providers import ModelOutput, ProviderError
 from app.schemas import (
+    FINAL_ARTIFACT_TYPES,
     TERMINAL_STATUSES,
     EffectiveGeneration,
     ExecutionFingerprint,
     ExecutionStrategy,
     ModelReference,
+    PromptCompressionEcho,
     QueueItem,
     QueueResponse,
     TaskArtifactItem,
@@ -29,6 +32,9 @@ from app.schemas import (
     TaskKind,
     TaskStateResponse,
     TaskStatus,
+    invocation_is_contractual,
+    invocation_role,
+    invocation_status,
     is_local_deployment,
 )
 
@@ -49,11 +55,14 @@ ACTIVE_INFERENCE_STATUSES = tuple(
     status for status in ACTIVE_TASK_STATUSES if status != "converting"
 )
 
-# Estados de una tarea que sigue esperando turno. `waiting_for_memory` cuenta
-# como pendiente en todo lo que mira la cola —listado, reordenación, mover
-# arriba/abajo— porque para el usuario ES una tarea en cola: no ha corrido, no
-# ha fallado, y quiere poder colocarla o cancelarla como cualquier otra.
-PENDING_QUEUE_STATUSES = ("queued", "waiting_for_memory")
+# Estados de una tarea que sigue esperando turno. `waiting_for_memory` y
+# `waiting_for_dependencies` cuentan como pendientes en todo lo que mira la cola
+# —listado, reordenación, mover arriba/abajo— porque para el usuario SON tareas
+# en cola: no han corrido, no han fallado, y quiere poder colocarlas o
+# cancelarlas como cualquier otra. Reordenar una que espera no la adelanta de
+# verdad: el reclamo respeta `not_before`, así que solo cambia su sitio para
+# cuando le toque.
+PENDING_QUEUE_STATUSES = ("queued", "waiting_for_memory", "waiting_for_dependencies")
 
 
 class IdempotencyConflict(ValueError):
@@ -161,7 +170,7 @@ class TaskRepository:
         activo, esperar a que la cola se vacíe es cuestión de poco.
         """
         statuses = (*ACTIVE_TASK_STATUSES, *PENDING_QUEUE_STATUSES,
-                    TaskStatus.waiting_for_dependencies.value, TaskStatus.waiting_for_tools.value)
+                    TaskStatus.waiting_for_tools.value)
         marks = ",".join("?" for _ in statuses)
         row = self.db.query_one(
             f"SELECT 1 FROM tasks WHERE status IN ({marks}) LIMIT 1", statuses,
@@ -601,6 +610,7 @@ class TaskRepository:
         *,
         excluded_from_learning: bool = False,
         fingerprint: dict[str, Any] | None = None,
+        compression: dict[str, str] | None = None,
     ) -> str:
         """Checkpoint pre-vuelo: la fila existe ANTES de llamar al proveedor.
 
@@ -623,6 +633,11 @@ class TaskRepository:
         fingerprint es la configuración con la que se va a servir, capturada
         AHORA y no al terminar: es lo que permite comparar dos invocaciones de
         una tirada larga que el proveedor cambió por medio.
+
+        compression es el eco {requested, effective} de la compresión de prompt
+        de ESTA llamada (no de la tarea): el broker fuerza `off` en las que
+        procesan contenido generado, así que el valor de la petición no describe
+        lo que le pasó a cada invocación.
         """
         invocation_id = f"inv_{uuid4().hex}"
         now = _utc_now_iso()
@@ -630,8 +645,9 @@ class TaskRepository:
             connection.execute(
                 "INSERT INTO model_invocations (id, task_id, run_id, role, provider, deployment, model, "
                 "task_type, was_loaded, excluded_from_learning, fingerprint_hash, fingerprint_json, "
+                "prompt_compression_json, "
                 "tokens_input, tokens_output, cost_usd, started_at, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 'started', ?, ?)",
                 (
                     invocation_id, task_id, run_id, role,
                     model.provider, model.deployment, model.model, task_type,
@@ -639,6 +655,7 @@ class TaskRepository:
                     int(excluded_from_learning),
                     (fingerprint or {}).get("hash"),
                     dumps_json(fingerprint) if fingerprint else None,
+                    dumps_json(compression) if compression else None,
                     now, now, now,
                 ),
             )
@@ -875,7 +892,7 @@ class TaskRepository:
             SELECT * FROM tasks
             ORDER BY
               CASE
-                WHEN status IN ('queued','waiting_for_memory') THEN 0
+                WHEN status IN ('queued','waiting_for_memory','waiting_for_dependencies') THEN 0
                 WHEN status IN ('routing','planning','resource_planning','chunking','generating','proposing','evaluating','debating','synthesizing','verifying') THEN 1
                 ELSE 2
               END,
@@ -930,6 +947,56 @@ class TaskRepository:
                     (task_id, "task.cancelled", dumps_json({"requested": True}), now),
                 )
         return self.get_task(task_id)
+
+    def pending_task_ids(self) -> list[str]:
+        """Ids de todo lo que sigue esperando turno, en orden de cola.
+
+        Lo usa la cancelación en bloque cuando el alcance es "todas las
+        pendientes": el panel solo pinta las primeras 50, así que sacar los ids
+        de lo que se ve cancelaría de menos sin decirlo.
+        """
+        marks = ",".join("?" for _ in PENDING_QUEUE_STATUSES)
+        rows = self.db.query_all(
+            f"SELECT id FROM tasks WHERE status IN ({marks}) "
+            "ORDER BY queue_position ASC, created_at ASC",
+            PENDING_QUEUE_STATUSES,
+        )
+        return [str(row["id"]) for row in rows]
+
+    def request_cancel_many(self, task_ids: Sequence[str]) -> list[str]:
+        """Cancela varias tareas en UNA transacción; devuelve las canceladas.
+
+        La transacción única no es cosmética: con una por tarea, el despachador
+        puede reclamar entre medias una de las que aún faltan y ponerse a
+        ejecutar trabajo que el usuario ya había dado por cancelado. Las que ya
+        estaban terminadas o no existen se ignoran —lo que se pedía, que no
+        corran, ya se cumple— y quedan fuera del resultado para que el recuento
+        que se le enseña al usuario sea el de verdad.
+        """
+        unique = list(dict.fromkeys(task_ids))
+        if not unique:
+            return []
+        now = _utc_now_iso()
+        cancelled: list[str] = []
+        with self.db.transaction() as connection:
+            for task_id in unique:
+                cursor = connection.execute(
+                    """
+                    UPDATE tasks
+                    SET cancel_requested = 1, status = ?, queue_position = NULL, updated_at = ?
+                    WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+                    """,
+                    (TaskStatus.cancelled.value, now, task_id),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                connection.execute(
+                    "INSERT INTO events (task_id, event_type, payload_json, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (task_id, "task.cancelled", dumps_json({"requested": True, "bulk": True}), now),
+                )
+                cancelled.append(task_id)
+        return cancelled
 
     def reorder_queue(self, task_ids: list[str]) -> QueueResponse:
         now = _utc_now_iso()
@@ -1430,6 +1497,7 @@ class TaskRepository:
             created_at=datetime.fromisoformat(row["created_at"]),
             download_url=f"/api/v1/tasks/{task_id}/artifacts/{row['id']}",
             available=path.exists(),
+            final=row["artifact_type"] in FINAL_ARTIFACT_TYPES,
         )
 
     def list_task_invocations(self, task_id: str) -> TaskInvocationsResponse:
@@ -1457,16 +1525,27 @@ class TaskRepository:
         generation = loads_json(row["generation_json"], None) if "generation_json" in keys else None
         output = loads_json(row["output_json"], None) if "output_json" in keys else None
         fingerprint = loads_json(row["fingerprint_json"], None) if "fingerprint_json" in keys else None
+        compression = (
+            loads_json(row["prompt_compression_json"], None)
+            if "prompt_compression_json" in keys else None
+        )
+        stored_role = str(row["role"] or "")
         return TaskInvocationItem(
             invocation_id=row["id"],
-            role=row["role"],
+            role=invocation_role(stored_role),
             model=ModelReference(
                 provider=row["provider"],
                 deployment=row["deployment"],
                 model=row["model"],
-                role=row["role"],
+                # El rol crudo, sin sanear: ModelReference.role no está
+                # enumerado y aquí sí conviene ver lo que hay en la fila.
+                role=stored_role or None,
             ),
-            status=row["status"],
+            status=invocation_status(str(row["status"] or "")),
+            # Se decide sobre el rol CRUDO, no sobre el saneado: si la fila la
+            # escribió una versión con más vocabulario, lo que decide es su
+            # nombre real y no el "unknown" con que se reporta.
+            contractual=invocation_is_contractual(stored_role),
             error_code=row["error_code"] if "error_code" in keys else None,
             tokens_input=int(row["tokens_input"] or 0),
             tokens_output=int(row["tokens_output"] or 0),
@@ -1484,6 +1563,9 @@ class TaskRepository:
                 row["excluded_from_learning"] if "excluded_from_learning" in keys else 0
             ),
             content_source=(output or {}).get("content_source") if isinstance(output, dict) else None,
+            prompt_compression=(
+                PromptCompressionEcho.model_validate(compression) if compression else None
+            ),
         )
 
     @staticmethod

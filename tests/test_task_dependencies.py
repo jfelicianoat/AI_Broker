@@ -42,6 +42,50 @@ def _state(client: TestClient, task_id: str) -> dict:
     return client.get(f"/api/v1/tasks/{task_id}").json()
 
 
+def test_the_panel_shows_moves_and_cancels_a_task_waiting_for_dependencies(tmp_path: Path) -> None:
+    """Esperar dependencias es esperar turno, y el panel tiene que tratarlo así.
+
+    Antes no: la tarea desaparecía de la cola, del resumen y del histórico a la
+    vez —viva y sin una sola pantalla desde la que verla o cancelarla— porque
+    "pendiente" solo incluía `queued` y `waiting_for_memory`.
+    """
+    with _client(tmp_path, dependency_wait_seconds=60) as client:
+        first = _create(client, "dep:panel:a")
+        second = _create(client, "dep:panel:b", depends_on=[first])
+        assert client.patch("/api/v1/queue", json={"task_ids": [second, first]}).status_code == 200
+        client.post("/api/v1/dispatcher/tick")
+        assert _state(client, second)["status"] == "waiting_for_dependencies"
+
+        page = client.get("/dashboard/tasks")
+        token = client.cookies.get("ai_broker_dashboard_csrf")
+        fragment = client.get("/dashboard/fragments/queue")
+        preview = client.get("/dashboard/fragments/queue-preview")
+        pending_before = [item["task_id"] for item in client.get("/api/v1/queue").json()["pending"]]
+        # Reordenar exige la lista EXACTA de pendientes: si la que espera
+        # dependencias no contara como tal, este botón daría 409.
+        moved = client.post(
+            f"/dashboard/actions/queue/{first}/top", headers={"X-CSRF-Token": token},
+        )
+        pending_after = [item["task_id"] for item in client.get("/api/v1/queue").json()["pending"]]
+        cancelled = client.post(
+            "/dashboard/actions/tasks/cancel",
+            headers={"X-CSRF-Token": token},
+            data={"scope": "pending"},
+        )
+        states = [_state(client, task_id)["status"] for task_id in (first, second)]
+
+    assert second in page.text
+    assert "Esperando dependencias" in page.text
+    assert second in fragment.text
+    assert second in preview.text
+    # Conserva su sitio en la cola: esperar no la manda al final.
+    assert pending_before == [second, first]
+    assert moved.status_code == 204
+    assert pending_after == [first, second]
+    assert cancelled.json()["cancelled"] == 2
+    assert states == ["cancelled", "cancelled"]
+
+
 def test_a_task_does_not_run_before_the_one_it_depends_on(tmp_path: Path) -> None:
     """La dependiente se pone la primera de la cola para que le toque antes que
     a su dependencia: así se comprueba que la retiene el mecanismo y no el

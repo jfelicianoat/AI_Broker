@@ -172,11 +172,25 @@ class RoutedModelProvider:
         texto tal cual y un nivel concreto sustituye al de la configuración
         global. Los embeddings nunca se comprimen: alterar el texto altera el vector.
         """
-        if request.inference_kind == InferenceKind.embedding:
+        compressor = self._compressor_for(request)
+        if compressor is None:
             return request.content.prompt
+        return compressor.compress_text(request.content.prompt)
+
+    def _compressor_for(self, request: TaskCreateRequest) -> PromptCompressor | None:
+        """El compresor que va a tratar este prompt, o None si no se toca.
+
+        Único punto donde se decide la compresión de una petición. Lo consumen
+        `user_prompt` (que la aplica) y `compression_echo` (que la declara): sin
+        esta pieza compartida, el eco sería una segunda implementación de la
+        misma política y acabaría mintiendo en cuanto una de las dos cambiara.
+        """
+        if request.inference_kind == InferenceKind.embedding:
+            # Alterar el texto altera el vector: los embeddings nunca se comprimen.
+            return None
         override = request.prompt_compression
         if override == "off":
-            return request.content.prompt
+            return None
         if override is not None:
             # Un nivel pedido explícitamente por la tarea se respeta tal cual:
             # la petición manda sobre la política del broker.
@@ -184,15 +198,45 @@ class RoutedModelProvider:
                 enabled=True,
                 level=override,
                 min_chars=self.config.prompt_compression.min_chars,
-            ).compress_text(request.content.prompt)
+            )
         level = self._effective_global_level(request)
         if level == self.prompt_compressor.level:
-            return self.prompt_compressor.compress_text(request.content.prompt)
+            return self.prompt_compressor
         return PromptCompressor(
             enabled=self.prompt_compressor.enabled,
             level=level,
             min_chars=self.prompt_compressor.min_chars,
-        ).compress_text(request.content.prompt)
+        )
+
+    def compression_echo(self, request: TaskCreateRequest) -> dict[str, str]:
+        """Qué compresión se pidió y cuál se aplica de verdad a este prompt.
+
+        Existe porque `prompt_compression: "off"` era una petición sin acuse de
+        recibo: el valor efectivo se resolvía al construir el prompt y se
+        descartaba, así que un cliente solo podía probar lo que PIDIÓ, nunca lo
+        que se CUMPLIÓ. No reimplementa la política — pregunta por el mismo
+        compresor que va a tratar el prompt (`_compressor_for`).
+
+        `requested: "broker_default"` significa que la tarea no se pronunció y
+        manda la configuración del broker. Se nombra en vez de dejarlo en `null`
+        para que el eco distinga "no pedí nada" de "pedí y no se me aplicó".
+
+        `effective: "off"` cubre las cuatro formas de no comprimir: embeddings,
+        `off` explícito, compresión global apagada y prompt por debajo de
+        `min_chars` —donde el compresor devuelve el texto intacto sea cual sea
+        el nivel, así que declarar "medium" sería anunciar una poda que no
+        ocurrió—.
+        """
+        requested = request.prompt_compression or "broker_default"
+        compressor = self._compressor_for(request)
+        effective = "off"
+        if (
+            compressor is not None
+            and compressor.enabled
+            and len(request.content.prompt) >= compressor.min_chars
+        ):
+            effective = compressor.level
+        return {"requested": requested, "effective": effective}
 
     def _effective_global_level(self, request: TaskCreateRequest) -> str:
         """Nivel de compresión global, acotado a `medium` en dos casos.

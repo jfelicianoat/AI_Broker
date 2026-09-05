@@ -12,10 +12,38 @@
     <button class="button secondary compact" type="button" data-refresh-target="#queue-panel">Actualizar</button>
   </div>
   {% if queue.items %}
+  {# Barra de selección. Vive dentro del panel, que se reemplaza entero cada
+     5 s: el filtro escrito y las casillas marcadas los reconstruye
+     dashboard.js tras cada swap a partir de su propio estado, porque el
+     servidor no sabe nada de lo que el usuario lleva marcado. #}
+  <div class="queue-toolbar" data-queue-toolbar data-queue-total="{{ queue.total }}">
+    <input class="table-filter" type="search" data-queue-filter
+           placeholder="Filtrar por id, modelo o estado…"
+           aria-label="Filtrar las tareas de la cola">
+    <span class="queue-selection" data-queue-count>Ninguna seleccionada</span>
+    <div class="queue-toolbar-actions">
+      <button class="button danger compact" type="button" data-queue-cancel disabled>
+        Cancelar seleccionadas
+      </button>
+      <button class="link-button" type="button" data-queue-clear hidden>Limpiar selección</button>
+      {% if queue.total > queue.items|length %}
+        {# Marcar "todas" solo alcanza a las filas pintadas. Con la cola más
+           larga que la página, cancelar de verdad todo lo pendiente tiene que
+           resolverse en el servidor o cancelaría de menos en silencio. #}
+        <button class="link-button danger" type="button" data-queue-cancel-all>
+          Cancelar las {{ queue.total }} pendientes
+        </button>
+      {% endif %}
+    </div>
+  </div>
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
+          <th scope="col" class="select-cell">
+            <input type="checkbox" data-queue-select-all
+                   aria-label="Seleccionar todas las tareas visibles">
+          </th>
           <th scope="col">Pos.</th>
           <th scope="col">ID de tarea</th>
           <th scope="col">Destino solicitado</th>
@@ -26,7 +54,11 @@
       </thead>
       <tbody>
       {% for task in queue.items %}
-        <tr>
+        <tr data-queue-row="{{ task.task_id }}">
+          <td class="select-cell">
+            <input type="checkbox" data-queue-select value="{{ task.task_id }}"
+                   aria-label="Seleccionar tarea {{ task.task_id }}">
+          </td>
           <td class="position">{{ task.queue_position or '-' }}</td>
           <td>
             <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
@@ -97,6 +129,9 @@
       {% endfor %}
       </tbody>
     </table>
+    <p class="queue-no-matches" data-queue-no-matches hidden>
+      Ninguna tarea de la cola coincide con el filtro.
+    </p>
   </div>
   {% else %}
     <div class="empty-state">

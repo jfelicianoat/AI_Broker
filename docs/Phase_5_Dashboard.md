@@ -34,12 +34,18 @@ La base del backend ya lanza concurrentemente los proponentes de `slow` y mantie
 | Éxito y completadas | estados terminales de `tasks` | Mostrar periodo y denominador |
 | VRAM | snapshot real de Ollama `/api/ps` | Uso observado y hora de comprobación; no inferir GPU total si no está disponible |
 | Salud | SQLite, dispatcher y providers | Estado, causa, latencia y `checked_at`; sin estados optimistas por defecto |
-| Cola | proyección de `tasks.request_json` | ID, destino solicitado, estado, posición, antigüedad y cancelación |
+| Cola | proyección de `tasks.request_json` | ID, destino solicitado, estado, posición, antigüedad y cancelación. Cuenta como pendiente `queued`, `waiting_for_memory` y `waiting_for_dependencies`: las tres son tareas vivas que esperan turno, y dejar una fuera la hacía invisible en cola, resumen e histórico a la vez, sin ninguna pantalla desde la que cancelarla |
 | Tarea activa | tarea, progreso e invocaciones | Fase e invocaciones completadas; barra indeterminada durante una llamada individual |
 
 No se muestran tokens, tokens/s ni porcentaje de generación en directo: los providers actuales devuelven esas métricas al finalizar y usan `stream=false`.
 
 La reordenación envía la lista completa de tareas pendientes. Si la cola cambia entre lectura y escritura, la UI muestra el conflicto `409`, recarga el snapshot y no aplica un orden parcial.
+
+Reordenar una tarea que espera memoria o dependencias no la adelanta de verdad: el reclamo sigue respetando su `not_before`, así que solo se le cambia el sitio para cuando le toque. Es la razón de que las tres compartan el mismo conjunto de estados pendientes en el repositorio (`PENDING_QUEUE_STATUSES`), que es lo que hace coherentes a la vez el listado, la reordenación —que exige la lista exacta de pendientes— y la cancelación.
+
+La cancelación en bloque (`POST /dashboard/actions/tasks/cancel`) admite dos alcances y no son intercambiables. Con `task_ids` cancela exactamente los ids marcados; con `scope=pending` el servidor resuelve la lista —todo lo que espera turno, no solo las filas pintadas— porque el panel muestra como mucho 50 de las hasta `queue_max_size` pendientes y marcar «todas» sobre la página cancelaría de menos sin decirlo. Las tareas ya terminales se ignoran y la respuesta devuelve `requested` y `cancelled` para que la diferencia sea visible. Todo el bloque va en una única transacción: con una por tarea, el despachador podría reclamar entre medias una de las que aún faltan y ejecutar trabajo ya dado por cancelado.
+
+La selección vive en el cliente, fuera del DOM, y el autorrefresco de 5 s se detiene mientras haya tareas marcadas: reemplazar la tabla a media selección reordena las filas bajo el cursor. El filtro es local a las filas pintadas, así que lo marcado que el filtro esconde se declara en el contador («N seleccionadas (M fuera del filtro)»).
 
 ## Pantalla 2 — Probador de prompts
 

@@ -46,6 +46,34 @@ class ServerConfig(BaseModel):
     # loopback sin token admin (p. ej. una demo en LAN aislada). Sin este flag,
     # el broker se niega a arrancar expuesto a la red sin credencial.
     allow_unauthenticated_lan: bool = False
+    # Publicación del token de ESTA sesión para procesos co-ubicados.
+    #
+    # El token se genera nuevo en cada arranque (scripts/run_broker.py), vive en
+    # la variable de entorno del proceso del broker y se imprime en su consola.
+    # Eso basta para una persona delante, y no basta para nada más: un runner
+    # que arranca con la máquina —Wake-on-LAN, tarea programada— no ve esa
+    # consola ni hereda ese entorno, y la única alternativa que le quedaba era
+    # recibir el token por la red, que es justo lo que no puede pasar.
+    #
+    # Con "keyring" el broker deja el token de la sesión en el almacén de
+    # credenciales del SO (en Windows, el Administrador de credenciales: cifrado
+    # y con ACL del usuario), bajo una entrada PROPIA —
+    # session_token_keyring_username— separada de la que el broker lee como
+    # fallback. Son cosas distintas: aquella la escribe el operador para fijar
+    # un token estable, esta la escribe el broker en cada arranque y no la lee
+    # jamás. Confundirlas convertiría un token efímero en uno permanente.
+    #
+    # No hay modo "fichero" a propósito: sería el mismo secreto en claro, con
+    # permisos que dependen de dónde caiga el directorio y sobreviviendo a un
+    # apagado sucio.
+    #
+    # "none" por defecto para que un despliegue existente no empiece a escribir
+    # credenciales en el llavero de su dueño sin que él lo haya decidido; el
+    # YAML que se distribuye lo activa.
+    publish_session_token: Literal["none", "keyring"] = "none"
+    session_token_keyring_username: str = Field(
+        default="session_admin_token", max_length=120,
+    )
 
     @model_validator(mode="after")
     def validate_cors_origins(self) -> ServerConfig:

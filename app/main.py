@@ -106,6 +106,7 @@ from app.startup import (
     auto_start_local_provider_servers,
     detect_total_vram_gb,
     ensure_admin_credential_for_exposed_host,
+    publish_admin_credential_for_local_clients,
     timeout_coherence_warnings,
     vram_budget_mismatch,
     zero_cost_cloud_providers,
@@ -125,6 +126,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     ensure_admin_credential_for_exposed_host(broker_config)
     configure_logging(broker_config.logging)
     logger = logging.getLogger("ai_broker.http")
+    publish_admin_credential_for_local_clients(broker_config, logger)
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
     repository = TaskRepository(db)
     dashboard_queries = DashboardQueryRepository(db)
@@ -831,7 +833,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.9",
+            contract_version="2.10",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -891,6 +893,11 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             invocation_telemetry=True,
             execution_fingerprint=True,
             task_artifacts=True,
+            auxiliary_invocations=broker_config.shadow_probe.enabled,
+            auxiliary_invocations_optout=True,
+            invocation_contract=True,
+            prompt_compression_echo=True,
+            canonical_artifacts=True,
         )
 
     @app.get("/api/v1/usage", response_model=UsageResponse)

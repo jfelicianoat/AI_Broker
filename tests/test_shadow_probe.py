@@ -7,6 +7,7 @@ trabajo local en una máquina ocupada.
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,7 +18,7 @@ from app.db import Database
 from app.model_stats import ModelStats
 from app.providers.base import ModelOutput
 from app.repository import TaskRepository
-from app.schemas import TaskCreateRequest
+from app.schemas import ModelReference, ModelRequirements, TaskCreateRequest
 from app.shadow_probe import SHADOW_ROLE, ShadowProbe, choose_aspirant
 
 
@@ -267,3 +268,75 @@ class ShadowProbeRunTests(unittest.IsolatedAsyncioTestCase):
         await probe.drain()
 
         self.assertEqual(provider.measured, ["remoto"])
+
+    async def test_an_exact_model_without_fallback_is_never_probed(self) -> None:
+        """Contrato 2.10. `target_model` + `fallback_allowed: false` es una
+        declaración de que SOLO ese modelo puede ver el contenido, y la cadena
+        de elegibilidad no la miraba: la tarea se servía con el modelo pedido y
+        el sondeo procesaba el mismo prompt en otro, bajo el mismo task_id."""
+        provider = _ProviderStub([_entry("otro-modelo")])
+        probe = ShadowProbe(provider, self._config())
+        request = self._request().model_copy(update={
+            "model_requirements": ModelRequirements(
+                target_model=ModelReference(
+                    provider="lmstudio", deployment="local", model="el-aprobado",
+                ),
+                fallback_allowed=False,
+            ),
+        })
+
+        probe.schedule(self.repository, self.task_id, request)
+        await probe.drain()
+
+        self.assertEqual(provider.measured, [])
+        self.assertEqual(self._invocations(), [])
+
+    async def test_an_exact_model_that_allows_fallback_is_still_probed(self) -> None:
+        """Con `fallback_allowed` (el default) el modelo exacto es una
+        preferencia de enrutado, no un contrato de exclusividad."""
+        provider = _ProviderStub([_entry("aspirante")])
+        probe = ShadowProbe(provider, self._config())
+        request = self._request().model_copy(update={
+            "model_requirements": ModelRequirements(
+                target_model=ModelReference(
+                    provider="lmstudio", deployment="local", model="el-preferido",
+                ),
+            ),
+        })
+
+        probe.schedule(self.repository, self.task_id, request)
+        await probe.drain()
+
+        self.assertEqual(provider.measured, ["aspirante"])
+
+    async def test_the_task_can_forbid_auxiliary_invocations(self) -> None:
+        provider = _ProviderStub([_entry("aspirante")])
+        probe = ShadowProbe(provider, self._config())
+        request = self._request().model_copy(update={"auxiliary_invocations": False})
+
+        probe.schedule(self.repository, self.task_id, request)
+        await probe.drain()
+
+        self.assertEqual(provider.measured, [])
+
+    async def test_the_probe_records_the_compression_it_applied(self) -> None:
+        """La invocación auxiliar declara su eco como cualquier otra: si no,
+        el único hueco sin acuse sería justo el trabajo que nadie pidió."""
+        provider = _ProviderStub([_entry("aspirante")])
+        provider.compression_echo = lambda request: {  # type: ignore[attr-defined]
+            "requested": "broker_default", "effective": "medium",
+        }
+        probe = ShadowProbe(provider, self._config())
+
+        probe.schedule(self.repository, self.task_id, self._request())
+        await probe.drain()
+
+        row = self.db.query_one(
+            "SELECT prompt_compression_json FROM model_invocations WHERE task_id = ?",
+            (self.task_id,),
+        )
+        assert row is not None
+        self.assertEqual(
+            json.loads(row["prompt_compression_json"]),
+            {"requested": "broker_default", "effective": "medium"},
+        )

@@ -28,6 +28,11 @@ Reglas de la casa:
 - **Solo se sondea tras una tarea completada.** Con un prompt que acaba de
   fallar, el aspirante fallaría también y quedaría marcado como poco fiable
   por un defecto que no es suyo.
+- **La tarea puede prohibirlo, y hay una prohibición implícita.** Con
+  `auxiliary_invocations: false` no se sondea, y tampoco con un `target_model`
+  exacto y `fallback_allowed: false`: pedir un modelo concreto sin fallback es
+  declarar que solo ese modelo puede ver el contenido, y honrar eso únicamente
+  en la invocación que responde era cumplir la letra y romper el trato.
 """
 from __future__ import annotations
 
@@ -180,6 +185,12 @@ class ShadowProbe:
             return False
         if request.inference_kind != InferenceKind.chat:
             return False
+        if not request.auxiliary_invocations:
+            # Opt-out explícito: la tarea declara que solo el modelo que la
+            # sirve puede ver su contenido. No hay evidencia que valga eso.
+            return False
+        if self._demands_exact_model(request):
+            return False
         if request.exclude_from_model_learning:
             # El sondeo existe SOLO para producir evidencia. Con una tarea que
             # ha declarado no querer enseñar nada, esa evidencia no se contaría,
@@ -196,6 +207,26 @@ class ShadowProbe:
             # por tipo de tarea, y el contexto largo es un tipo aparte.
             return False
         return True
+
+    @staticmethod
+    def _demands_exact_model(request: TaskCreateRequest) -> bool:
+        """La tarea fijó un modelo exacto y prohibió el fallback.
+
+        Eso no es una preferencia de enrutado: es un contrato de ejecución. La
+        cadena de elegibilidad que comparten el sondeo y la selección real
+        (RoutedModelProvider.eligible_catalog) respeta la frontera de datos y
+        los proveedores permitidos, pero NO mira `target_model` —no es su
+        trabajo, ahí solo se decide quién PODRÍA servir—. El resultado observado
+        fue una tarea servida por el modelo pedido con un sondeo procesando el
+        mismo prompt en otro modelo bajo el mismo task_id: la letra del contrato
+        cumplida y el trato roto.
+
+        Se comprueba aquí, y no dentro de `eligible_catalog`, porque el sondeo
+        no quiere sondear EL modelo exacto —ese ya tiene su medida de la
+        invocación real—: quiere no sondear NADA en esa tarea.
+        """
+        requirements = request.model_requirements
+        return requirements.target_model is not None and not requirements.fallback_allowed
 
     async def _run(
         self, repository: TaskRepository, task_id: str, request: TaskCreateRequest,
@@ -236,10 +267,11 @@ class ShadowProbe:
         probe_request = self._probe_request(request)
         was_loaded = await self._loaded_state(model)
         fingerprint = await self._fingerprint(model)
+        compression = self._compression_echo(probe_request)
         invocation_id = await asyncio.to_thread(
             lambda: repository.start_invocation(
                 task_id, None, SHADOW_ROLE, model, task_type, was_loaded,
-                fingerprint=fingerprint,
+                fingerprint=fingerprint, compression=compression,
             ),
         )
         logger.info(
@@ -282,6 +314,16 @@ class ShadowProbe:
             # del despacho; dejarlos puestos los expandiría por segunda vez.
             "content": request.content.model_copy(update={"attachments": []}),
         })
+
+    def _compression_echo(self, request: TaskCreateRequest) -> dict[str, str] | None:
+        """Compresión declarada de la petición del sondeo, si el proveedor la da."""
+        echo = getattr(self.provider, "compression_echo", None)
+        if echo is None:
+            return None
+        try:
+            return echo(request)
+        except Exception:
+            return None
 
     async def _fingerprint(self, model: ModelReference) -> dict[str, Any] | None:
         """Con qué configuración se mide al aspirante. La medida solo vale para

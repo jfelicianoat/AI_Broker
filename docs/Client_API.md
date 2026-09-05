@@ -35,7 +35,7 @@ Devuelve, entre otros:
 
 | Campo | Forma | Para qué te sirve |
 |---|---|---|
-| `contract_version` | `string` | `"2.9"`. Si no coincide con lo que esperas, revisa §12 |
+| `contract_version` | `string` | `"2.10"`. Si no coincide con lo que esperas, revisa §12 |
 | `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
 | `work_lanes` | `[string]` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
 | `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
@@ -50,6 +50,11 @@ Devuelve, entre otros:
 | `ingestion_formats` | `{string: [string]}` | Extensiones admitidas **agrupadas por tipo**: la clave es el grupo (`pdf`, `office`, `text`, `image`, `audio`, `video`), el valor su lista de extensiones con punto |
 | `long_context_map_reduce` | `bool` | Si puedes autorizar troceo de documentos largos |
 | `task_artifacts` | `bool` | Si puedes listar y descargar los ficheros que produce una tarea (§8.3) |
+| `auxiliary_invocations` | `bool` | Si este broker **puede** lanzar invocaciones que tú no pediste bajo tu `task_id` (§8.4) |
+| `auxiliary_invocations_optout` | `bool` | Si puedes apagarlas con `auxiliary_invocations: false` (§8.4) |
+| `invocation_contract` | `bool` | Si `role`/`status` vienen enumerados y cada invocación declara `contractual` (§8.2) |
+| `prompt_compression_echo` | `bool` | Si cada invocación declara la compresión que se le aplicó de verdad (§8.5) |
+| `canonical_artifacts` | `bool` | Si el entregable viene marcado con `final: true` en `/artifacts` (§8.3) |
 | `max_active_workflows` | `int` | Cuántas inferencias corren a la vez (es 1 por invariante) |
 
 **Ojo con los tres campos `{string: [string]}`.** Son **objetos**, no listas. Es el error de integración más común: un cliente con tipado estricto que declara `ingestion_formats` como array falla al deserializar la respuesta entera y se queda sin ninguna capacidad — no solo sin la de ficheros. Si lo que necesitas es la lista plana de extensiones para filtrar un selector de ficheros, aplana tú los valores del mapa.
@@ -58,7 +63,7 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 ```json
 {
-  "contract_version": "2.9",
+  "contract_version": "2.10",
   "strategies": ["single", "mixture_of_agents", "agent"],
   "presets": { "single": ["fast"], "mixture_of_agents": ["fast", "slow"], "agent": ["fast"] },
   "scheduling_by_preset": { "fast": ["sequential"], "slow": ["adaptive", "parallel", "waves", "sequential"] },
@@ -81,7 +86,12 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
   "exclude_from_model_learning": true,
   "invocation_telemetry": true,
   "execution_fingerprint": true,
-  "task_artifacts": true
+  "task_artifacts": true,
+  "auxiliary_invocations": true,
+  "auxiliary_invocations_optout": true,
+  "invocation_contract": true,
+  "prompt_compression_echo": true,
+  "canonical_artifacts": true
 }
 ```
 
@@ -133,6 +143,33 @@ No tiene efectos secundarios ni cuesta nada, pero sigue siendo una comprobación
 **El token cambia en cada arranque del broker** salvo que se fije `AI_BROKER_ADMIN_TOKEN` desde fuera. Para una app de larga vida eso significa que un `403` a mitad de trabajo casi nunca es un fallo de integración: es que el broker se ha reiniciado. Trátalo como "hay que renovar credencial y reintentar", no como tarea fallida — **tus tareas siguen ahí**. En particular, una tarea en `waiting_for_tools` sobrevive intacta al reinicio, con su conversación congelada, y te espera. Lo que sí se toca en el arranque son las tareas que estaban ejecutándose: se reencolan, o fallan con `RECOVERY_AMBIGUOUS_REMOTE_CALL` si tenían una llamada remota en vuelo que pudo facturarse.
 
 Distingue `403 ADMIN_AUTH_REQUIRED` (credencial: renuévala) de `503 ADMIN_AUTH_BACKEND_UNAVAILABLE` (el llavero del sistema falla: pedir otro token no arregla nada).
+
+### 3.1 De dónde saca el token un proceso co-ubicado
+
+Esto es para un cliente que corre **en la misma máquina que el broker** —un runner, una pasarela— y arranca sin nadie delante: la máquina se enciende sola (Wake-on-LAN, tarea programada), Windows arranca el broker, y el token no puede cruzar la red hasta otro equipo. Un cliente que habla con el broker desde otra máquina no necesita nada de esto: su token lo pone su operador.
+
+**Ciclo de vida del token.** El broker genera uno nuevo **en cada arranque** (`secrets.token_urlsafe`), lo publica en la variable de entorno de su propio proceso y lo imprime en su consola. No es persistente y no debes cachearlo entre reinicios. La excepción: si `AI_BROKER_ADMIN_TOKEN` ya viene definida desde fuera, el broker respeta ese valor — es la vía para fijar un token estable.
+
+**Dónde leerlo.** Con `server.publish_session_token: keyring` en la configuración del broker, cada arranque deja el token de esa sesión en el almacén de credenciales del sistema operativo:
+
+| | |
+|---|---|
+| Servicio | `server.admin_keyring_service` (por defecto `ai-broker`) |
+| Usuario | `server.session_token_keyring_username` (por defecto `session_admin_token`) |
+
+```python
+import keyring
+
+token = keyring.get_password("ai-broker", "session_admin_token")
+```
+
+En Windows es el Administrador de credenciales: cifrado, con ACL del usuario que corre el broker, y el valor no aparece en logs ni en líneas de comando. Los dos nombres son parte del contrato: no cambian sin nota en §12.
+
+**No leas `ai-broker/dashboard_admin_token`.** Esa entrada es del operador, para fijar un token estable, y el broker solo la consulta como *fallback*. La que se refresca en cada arranque es `session_admin_token`.
+
+**Qué hacer ante un `401`/`403`.** Volver a leer la fuente y reintentar **una** vez es el comportamiento correcto: casi siempre significa que el broker se reinició y rotó el token. Si el segundo intento vuelve a fallar, es un problema real de credencial y no un reinicio — no entres en bucle de reintentos. Y recuerda que tus tareas siguen ahí (ver arriba).
+
+**Si `publish_session_token` está en `none`** (el default), no hay fuente local que leer: el token solo existe en la consola del broker. Habla con quien opera el broker antes de construir sobre esto.
 
 ---
 
@@ -225,6 +262,7 @@ Todo lo demás tiene default. Respuesta `202`:
 | `depends_on` | lista de task_id | `[]` | Tareas que deben terminar antes que esta. Máximo 64 |
 | `depends_on_group` | string \| null | `null` | Grupo que debe estar drenado antes que esta |
 | `exclude_from_model_learning` | bool | `false` | Esta tarea no alimenta las métricas del router. Ver §5.8 |
+| `auxiliary_invocations` | bool | `true` | `false` = solo el modelo que responde ve este contenido. Ver §8.4 |
 
 La validación es estricta (`extra="forbid"`): **un campo que no exista en el contrato hace fallar la petición con `422`**, no se ignora. Es deliberado — un typo en un nombre de campo es un error silencioso caro.
 
@@ -337,6 +375,8 @@ Qué hace exactamente:
 - **Sí** consume presupuesto, cuota, semáforo y VRAM como cualquier otra tarea, y **sí** aparece en coste, uso y panel. Está excluida del aprendizaje, no de la contabilidad.
 
 Es un campo de primer nivel a propósito, y no una etiqueta dentro de `content.metadata`: esa metadata es opaca por contrato, y hacer que el router dependa de una cadena libre sería un acoplamiento que nadie podría sospechar leyendo el código. Anunciado en `capabilities.exclude_from_model_learning`.
+
+**No lo confundas con `auxiliary_invocations: false` (§8.4).** Los dos apagan el sondeo en sombra, pero por razones distintas y con alcances distintos: este dice «no aprendas de esta tarea» y afecta a todas las métricas del router; aquel dice «solo el modelo aprobado puede ver este contenido» y no toca el aprendizaje de nada más. Si lo que te preocupa es quién ve el prompt, usa el segundo: es el que promete eso, y el que seguirá prometiéndolo si mañana el broker aprende de otra forma.
 
 ---
 
@@ -657,11 +697,13 @@ Es `null` mientras la tarea no ha elegido modelo y en el carril de ingesta. Los 
 
 ### El resultado
 
+**`result` no está tipado en el OpenAPI y no va a estarlo.** Es `{"anyOf": [{"type": "object"}, {"type": "null"}]}`: un cliente que solo lea el contrato no puede saber en qué clave está la respuesta. Se queda así por compatibilidad —lleva versiones con la misma forma y hay clientes encima—, pero la vía con contrato para cada cosa es otra: **quién sirvió la tarea** está en `execution_summary`, **lo que costó cada llamada** en `/invocations` (§8.1) y **el entregable** en `/artifacts` con `final: true` (§8.3). Usa `result` para pintar la respuesta en pantalla; no lo uses como fuente de verdad de un sistema que tiene que rendir cuentas después.
+
 Para `chat`:
 
 | Campo | Contenido |
 |---|---|
-| `assistant_content` | **La respuesta.** Es lo que buscas |
+| `assistant_content` | **La respuesta**, para enseñarla. Para cerrar con trazabilidad usa `/artifacts` (§8.3) |
 | `result_markdown` | Igual que el anterior (alias histórico) |
 | `model_used` | `{provider, deployment, model}` que respondió |
 | `models_used` | Todos los que intervinieron |
@@ -698,6 +740,7 @@ Con `synthesized: false`, `model_used` es el proposer que respondió y `consensu
 | Campo | Contenido |
 |---|---|
 | `invocation_id`, `role` | Identidad de la llamada. En `mixture_of_agents` hay una por proponente más la del árbitro (`role: "arbiter"`) |
+| `contractual` | **`true` si esa llamada ejecuta el trabajo que pediste; `false` si es trabajo propio del broker.** Ver abajo |
 | `model` | `{provider, deployment, model, role}` que atendió esa llamada |
 | `status`, `error_code` | `completed`, `failed`, `started`… y el código del fallo si lo hubo |
 | `tokens_input`, `tokens_output`, `cost_usd`, `latency_ms` | Lo que costó esa llamada, no el agregado de la tarea |
@@ -706,8 +749,33 @@ Con `synthesized: false`, `model_used` es el proposer que respondió y `consensu
 | `execution_fingerprint` | Con qué configuración se sirvió. Ver §8.2 |
 | `excluded_from_model_learning` | Si esta invocación alimentó o no las métricas del router (§5.8) |
 | `content_source` | De qué campo de la respuesta salió el texto. Ausente o `"content"` es lo normal; `"reasoning_content"` significa que el modelo dejó el contenido vacío y el broker rescató su razonamiento —la respuesta es válida, pero el modelo no la está entregando donde debe, y al **comparar modelos** eso importa—; `"image"`, que contestó solo con una imagen |
+| `prompt_compression` | `{requested, effective}`: la compresión que pediste y la que se aplicó de verdad a esa llamada. Ver §8.5 |
 
 No se recoge nada nuevo: es lo que el broker ya guardaba, ahora bajo contrato de cliente en vez de solo bajo el panel de administración. Anunciado en `capabilities.invocation_telemetry`.
+
+**`role` y `status` están enumerados** (contrato 2.10, `capabilities.invocation_contract`), así que tu cliente puede validarlos contra el OpenAPI en vez de aceptar cualquier cadena:
+
+| Campo | Valores |
+|---|---|
+| `role` | `single`, `agent`, `proposer`, `generalist`, `specialist`, `skeptic`, `analyst`, `reviewer`, `refiner`, `arbiter`, `chunk_map`, `chunk_reduce`, `confidence_judge`, `vision`, `shadow_probe`, `unknown` |
+| `status` | `started`, `completed`, `failed`, `ambiguous`, `unknown` |
+
+`unknown` no lo escribe el broker: es lo que verás si lees una base de datos escrita por una versión con más vocabulario que la que responde. Trátalo como "no lo reconozco", no como error.
+
+**Usa `contractual`, no el nombre del rol.** Bajo un mismo `task_id` conviven las llamadas que ejecutan tu tarea y las que el broker lanza por su cuenta para aprender (§8.4). La regla es corta:
+
+- **`contractual: false`** → no cuenta para tu factura ni para validar la política de ejecución de tu tarea. Hoy eso es solo `shadow_probe`, pero puede haber más mañana.
+- **`contractual: true`** → es trabajo tuyo, aunque el rol no sea el que entrega la respuesta. `confidence_judge` y `arbiter` son tuyos: los pagas y respetan tu `model_requirements`.
+
+Deducirlo del nombre del rol —una lista negra de cadenas en tu código— es exactamente lo que este campo viene a evitar: esa lista se rompe en silencio en cuanto el broker añade un rol, y el síntoma es que empiezas a validar tu política contra una llamada que no era tuya.
+
+Ejemplo, en el caso que lo motivó:
+
+```bash
+curl -s -H "X-Admin-Token: $TOKEN"      http://<broker>/api/v1/tasks/task_712487.../invocations   | jq '[.items[] | select(.contractual)] | {llamadas: length,
+        coste: (map(.cost_usd) | add),
+        modelos: (map(.model.model) | unique)}'
+```
 
 ### 8.2 Huella de ejecución
 
@@ -752,7 +820,8 @@ GET /api/v1/tasks/{task_id}/artifacts
       "sha256": "…",
       "created_at": "2026-08-23T09:12:44Z",
       "download_url": "/api/v1/tasks/task_abc/artifacts/art_9f2c…",
-      "available": true
+      "available": true,
+      "final": false
     }
   ]
 }
@@ -760,11 +829,79 @@ GET /api/v1/tasks/{task_id}/artifacts
 
 `GET` sobre `download_url` devuelve los bytes con su `Content-Type`. Misma autorización que el resto de `/api/v1`.
 
-- **Qué hay aquí**: la salida que no cabe en `result`. Hoy, sobre todo, las **imágenes** que devuelve un modelo (`image_output`), y también la copia en disco de la respuesta final (`single_output`, `synthesis_output`). El resultado JSON se lee entero en cada sondeo del estado, así que un PNG en base64 dentro lo convertiría en megabytes por lectura: por eso los binarios van aparte.
+**Esta es la vía canónica para recoger el entregable.** `result.assistant_content` (§8, «El resultado») es una comodidad: sirve para enseñar la respuesta, pero `result` no tiene esquema en el OpenAPI, así que un cliente que solo lea el contrato no puede saber en qué clave está el texto. Si lo que necesitas es **cerrar una unidad de trabajo con trazabilidad** —guardar el entregable, firmarlo, compararlo más tarde—, hazlo aquí: el artefacto viene tipado y con su `sha256`.
+
+- **`final: true` marca el entregable.** Una tarea completada tiene exactamente uno, sea cual sea la estrategia: `single_output` (incluido map-reduce), `agent_output`, `synthesis_output` o `embedding_output`. Fíltralo por este campo y no por `artifact_type`: la lista de tipos crece con cada estrategia nueva, el booleano no.
+- **Lo demás acompaña, no sustituye.** Un `image_output` con `final: false` es una imagen que produjo la tarea; cerrar con «el primer artefacto de la lista» te haría cerrar con el PNG.
+- **El `sha256` cierra sobre los bytes exactos** que produjo el modelo, sin reescrituras de la plataforma que los guardó.
+- **Qué hay aquí**: la respuesta final y la salida que no cabe en `result`, sobre todo las **imágenes** que devuelve un modelo (`image_output`). El resultado JSON se lee entero en cada sondeo del estado, así que un PNG en base64 dentro lo convertiría en megabytes por lectura: por eso los binarios van aparte.
 - **`available: false`** significa que la fila existe y el fichero ya no: lo podó `persistence.artifacts_retention_days`, o se restauró una copia de la BD sin `state/tasks`. La descarga responde entonces `410`, no `404` — existió y se borró a propósito, que no es lo mismo que no haber existido nunca. Si tu aplicación guarda referencias a artefactos, cuenta con esto antes que con un 200 perpetuo.
 - **`artifact_id` se resuelve contra la pareja (tarea, artefacto)**: pedir el artefacto de otra tarea da `404` aunque el identificador exista.
 
-Anunciado en `capabilities.task_artifacts`.
+Anunciado en `capabilities.task_artifacts` y `capabilities.canonical_artifacts`.
+
+### 8.4 Invocaciones auxiliares: quién más ve tu contenido
+
+El broker mide los modelos de su catálogo para poder estimar cuánto tardarán. Medirlos sirviendo peticiones reales significaría hacerte esperar con un modelo del que no sabe nada, así que lo hace aparte: cuando tu tarea **ya ha terminado**, invoca a un aspirante con el mismo prompt solo para cronometrarlo y tira su salida. Es el **sondeo en sombra**, y aparece en tu telemetría como una invocación `role: "shadow_probe"` con `contractual: false` bajo tu propio `task_id`.
+
+Conviene decir con precisión qué garantiza y qué no:
+
+| Qué respeta | Detalle |
+|---|---|
+| `risk.data_classification` | Sí. Una tarea `confidential` o `local_only` solo puede sondear modelos locales |
+| `model_requirements.cloud_allowed` | Sí, fail-closed: sin cloud solo entran despliegues locales |
+| `model_requirements.allowed_providers` | Sí. El aspirante sale de la misma lista de proveedores que la selección real |
+| Ventana de contexto y capacidades | Sí: misma cadena de elegibilidad que la invocación que te responde |
+| `model_requirements.target_model` | **No por sí solo.** Un modelo exacto que admite fallback es una preferencia de enrutado, y el sondeo puede medir otro |
+| Tu presupuesto (`max_cost_usd`) | No lo consume: el sondeo no se factura a tu tarea |
+
+**Cómo apagarlo.** Hay dos vías, y la primera no necesita que cambies nada:
+
+1. **Implícita** — `model_requirements.target_model` **con** `fallback_allowed: false`. Declarar un modelo exacto sin fallback es declarar que solo ese modelo debe ver el contenido, así que esa tarea no se sondea.
+2. **Explícita** — `"auxiliary_invocations": false` en la petición. Vale para cualquier tarea, la fije o no a un modelo concreto. Úsala cuando la razón sea la exclusividad y no el enrutado.
+
+Una tarea con `exclude_from_model_learning: true` (§5.8) tampoco se sondea: el sondeo existe solo para producir evidencia, y ahí esa evidencia no contaría.
+
+```json
+{
+  "idempotency_key": "tarjeta-42",
+  "content": {"prompt": "…"},
+  "auxiliary_invocations": false,
+  "model_requirements": {
+    "target_model": {"provider": "lmstudio", "deployment": "local", "model": "laguna-xs-2.1"},
+    "allowed_providers": ["lmstudio"],
+    "fallback_allowed": false
+  }
+}
+```
+
+**Antes de encolar, mira `capabilities.auxiliary_invocations`.** Dice si este broker las hace (el operador puede tenerlas apagadas); `capabilities.auxiliary_invocations_optout` dice si acepta que las apagues. Si tus contratos no las toleran y el broker no ofrece el opt-out, rechaza la tarjeta ahí y no al leer la telemetría.
+
+### 8.5 Eco de la compresión de prompt
+
+El broker puede podar cortesías y relleno del prompt antes de enviarlo (`prompt_compression`, §5). Pedir `"off"` no bastaba para demostrar nada: era una petición sin acuse de recibo. Desde el contrato 2.10 cada invocación lo declara:
+
+```json
+"prompt_compression": {"requested": "off", "effective": "off"}
+```
+
+- **`requested`** — lo que pediste: `off`, `light`, `medium`, `aggressive`, o `broker_default` si no te pronunciaste y mandó la configuración del broker.
+- **`effective`** — lo que se aplicó de verdad a **esa llamada**: `off`, `light`, `medium` o `aggressive`.
+
+Los dos no siempre coinciden, y ahí está el valor del campo:
+
+- `aggressive` se degrada a `medium` cuando el prompt viaja dentro de un loop de tools o hay `output.language` fijado (que lo está por defecto).
+- El broker fuerza `off` en las invocaciones que procesan **contenido generado**: fragmentos de map-reduce, síntesis de segunda ronda, el juez de confianza. Por eso el eco va por invocación y no por tarea.
+- `effective: "off"` cubre también las formas de no comprimir que no son una decisión de política: compresión global apagada, o prompt por debajo del mínimo de caracteres configurado.
+
+**Si tu especificación exige probar que no hubo compresión**, la aserción es sobre las invocaciones contractuales:
+
+```bash
+curl -s -H "X-Admin-Token: $TOKEN"      http://<broker>/api/v1/tasks/$TASK/invocations   | jq -e 'all(.items[] | select(.contractual);
+              .prompt_compression.effective == "off")'
+```
+
+`null` en filas anteriores al contrato 2.10 y en llamadas que no envían prompt de usuario. Anunciado en `capabilities.prompt_compression_echo`.
 
 ### Cuando falla
 
@@ -880,6 +1017,17 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### 2.10 — ejecución demostrable (septiembre de 2026)
+
+Todo es **aditivo**: campos nuevos en respuestas que ya existían y un campo opcional en la petición. Un cliente de 2.9 sigue funcionando sin tocar nada. Lo que cambia es lo que puedes **probar** después de que una tarea se haya ejecutado sin nadie delante.
+
+- **`role` y `status` de las invocaciones vienen enumerados** en el OpenAPI, y cada invocación declara **`contractual`** (§8.1): `true` si ejecuta tu trabajo, `false` si es trabajo propio del broker. Si mantienes una lista negra de nombres de rol para separar lo tuyo, bórrala y usa este booleano — la lista se rompe en silencio en cuanto el broker añade un rol.
+- **`auxiliary_invocations: false`** en la petición (§8.4): garantiza que solo el modelo que responde ve el contenido de esa tarea. Y una garantía implícita que no tienes que pedir: **una tarea con `target_model` y `fallback_allowed: false` ya no se sondea** en ningún otro modelo. Antes sí, bajo tu propio `task_id`.
+- **Las garantías del sondeo en sombra están escritas** (§8.4), no solo observadas: qué respeta (clasificación de datos, `cloud_allowed`, `allowed_providers`, contexto y capacidades) y qué no respetaba (`target_model` a secas). Y `capabilities.auxiliary_invocations` dice si este broker las hace, para que puedas rechazar de antemano lo que no las tolere.
+- **`prompt_compression: {requested, effective}`** en cada invocación (§8.5): pedir `"off"` deja de ser una petición sin acuse de recibo. Ahora puedes escribir la aserción de que se cumplió.
+- **`final: true` marca el entregable** en `/artifacts` (§8.3), que pasa a ser la **vía canónica** para recogerlo. `result.assistant_content` sigue igual y sigue siendo una comodidad: `result` no tiene esquema y no lo tendrá (§8, «El resultado»).
+- **De dónde saca el token un proceso co-ubicado** (§3.1): el token es efímero por arranque, y con `server.publish_session_token: keyring` el broker lo deja en el almacén de credenciales del sistema, bajo `ai-broker` / `session_admin_token`, para que un runner que arranca con la máquina pueda leerlo sin que cruce la red.
 
 ### Después de 2.9 — las imágenes se miran (agosto de 2026)
 

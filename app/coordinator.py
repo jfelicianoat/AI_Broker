@@ -796,6 +796,7 @@ class ConsensusCoordinator:
                 await self._model_loaded_state(model),
                 excluded_from_learning=request.exclude_from_model_learning,
                 fingerprint=await self._invocation_fingerprint(model),
+                compression=self._compression_echo(request),
             )
             try:
                 output = await self._run_cancellable(
@@ -1057,6 +1058,7 @@ class ConsensusCoordinator:
             await self._model_loaded_state(model),
             excluded_from_learning=request.exclude_from_model_learning,
             fingerprint=await self._invocation_fingerprint(model),
+            compression=self._compression_echo(sub_request),
         )
         try:
             output = await self._run_cancellable(
@@ -1249,6 +1251,7 @@ class ConsensusCoordinator:
             await self._model_loaded_state(model),
             excluded_from_learning=request.exclude_from_model_learning,
             fingerprint=await self._invocation_fingerprint(model),
+            compression=self._compression_echo(judge_request),
         )
         try:
             output = await self._run_cancellable(
@@ -1391,6 +1394,7 @@ class ConsensusCoordinator:
                 await self._model_loaded_state(model),
                 excluded_from_learning=request.exclude_from_model_learning,
                 fingerprint=await self._invocation_fingerprint(model),
+                compression=self._compression_echo(request),
             )
             last_invocation_id = invocation_id
             try:
@@ -1615,6 +1619,7 @@ class ConsensusCoordinator:
             await self._model_loaded_state(model),
             excluded_from_learning=request.exclude_from_model_learning,
             fingerprint=await self._invocation_fingerprint(model),
+            compression=self._compression_echo(request),
         )
         try:
             turn = await self._run_cancellable_turn(
@@ -1819,6 +1824,26 @@ class ConsensusCoordinator:
                 repository.add_event(task_id, "artifact.failed", {"message": str(error)})
             except Exception:
                 pass
+
+    def _compression_echo(self, request: TaskCreateRequest) -> dict[str, str] | None:
+        """Eco {requested, effective} de la compresión de ESTA invocación.
+
+        Se captura al abrir el checkpoint, igual que la huella de ejecución, y
+        con la petición que de verdad va a viajar: el broker fuerza `off` en las
+        invocaciones que procesan contenido generado (fragmentos de map-reduce,
+        síntesis de segunda ronda, juez de confianza), así que el valor de la
+        tarea no describe lo que le pasó a cada llamada.
+
+        None cuando el proveedor no declara compresión —el bootstrap de los
+        tests—: es preferible dejar el campo vacío a inventar un eco.
+        """
+        echo = getattr(self.provider, "compression_echo", None)
+        if echo is None:
+            return None
+        try:
+            return echo(request)
+        except Exception:
+            return None
 
     def provider_user_prompt(self, request: TaskCreateRequest) -> str:
         """Prompt del usuario aplicando compresión si el proveedor la ofrece."""
@@ -2377,6 +2402,7 @@ class ConsensusCoordinator:
                 await self._model_loaded_state(model),
                 excluded_from_learning=request.exclude_from_model_learning,
                 fingerprint=await self._invocation_fingerprint(model),
+                compression=self._compression_echo(invocation_request),
             )
             try:
                 output = await self._run_cancellable(
@@ -2478,6 +2504,7 @@ class ConsensusCoordinator:
             invocation_id = repository.start_invocation(
                 task_id, run_id, "arbiter", candidate, classify_task_type(request),
                 await self._model_loaded_state(candidate),
+                compression=self._compression_echo(synthesis_request),
             )
             try:
                 output = await self._run_cancellable(

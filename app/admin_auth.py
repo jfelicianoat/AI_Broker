@@ -91,6 +91,44 @@ def resolve_admin_token(config: BrokerConfig) -> str | None:
     return token
 
 
+class AdminTokenPublishError(RuntimeError):
+    """No se pudo dejar el token de sesión donde los clientes locales lo leen."""
+
+
+def publish_session_admin_token(config: BrokerConfig, token: str | None) -> str | None:
+    """Deja el token de ESTA sesión en la fuente local acordada con los clientes.
+
+    Un proceso co-ubicado (un runner que arranca con la máquina por
+    Wake-on-LAN, una pasarela) necesita el `X-Admin-Token` y tiene prohibido
+    recibirlo por la red. Antes no tenía de dónde sacarlo: el token se genera en
+    cada arranque, vive en el entorno del proceso del broker y se imprime en una
+    consola que en ese escenario no mira nadie.
+
+    Se escribe en una entrada PROPIA del llavero
+    (`server.session_token_keyring_username`), nunca en la que
+    `resolve_admin_token` lee como fallback: esa es del operador, para fijar un
+    token estable, y pisarla convertiría el token efímero en permanente.
+
+    Devuelve el nombre de usuario del llavero donde quedó, o None si no había
+    nada que publicar o el modo está en "none". Un fallo del backend se
+    propaga: quien arranca el broker tiene que enterarse de que sus clientes
+    locales se van a quedar sin credencial, no descubrirlo por un 403.
+    """
+    if config.server.publish_session_token != "keyring" or not token:
+        return None
+    username = config.server.session_token_keyring_username
+    try:
+        import keyring
+
+        keyring.set_password(config.server.admin_keyring_service, username, token)
+    except Exception as error:
+        raise AdminTokenPublishError(
+            f"no se pudo publicar el token de sesión en el llavero "
+            f"({config.server.admin_keyring_service}/{username}): {error}"
+        ) from error
+    return username
+
+
 def admin_cookie_value(token: str, timestamp: float | None = None) -> str:
     """Cookie de sesión `ts.hmac(token, ts)`: expira server-side y no expone el token."""
     issued_at = int(timestamp if timestamp is not None else time.time())

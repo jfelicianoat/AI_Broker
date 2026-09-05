@@ -509,9 +509,111 @@
   // fila. El resto del panel no pausa.
   const HOVER_GUARD = "a:hover, button:hover, input:hover, select:hover, textarea:hover, summary:hover, label:hover";
 
+  // Selección de la cola para cancelar en bloque. El estado vive FUERA del DOM
+  // a propósito: el panel se reemplaza entero cada 5 s, así que guardarlo en
+  // las casillas lo perdería en el primer refresco, a media selección.
+  const queueSelection = new Set();
+  let queueFilter = "";
+
+  function queuePanel() {
+    return document.querySelector("#queue-panel");
+  }
+
+  function queueRows() {
+    const panel = queuePanel();
+    return panel ? Array.from(panel.querySelectorAll("tbody tr[data-queue-row]")) : [];
+  }
+
+  function syncQueuePanel() {
+    const panel = queuePanel();
+    if (!panel) return;
+    const rows = queueRows();
+    // Una tarea que ya no está en la cola (empezó a correr, o acaba de
+    // cancelarse) no puede seguir contando como seleccionada: el recuento que
+    // se enseña tiene que ser el de lo que aún se puede cancelar.
+    const present = new Set(rows.map((row) => row.dataset.queueRow));
+    queueSelection.forEach((id) => {
+      if (!present.has(id)) queueSelection.delete(id);
+    });
+    const filterInput = panel.querySelector("[data-queue-filter]");
+    if (filterInput && filterInput.value !== queueFilter) filterInput.value = queueFilter;
+    const needle = queueFilter.trim().toLowerCase();
+    rows.forEach((row) => {
+      row.hidden = needle !== "" && !row.textContent.toLowerCase().includes(needle);
+    });
+    const visible = rows.filter((row) => !row.hidden);
+    let selectedVisible = 0;
+    rows.forEach((row) => {
+      const box = row.querySelector("[data-queue-select]");
+      if (!box) return;
+      box.checked = queueSelection.has(row.dataset.queueRow);
+      if (box.checked && !row.hidden) selectedVisible += 1;
+    });
+    const total = queueSelection.size;
+    const outsideFilter = total - selectedVisible;
+    const count = panel.querySelector("[data-queue-count]");
+    if (count) {
+      // Lo marcado que el filtro esconde se dice en voz alta: si no, el botón
+      // cancelaría más tareas de las que se están viendo.
+      const plural = total === 1 ? "seleccionada" : "seleccionadas";
+      const hidden = outsideFilter > 0 ? ` (${outsideFilter} fuera del filtro)` : "";
+      count.textContent = total === 0 ? "Ninguna seleccionada" : `${total} ${plural}${hidden}`;
+    }
+    const selectAll = panel.querySelector("[data-queue-select-all]");
+    if (selectAll) {
+      selectAll.checked = visible.length > 0 && selectedVisible === visible.length;
+      selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+      selectAll.disabled = visible.length === 0;
+    }
+    const cancelButton = panel.querySelector("[data-queue-cancel]");
+    if (cancelButton) cancelButton.disabled = total === 0;
+    const clearButton = panel.querySelector("[data-queue-clear]");
+    if (clearButton) clearButton.hidden = total === 0;
+    const noMatches = panel.querySelector("[data-queue-no-matches]");
+    if (noMatches) noMatches.hidden = !(rows.length > 0 && visible.length === 0);
+  }
+
+  async function cancelQueueTasks(params, confirmMessage, trigger) {
+    if (!(await confirmDialog(confirmMessage))) return;
+    if (trigger) {
+      trigger.disabled = true;
+      trigger.setAttribute("aria-busy", "true");
+    }
+    try {
+      const response = await fetch("/dashboard/actions/tasks/cancel", {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-CSRF-Token": csrfToken()
+        },
+        body: params
+      });
+      if (!response.ok) throw new Error(httpErrorMessage(response.status));
+      const payload = await response.json();
+      // La selección se limpia antes de repintar: si no, las filas que
+      // sobrevivan volverían marcadas y el refresco seguiría en pausa.
+      queueSelection.clear();
+      await refreshDashboard();
+      toast(payload.message || "Tareas canceladas");
+      setConnBanner(null);
+    } catch (error) {
+      toast(error.message || "No se pudieron cancelar las tareas");
+    } finally {
+      if (trigger) {
+        trigger.removeAttribute("aria-busy");
+        trigger.disabled = false;
+      }
+    }
+  }
+
   function refreshPaused(element) {
     const panel = element.closest("[data-refresh-pauseable]") || element;
     if (!panel.matches("[data-refresh-pauseable]")) return false;
+    // Con tareas marcadas el refresco se detiene: reemplazar la tabla a mitad
+    // de una selección reordena las filas bajo el cursor y el clic siguiente
+    // cae sobre otra tarea. Se reanuda al cancelar o al limpiar la selección.
+    if (panel.id === "queue-panel" && queueSelection.size > 0) return true;
     // El hover sobre el panel ENTERO no pausa. Pausarlo así dejaba la tabla de
     // ficheros congelada mientras se convertía un documento: el cursor descansa
     // sobre la tabla precisamente porque estás mirando cómo cambia el estado, y
@@ -639,6 +741,71 @@
         });
       }
     });
+    root.querySelectorAll("[data-queue-filter]").forEach((input) => {
+      if (processed.has(input)) return;
+      processed.add(input);
+      input.addEventListener("input", () => {
+        queueFilter = input.value;
+        syncQueuePanel();
+      });
+    });
+    root.querySelectorAll("[data-queue-select]").forEach((box) => {
+      if (processed.has(box)) return;
+      processed.add(box);
+      box.addEventListener("change", () => {
+        if (box.checked) queueSelection.add(box.value);
+        else queueSelection.delete(box.value);
+        syncQueuePanel();
+      });
+    });
+    root.querySelectorAll("[data-queue-select-all]").forEach((box) => {
+      if (processed.has(box)) return;
+      processed.add(box);
+      box.addEventListener("change", () => {
+        // Solo alcanza a las filas visibles: marcar "todas" con un filtro
+        // puesto y llevarse por delante lo que no se ve sería una trampa.
+        queueRows().filter((row) => !row.hidden).forEach((row) => {
+          if (box.checked) queueSelection.add(row.dataset.queueRow);
+          else queueSelection.delete(row.dataset.queueRow);
+        });
+        syncQueuePanel();
+      });
+    });
+    root.querySelectorAll("[data-queue-clear]").forEach((button) => {
+      if (processed.has(button)) return;
+      processed.add(button);
+      button.addEventListener("click", () => {
+        queueSelection.clear();
+        syncQueuePanel();
+      });
+    });
+    root.querySelectorAll("[data-queue-cancel]").forEach((button) => {
+      if (processed.has(button)) return;
+      processed.add(button);
+      button.addEventListener("click", () => {
+        const total = queueSelection.size;
+        if (total === 0) return;
+        const params = new URLSearchParams();
+        queueSelection.forEach((id) => params.append("task_ids", id));
+        const noun = total === 1 ? "1 tarea seleccionada" : `${total} tareas seleccionadas`;
+        cancelQueueTasks(params, `¿Cancelar ${noun}?`, button);
+      });
+    });
+    root.querySelectorAll("[data-queue-cancel-all]").forEach((button) => {
+      if (processed.has(button)) return;
+      processed.add(button);
+      button.addEventListener("click", () => {
+        const toolbar = button.closest("[data-queue-toolbar]");
+        const total = toolbar ? Number(toolbar.dataset.queueTotal || 0) : 0;
+        // El alcance lo resuelve el servidor: el número solo sirve para que la
+        // confirmación diga cuántas se va a llevar por delante.
+        cancelQueueTasks(
+          new URLSearchParams({scope: "pending"}),
+          `¿Cancelar TODAS las tareas pendientes de la cola${total ? ` (${total})` : ""}?`,
+          button
+        );
+      });
+    });
     root.querySelectorAll("[data-refresh-target]").forEach((button) => {
       if (processed.has(button)) return;
       processed.add(button);
@@ -731,6 +898,9 @@
       });
     });
     bindPhaseTracks();
+    // Va al final: reconstruye sobre el panel recién pintado el filtro escrito
+    // y las casillas marcadas, que el servidor no conoce.
+    syncQueuePanel();
     announceStateChanges();
   }
 
