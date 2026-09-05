@@ -29,6 +29,7 @@ from app.main import create_app
 from app.maintenance import create_state_backup, restore_state_backup, verify_state_backup
 from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.resource_scheduler import ResourceScheduler
+from app.schemas import TaskStatus
 from app.startup import timeout_coherence_warnings
 
 
@@ -384,7 +385,7 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.9"
+    assert body["contract_version"] == "2.10"
     # 2.6: la frontera de datos se declara en un único campo y los carriles de
     # trabajo son consultables. Un cliente que lo vea puede omitir
     # cloud_allowed/allowed_providers y confiar en su clasificación.
@@ -510,6 +511,112 @@ def test_operational_dashboard_renders_and_queue_actions_work(tmp_path: Path) ->
     assert script.status_code == 200
     assert "refreshDashboard" in script.text
     assert "refreshPaused" in script.text
+
+
+def test_dashboard_bulk_cancel_selection_and_all_pending(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = [
+            client.post(
+                "/api/v1/tasks",
+                json={"idempotency_key": f"ui:bulk:{index}", "content": {"prompt": f"Tarea {index}"}},
+            ).json()["task_id"]
+            for index in range(4)
+        ]
+        token = dashboard_csrf(client)
+        headers = {"X-CSRF-Token": token}
+
+        fragment = client.get("/dashboard/fragments/queue")
+        selection = client.post(
+            "/dashboard/actions/tasks/cancel",
+            headers=headers,
+            data={"task_ids": created[:2]},
+        )
+        # Repetir la misma selección no vuelve a contar: ya estaban canceladas.
+        repeated = client.post(
+            "/dashboard/actions/tasks/cancel",
+            headers=headers,
+            data={"task_ids": created[:2]},
+        )
+        empty = client.post("/dashboard/actions/tasks/cancel", headers=headers, data={})
+        rest = client.post(
+            "/dashboard/actions/tasks/cancel",
+            headers=headers,
+            data={"scope": "pending"},
+        )
+        # Cola ya vacía: no es un error del cliente, responde con cero.
+        drained = client.post(
+            "/dashboard/actions/tasks/cancel",
+            headers=headers,
+            data={"scope": "pending"},
+        )
+        queue = client.get("/api/v1/queue").json()
+        states = [client.get(f"/api/v1/tasks/{task_id}").json()["status"] for task_id in created]
+
+    assert "data-queue-select-all" in fragment.text
+    assert all(f'data-queue-row="{task_id}"' in fragment.text for task_id in created)
+    assert selection.status_code == 200
+    assert selection.json() == {
+        "requested": 2, "cancelled": 2, "message": "2 tareas canceladas.",
+    }
+    assert selection.headers["hx-trigger"] == "dashboard-refresh"
+    assert repeated.json()["cancelled"] == 0
+    assert repeated.json()["message"].startswith("Ninguna")
+    assert empty.status_code == 422
+    assert empty.json()["detail"] == "NO_TASKS_SELECTED"
+    # El alcance "pendientes" lo resuelve el servidor: alcanza a las dos que
+    # quedaban sin que el panel tenga que enumerarlas.
+    assert rest.json() == {
+        "requested": 2, "cancelled": 2, "message": "2 tareas canceladas.",
+    }
+    assert drained.status_code == 200
+    assert drained.json()["cancelled"] == 0
+    assert queue["pending"] == []
+    assert states == ["cancelled"] * 4
+
+
+def test_dashboard_bulk_cancel_requires_csrf(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "ui:bulk:csrf", "content": {"prompt": "Protegida"}},
+        ).json()
+        token = dashboard_csrf(client)
+
+        missing = client.post(
+            "/dashboard/actions/tasks/cancel", data={"task_ids": [created["task_id"]]},
+        )
+        bad_origin = client.post(
+            "/dashboard/actions/tasks/cancel",
+            headers={"X-CSRF-Token": token, "Origin": "http://evil.example"},
+            data={"task_ids": [created["task_id"]]},
+        )
+        state = client.get(f"/api/v1/tasks/{created['task_id']}").json()
+
+    assert missing.status_code == 403
+    assert missing.json()["detail"] == "CSRF_VALIDATION_FAILED"
+    assert bad_origin.status_code == 403
+    assert state["status"] == "queued"
+
+
+def test_queue_fragment_keeps_tasks_waiting_for_memory(tmp_path: Path) -> None:
+    """El fragmento que refresca cada 5 s tiene que enseñar lo MISMO que la
+    página: filtrar solo por `queued` hacía desaparecer de la vista —y de
+    cualquier posibilidad de cancelarla— a la tarea que espera memoria."""
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/tasks",
+            json={"idempotency_key": "ui:waiting", "content": {"prompt": "Espera memoria"}},
+        ).json()
+        repository = client.app.state.repository
+        repository.update_task(created["task_id"], TaskStatus.waiting_for_memory)
+
+        page = client.get("/dashboard/tasks")
+        fragment = client.get("/dashboard/fragments/queue")
+        preview = client.get("/dashboard/fragments/queue-preview")
+
+    assert created["task_id"] in page.text
+    assert created["task_id"] in fragment.text
+    assert created["task_id"] in preview.text
 
 
 def test_dashboard_actions_require_csrf_and_same_origin(tmp_path: Path) -> None:

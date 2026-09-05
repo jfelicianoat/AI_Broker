@@ -100,6 +100,14 @@ class BootstrapModelProvider:
             "reserved_vram_bytes": 0,
             "loaded_models": [],
         }
+    def compression_echo(self, request: TaskCreateRequest) -> dict[str, str]:
+        """El proveedor fake no comprime nada, y lo declara.
+
+        No es cortesía con los tests: el eco de compresión es una afirmación
+        sobre lo que le pasó al prompt, y un proveedor que la omitiera dejaría
+        la telemetría sin dato justo donde es comprobable de verdad."""
+        return {"requested": request.prompt_compression or "broker_default", "effective": "off"}
+
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
         if request.inference_kind == InferenceKind.embedding:
             return ModelOutput(None, max(1, len(request.content.prompt)//4), 0, 0.0, 1.0, (0.25, 0.5, 0.75),

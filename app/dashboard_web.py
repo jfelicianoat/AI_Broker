@@ -82,10 +82,22 @@ from app.schemas import (
 )
 from app.strategy_router import describe_bucket, heuristic_for_bucket, recommend_from_cases
 
-# Lo que el panel enseña como "cola": la que nunca ha corrido y la que cedió
-# el turno esperando memoria. Ocultar la segunda dejaría tareas vivas fuera de
-# la vista, sin forma de verlas ni de cancelarlas.
-PENDING_TASK_STATUSES = (TaskStatus.queued, TaskStatus.waiting_for_memory)
+# Lo que el panel enseña como "cola": la que nunca ha corrido y las dos que
+# cedieron el turno esperando algo —memoria o las tareas de las que dependen—.
+# Ocultar cualquiera de las dos deja tareas vivas fuera de la vista, sin forma
+# de verlas ni de cancelarlas: es literalmente lo que pasaba con
+# `waiting_for_dependencies`, invisible en cola, resumen e histórico a la vez.
+PENDING_TASK_STATUSES = (
+    TaskStatus.queued,
+    TaskStatus.waiting_for_memory,
+    TaskStatus.waiting_for_dependencies,
+)
+
+# Tope de ids que acepta una cancelación en bloque. No es una regla de negocio:
+# es el guardarraíl de un cuerpo POST que llega por la red. El panel nunca pinta
+# más de 50 filas, y para "todas" existe el alcance `pending`, que resuelve la
+# lista en el servidor.
+BULK_CANCEL_MAX_IDS = 1000
 
 TEMPLATES_ROOT = Path(__file__).parent / "templates"
 CSRF_COOKIE_NAME = "ai_broker_dashboard_csrf"
@@ -674,7 +686,7 @@ def create_dashboard_router(
                 "queue": queries.list_tasks(
                     page=1,
                     page_size=50,
-                    status=TaskStatus.queued,
+                    status=PENDING_TASK_STATUSES,
                     origin=None,
                 )
             },
@@ -689,7 +701,7 @@ def create_dashboard_router(
                 "queue": queries.list_tasks(
                     page=1,
                     page_size=5,
-                    status=TaskStatus.queued,
+                    status=PENDING_TASK_STATUSES,
                     origin=None,
                 )
             },
@@ -1145,6 +1157,59 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail="TASK_NOT_FOUND") from error
         return Response(status_code=204, headers={"HX-Trigger": "dashboard-refresh"})
 
+    @protected.post("/dashboard/actions/tasks/cancel")
+    async def cancel_tasks(request: Request) -> JSONResponse:
+        """Cancela varias tareas de una vez.
+
+        Dos alcances, y la diferencia importa: `scope=pending` resuelve la lista
+        en el servidor —todo lo que espera turno, no solo las 50 filas que el
+        panel pinta— mientras que la selección explícita cancela exactamente los
+        ids marcados. Responde JSON en vez de 204 porque el recuento real
+        (cuántas seguían vivas) es la única forma de que el usuario sepa qué ha
+        pasado sin releer la tabla.
+        """
+        # El cuerpo se parsea aquí en crudo: `_read_urlencoded_form` colapsa las
+        # claves repetidas al último valor, que es justo lo que no sirve cuando
+        # `task_ids` viene una vez por tarea marcada.
+        body = (await request.body()).decode("utf-8")
+        parsed = parse_qs(body, keep_blank_values=True)
+        form = {key: values[-1] for key, values in parsed.items() if values}
+        _verify_dashboard_mutation(request, form)
+        scope = form.get("scope") or "selection"
+        if scope == "pending":
+            # Una cola vacía no es un error del cliente: entre pintar el botón
+            # y pulsarlo, el despachador puede haberla vaciado. Sigue adelante
+            # con cero y lo dice en el mensaje.
+            task_ids = repository.pending_task_ids()
+        else:
+            task_ids = list(dict.fromkeys(
+                task_id.strip()
+                for value in parsed.get("task_ids", [])
+                for task_id in value.split(",")
+                if task_id.strip()
+            ))
+            if not task_ids:
+                raise HTTPException(status_code=422, detail="NO_TASKS_SELECTED")
+        if len(task_ids) > BULK_CANCEL_MAX_IDS:
+            raise HTTPException(status_code=422, detail="TOO_MANY_TASKS")
+        cancelled = repository.request_cancel_many(task_ids)
+        logger.info(
+            "tasks.bulk_cancelled", extra={
+                "event": "tasks.bulk_cancelled",
+                "requested": len(task_ids),
+                "cancelled": len(cancelled),
+                "scope": scope,
+            },
+        )
+        return JSONResponse(
+            {
+                "requested": len(task_ids),
+                "cancelled": len(cancelled),
+                "message": _bulk_cancel_message(len(task_ids), len(cancelled)),
+            },
+            headers={"HX-Trigger": "dashboard-refresh"},
+        )
+
     @protected.post("/dashboard/actions/queue/{task_id}/{direction}", status_code=204)
     async def move_task(request: Request, task_id: str, direction: str) -> Response:
         _verify_dashboard_mutation(request)
@@ -1231,6 +1296,18 @@ def _csrf_token(request: Request) -> str:
     if valid_csrf_token_shape(existing):
         return existing
     return secrets.token_urlsafe(32)
+
+
+def _bulk_cancel_message(requested: int, cancelled: int) -> str:
+    """Resultado en una frase. El caso interesante es el parcial: entre pedir y
+    ejecutar, alguna tarea pudo terminar sola, y decir solo "N canceladas"
+    dejaría al usuario buscando las que faltan."""
+    if cancelled == 0:
+        return "Ninguna de las tareas seguía activa: no había nada que cancelar."
+    noun = "tarea cancelada" if cancelled == 1 else "tareas canceladas"
+    if cancelled == requested:
+        return f"{cancelled} {noun}."
+    return f"{cancelled} de {requested} {noun}; el resto ya había terminado."
 
 
 def _verify_dashboard_mutation(request: Request, form: dict[str, str] | None = None) -> None:

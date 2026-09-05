@@ -8,6 +8,8 @@ server:
   admin_keyring_service: ai-broker
   admin_keyring_username: dashboard_admin_token
   allow_unauthenticated_lan: false
+  publish_session_token: keyring
+  session_token_keyring_username: session_admin_token
 persistence:
   database: state/broker.db
   journal_mode: WAL

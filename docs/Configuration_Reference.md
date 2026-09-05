@@ -47,6 +47,8 @@ Lo que no cambia sin reiniciar el proceso.
 | `admin_keyring_service` | `ai-broker` | Servicio del keyring donde buscar el token si no está en el entorno |
 | `admin_keyring_username` | `dashboard_admin_token` | Usuario del keyring para ese token |
 | `allow_unauthenticated_lan` | `false` | Único opt-out del arranque fail-closed |
+| `publish_session_token` | `none` | `keyring` publica el token de cada arranque para los clientes de la misma máquina (ver abajo) |
+| `session_token_keyring_username` | `session_admin_token` | Entrada del keyring donde lo deja. **No** es la que el broker lee |
 
 **CORS.** Activarlo sin orígenes **impide arrancar**, y `*` se rechaza: el API viaja con token de administración, y abrirlo a cualquier origen lo entrega a cualquier web que visite quien lo tenga en marcha. Con orígenes declarados se monta el middleware con `allow_credentials=False` —la autenticación es la cabecera `X-Admin-Token`, que la app cliente pone a mano; permitir cookies expondría además la sesión del panel— y con los métodos y cabeceras que el broker usa. Un origen con ruta (`https://app.local/panel`) también se rechaza: el navegador compara esquema+host+puerto, así que una ruta ahí no restringe nada, solo hace que la entrada no case nunca.
 
@@ -58,6 +60,38 @@ registrado con un warning en cada arranque.
 
 Con token configurado, exigen credencial las mutaciones y las lecturas que
 contienen prompts o resultados, tanto en `/api/v1` como en el panel.
+
+**Publicación del token de sesión.** El token se genera nuevo en cada arranque,
+vive en la variable de entorno del proceso del broker y se imprime en su
+consola. Eso basta para una persona delante y no basta para nada más: un
+proceso co-ubicado que arranca con la máquina —Wake-on-LAN, tarea programada—
+no ve esa consola ni hereda ese entorno, y la única alternativa que le quedaba
+era recibir el token por la red, que es justo lo que no puede pasar.
+
+Con `publish_session_token: keyring`, cada arranque deja el token de esa sesión
+en el almacén de credenciales del SO (en Windows, el Administrador de
+credenciales: cifrado, con ACL del usuario, fuera de logs y de líneas de
+comando), bajo `admin_keyring_service` / `session_token_keyring_username`. Un
+cliente local lo lee con `keyring.get_password("ai-broker",
+"session_admin_token")` y, ante un `403`, vuelve a leerlo y reintenta una vez.
+
+Dos entradas distintas, y conviene no confundirlas:
+
+| Entrada | Quién la escribe | Quién la lee |
+|---|---|---|
+| `dashboard_admin_token` | El operador, para fijar un token estable | El broker, como *fallback* de la variable de entorno |
+| `session_admin_token` | El broker, en cada arranque | Los clientes co-ubicados. El broker **nunca** la lee |
+
+Pisar la primera con el token efímero convertiría un token de sesión en uno
+permanente; por eso son entradas separadas.
+
+`none` es el defecto para que un despliegue existente no empiece a escribir
+credenciales en el llavero de su dueño sin que él lo haya decidido. No hay modo
+"fichero" a propósito: sería el mismo secreto en claro, con permisos que
+dependen de dónde caiga el directorio y sobreviviendo a un apagado sucio. Un
+fallo del llavero **no impide arrancar** —el broker sirve igual y el token
+sigue en consola— pero queda un warning `admin.session_token_publish_failed`:
+el síntoma en el otro extremo son `403` sin explicación.
 
 ---
 

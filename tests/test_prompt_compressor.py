@@ -116,3 +116,102 @@ def test_routing_provider_respects_reload(monkeypatch):
     updated.prompt_compression.enabled = False
     asyncio.run(provider.reload_config(updated))
     assert provider.prompt_compressor.enabled is False
+
+
+# --------------------------------------------------------------------------
+# Contrato 2.10 — el eco de la compresión efectiva
+#
+# `prompt_compression: "off"` era una petición sin acuse de recibo: el valor
+# efectivo se resolvía al construir el prompt y se descartaba, así que un
+# cliente podía probar lo que PIDIÓ y nunca lo que se CUMPLIÓ. El eco no puede
+# ser una segunda implementación de la política — mentiría en cuanto una de las
+# dos cambiara — así que lo que se protege aquí es que declare exactamente lo
+# que `user_prompt` hace.
+# --------------------------------------------------------------------------
+
+
+def _provider(level="medium", enabled=True, min_chars=0):
+    from app.config import BrokerConfig
+    from app.providers.routing import RoutedModelProvider
+
+    config = BrokerConfig()
+    config.prompt_compression.enabled = enabled
+    config.prompt_compression.level = level
+    config.prompt_compression.min_chars = min_chars
+    return RoutedModelProvider(config)
+
+
+def _task(prompt, **extra):
+    from app.schemas import TaskCreateRequest
+
+    return TaskCreateRequest(
+        idempotency_key="eco", content={"prompt": prompt}, **extra,
+    )
+
+
+_VERBOSO = (
+    "Hola, por favor, básicamente necesito que resumas el informe de ventas "
+    "del último trimestre. Muchas gracias de antemano."
+)
+
+
+@pytest.mark.parametrize(
+    "kwargs, request_extra, esperado",
+    [
+        ({}, {"prompt_compression": "off"}, {"requested": "off", "effective": "off"}),
+        ({}, {}, {"requested": "broker_default", "effective": "medium"}),
+        ({"level": "light"}, {}, {"requested": "broker_default", "effective": "light"}),
+        (
+            {"enabled": False},
+            {},
+            {"requested": "broker_default", "effective": "off"},
+        ),
+        (
+            # Un nivel pedido por la tarea manda sobre la política del broker,
+            # incluso con la compresión global apagada.
+            {"enabled": False},
+            {"prompt_compression": "light"},
+            {"requested": "light", "effective": "light"},
+        ),
+        (
+            # Por debajo del mínimo no se poda nada: decir "medium" sería
+            # anunciar una compresión que no ocurrió.
+            {"min_chars": 100_000},
+            {},
+            {"requested": "broker_default", "effective": "off"},
+        ),
+    ],
+)
+def test_the_echo_declares_what_actually_happens(kwargs, request_extra, esperado):
+    provider = _provider(**kwargs)
+    request = _task(_VERBOSO, **request_extra)
+
+    echo = provider.compression_echo(request)
+
+    assert echo == esperado
+    # Y coincide con la realidad: "off" significa prompt intacto.
+    intacto = provider.user_prompt(request) == request.content.prompt
+    assert intacto == (echo["effective"] == "off")
+
+
+def test_the_echo_reports_the_degraded_level_not_the_configured_one():
+    """`aggressive` se degrada a `medium` cuando hay `output.language` fijado
+    (default "es"): el eco tiene que declarar el nivel que se aplica, que es
+    justo el matiz que un cliente no puede ver desde fuera."""
+    provider = _provider(level="aggressive")
+
+    echo = provider.compression_echo(_task(_VERBOSO))
+
+    assert echo == {"requested": "broker_default", "effective": "medium"}
+
+
+def test_embeddings_are_never_compressed_and_say_so():
+    provider = _provider()
+
+    echo = provider.compression_echo(_task(
+        _VERBOSO,
+        inference_kind="embedding",
+        output={"format": "json", "json_schema": {"type": "object"}},
+    ))
+
+    assert echo["effective"] == "off"

@@ -198,7 +198,7 @@ class DashboardQueryRepository:
             {where_sql}
             GROUP BY t.id
             ORDER BY
-              CASE WHEN t.status IN ('queued','waiting_for_memory') THEN 0
+              CASE WHEN t.status IN ('queued','waiting_for_memory','waiting_for_dependencies') THEN 0
                    WHEN t.status IN ({','.join('?' for _ in ACTIVE_STATUSES)}) THEN 1
                    ELSE 2 END,
               t.queue_position ASC,

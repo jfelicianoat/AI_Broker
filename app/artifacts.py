@@ -55,6 +55,13 @@ class ArtifactStore:
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
+            # Sin esto Windows traduce cada salto de línea a CRLF y el
+            # artefacto deja de ser byte a byte lo que produjo el modelo. El
+            # sha256 salía coherente igualmente —se calcula releyendo el
+            # fichero—, pero cerraba sobre una copia que reescribió la
+            # plataforma, no sobre la respuesta. Importa desde que /artifacts
+            # es la vía canónica del entregable.
+            newline="",
             dir=target.parent,
             prefix=f".{target.name}.",
             suffix=".tmp",

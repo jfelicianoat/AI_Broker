@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -536,6 +536,25 @@ class TaskCreateRequest(StrictBaseModel):
     # panel. Lo único que no hace es mover los indicadores que alimentan
     # decisiones automáticas.
     exclude_from_model_learning: bool = False
+    # Autorización para que el broker lance invocaciones AUXILIARES bajo esta
+    # tarea: llamadas que nadie ha pedido, con el contenido de la tarea, a un
+    # modelo que no es el que la sirve. Hoy eso es el sondeo en sombra
+    # (app.shadow_probe), que existe para dar evidencia de tiempo a modelos sin
+    # medir y sin hacer esperar a nadie.
+    #
+    # `false` es la promesa que necesita quien firma un contrato de ejecución:
+    # SOLO el modelo aprobado ve este contenido. No se apoya en la clasificación
+    # de datos porque son dos preguntas distintas —la clasificación dice por
+    # dónde puede salir el contenido, esto dice cuántos modelos pueden verlo— y
+    # una tarea `internal` que fija un modelo exacto por reproducibilidad tiene
+    # el mismo derecho a exigirlo que una confidencial.
+    #
+    # Ojo: el opt-out explícito no es la única vía. Una petición con
+    # `model_requirements.target_model` y `fallback_allowed: false` ya no se
+    # sondea aunque no envíe este campo — declarar un modelo exacto sin fallback
+    # ES declarar que solo ese modelo debe ver el contenido, y respetarlo solo
+    # para la invocación que responde era cumplir la letra y no el trato.
+    auxiliary_invocations: bool = True
     # --- Dependencias entre tareas ---
     # Etiqueta a la que pertenece esta tarea. Existe para que otra pueda
     # esperarla en bloque sin conocer sus identificadores: el caso real es un
@@ -744,6 +763,96 @@ class ExecutionFingerprint(StrictBaseModel):
 # haya honrado: eso último no es observable desde fuera y no se afirma.
 GenerationParameterStatus = Literal["not_requested", "sent", "unsupported"]
 
+# --- Vocabulario cerrado de invocaciones (contrato 2.10) ---------------------
+#
+# `role` y `status` viajaban como `str` libre, así que un cliente que quisiera
+# separar SU trabajo del que el broker hace por su cuenta no tenía más remedio
+# que escribir a mano una lista negra de nombres de rol: cualquier rol nuevo la
+# rompía en silencio y le colaba invocaciones ajenas en la validación de
+# política y en la factura de la tarea. Se enumeran aquí para que eso sea
+# verificable contra el OpenAPI.
+#
+# "unknown" no lo escribe nunca este código: es la red de seguridad para filas
+# escritas por una versión con más vocabulario del que esta conoce. Una
+# telemetría que responde 500 por un rol futuro sería peor que una que dice que
+# no lo reconoce.
+InvocationRole = Literal[
+    # Contractuales: ejecutan el trabajo que pidió el cliente.
+    "single",
+    "agent",
+    "proposer",
+    "generalist",
+    "specialist",
+    "skeptic",
+    "analyst",
+    "reviewer",
+    # Segunda ronda del consenso: los mismos proponentes revisando la síntesis.
+    "refiner",
+    "arbiter",
+    "chunk_map",
+    "chunk_reduce",
+    "confidence_judge",
+    "vision",
+    # Auxiliares: trabajo propio del broker (ver AUXILIARY_INVOCATION_ROLES).
+    "shadow_probe",
+    "unknown",
+]
+
+InvocationStatus = Literal["started", "completed", "failed", "ambiguous", "unknown"]
+
+# Roles que NO forman parte del trabajo pedido: el broker los lanza por su
+# cuenta, para aprender. Es la lista que decide `TaskInvocationItem.contractual`
+# y vive aquí —y no repartida por el código que las crea— para que añadir un rol
+# auxiliar obligue a pasar por este punto.
+AUXILIARY_INVOCATION_ROLES: frozenset[str] = frozenset({"shadow_probe"})
+
+
+# Valores admitidos, derivados de los Literal para que no haya dos listas.
+INVOCATION_ROLES: frozenset[str] = frozenset(get_args(InvocationRole))
+INVOCATION_STATUSES: frozenset[str] = frozenset(get_args(InvocationStatus))
+
+
+def invocation_role(value: str) -> InvocationRole:
+    """El rol si está enumerado; si no, "unknown".
+
+    Solo salta con filas escritas por una versión de vocabulario más amplio
+    (una vuelta atrás sobre la misma BD). Responder 500 en la telemetría por un
+    rol futuro sería peor que decir que no se reconoce.
+    """
+    return cast(InvocationRole, value) if value in INVOCATION_ROLES else "unknown"
+
+
+def invocation_status(value: str) -> InvocationStatus:
+    """El estado si está enumerado; si no, "unknown" (ver invocation_role)."""
+    return cast(InvocationStatus, value) if value in INVOCATION_STATUSES else "unknown"
+
+
+def invocation_is_contractual(role: str) -> bool:
+    """Si esta invocación forma parte del trabajo que pidió el cliente.
+
+    Un rol desconocido se declara contractual: equivocarse hacia "es tuya"
+    sobrefactura, equivocarse hacia "es mía" oculta trabajo que sí procesó el
+    contenido del cliente, que es el error que no se puede permitir.
+    """
+    return role not in AUXILIARY_INVOCATION_ROLES
+
+
+class PromptCompressionEcho(StrictBaseModel):
+    """Qué compresión se pidió y cuál se aplicó de verdad a esta invocación.
+
+    Los dos valores existen porque no siempre coinciden. `aggressive` se degrada
+    a `medium` por política global cuando el prompt viaja dentro de un loop de
+    tools o hay `output.language` fijado (ver
+    RoutedModelProvider._effective_global_level), y el broker fuerza `off` en
+    las invocaciones que procesan contenido generado —fragmentos de map-reduce,
+    síntesis de segunda ronda, el juez de confianza—. Sin `effective` un cliente
+    solo puede probar lo que PIDIÓ, no lo que se CUMPLIÓ.
+    """
+
+    requested: Literal["off", "light", "medium", "aggressive", "broker_default"]
+    effective: Literal["off", "light", "medium", "aggressive"]
+
+
 
 class EffectiveGeneration(StrictBaseModel):
     """Parámetros con los que se invocó de verdad al modelo.
@@ -781,9 +890,17 @@ class TaskInvocationItem(StrictBaseModel):
     reexpuesto bajo contrato estable, fuera de la superficie de dashboard."""
 
     invocation_id: str
-    role: str
+    # Enumerados desde el contrato 2.10: ver InvocationRole/InvocationStatus.
+    role: InvocationRole
     model: ModelReference
-    status: str
+    status: InvocationStatus
+    # Esta invocación ejecuta el trabajo que pidió el cliente (true) o es
+    # trabajo propio del broker, que nadie encargó (false: hoy solo el sondeo
+    # en sombra). Se publica como booleano y no se deja deducir del nombre del
+    # rol porque esa deducción es exactamente la lista negra a mano que un rol
+    # nuevo rompe en silencio. Regla de lectura: `false` NO cuenta ni para la
+    # factura de la tarea ni para validar la política de ejecución.
+    contractual: bool = True
     error_code: str | None = None
     tokens_input: int = 0
     tokens_output: int = 0
@@ -807,11 +924,27 @@ class TaskInvocationItem(StrictBaseModel):
     # respuesta es válida, pero el modelo no está entregándola donde debe, y al
     # comparar modelos eso importa.
     content_source: str | None = None
+    # Compresión de prompt pedida y aplicada de verdad en esta invocación. None
+    # en filas anteriores a esta versión y en las que no envían prompt de
+    # usuario (embeddings, visión de la ingesta).
+    prompt_compression: PromptCompressionEcho | None = None
 
 
 class TaskInvocationsResponse(StrictBaseModel):
     task_id: str
     items: list[TaskInvocationItem] = Field(default_factory=list)
+
+
+# Tipos de artefacto que SON el entregable de la tarea, uno por estrategia. El
+# resto de lo que cuelga de /artifacts (hoy `image_output`) acompaña a la
+# respuesta pero no la sustituye. Se publica como `TaskArtifactItem.final` para
+# que nadie tenga que replicar esta lista en el cliente.
+FINAL_ARTIFACT_TYPES: frozenset[str] = frozenset({
+    "single_output",      # estrategia single (y su variante map-reduce)
+    "agent_output",       # estrategia agent
+    "synthesis_output",   # mixture_of_agents: la síntesis del árbitro
+    "embedding_output",   # inference_kind=embedding
+})
 
 
 class TaskArtifactItem(StrictBaseModel):
@@ -837,6 +970,10 @@ class TaskArtifactItem(StrictBaseModel):
     # lista igualmente —el registro de que existió es información— pero se dice,
     # en vez de ofrecer una descarga que va a dar 404.
     available: bool = True
+    # Este artefacto ES la respuesta de la tarea, no algo que la acompaña (ver
+    # FINAL_ARTIFACT_TYPES). Una tarea completada tiene exactamente uno; el
+    # cliente que cierra con trazabilidad busca este y se lleva su `sha256`.
+    final: bool = False
 
 
 class TaskArtifactsResponse(StrictBaseModel):
@@ -1056,6 +1193,30 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # pueden listar y descargar. Es lo que hace recuperable una imagen generada
     # por un modelo, que no cabe en `result`.
     task_artifacts: bool = False
+    # --- Contrato 2.10 — ejecución demostrable -------------------------------
+    # Este broker PUEDE lanzar invocaciones auxiliares (sondeo en sombra) bajo
+    # el task_id de una tarea: llamadas que nadie pidió, con el contenido de la
+    # tarea, en un modelo distinto del que responde. Se publica para que un
+    # cliente con contratos estrictos lo sepa ANTES de encolar, y no al leer la
+    # telemetría. `false` = el operador lo tiene apagado y ninguna tarea de este
+    # broker verá una invocación no contractual.
+    auxiliary_invocations: bool = False
+    # La petición puede apagarlas con `auxiliary_invocations: false`. Se declara
+    # aparte del anterior: "el broker las hace" y "puedo impedirlo" son dos
+    # preguntas distintas, y un cliente que no vea esta capacidad debe rechazar
+    # sus tarjetas estrictas en vez de confiar en un campo que se ignora.
+    auxiliary_invocations_optout: bool = False
+    # `role` y `status` de las invocaciones están enumerados en el OpenAPI y
+    # cada invocación declara `contractual`. Sin esta capacidad, separar el
+    # trabajo propio del broker exige adivinar por el nombre del rol.
+    invocation_contract: bool = False
+    # Cada invocación declara la compresión de prompt pedida y la aplicada
+    # (`prompt_compression: {requested, effective}`), así que
+    # `prompt_compression: "off"` deja de ser una petición sin acuse.
+    prompt_compression_echo: bool = False
+    # El entregable de la tarea se identifica en /artifacts con `final: true`,
+    # y esa es la vía canónica para recogerlo (`result` sigue sin contrato).
+    canonical_artifacts: bool = False
 
 
 class FileAcceptedResponse(StrictBaseModel):
