@@ -248,12 +248,18 @@ def create_dashboard_router(
         cfg: BrokerConfig | None = None,
         config_saved: bool = False,
         config_errors: list[str] | None = None,
+        # El panel de errores lo comparten guardar, validar y sondear. Con un
+        # título fijo, un sondeo fallido anunciaba "no se ha guardado la
+        # configuración" a quien acababa de guardarla bien, y el mensaje real
+        # quedaba desmentido por su propia cabecera.
+        config_error_title: str = "No se ha guardado la configuración",
         config_review: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         return {
             "config": cfg if cfg is not None else config,
             "config_saved": config_saved,
             "config_errors": config_errors or [],
+            "config_error_title": config_error_title,
             "config_review": config_review if config_review is not None else [],
             "config_fingerprint": _config_fingerprint(),
             "nav_active": "configuracion",
@@ -892,7 +898,14 @@ def create_dashboard_router(
             }
         if errors:
             _log_config_rejected(f"probe:{provider_id}", errors)
-            return _template_response(request, "config.html", _config_page_context(config_errors=errors))
+            return _template_response(
+                request,
+                "config.html",
+                _config_page_context(
+                    config_errors=errors,
+                    config_error_title="No se ha podido analizar la compatibilidad",
+                ),
+            )
         return RedirectResponse("/dashboard/config?config_saved=true", status_code=303)
 
     @protected.get("/dashboard/actions/providers/{provider_id}/probe/progress")

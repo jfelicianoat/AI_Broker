@@ -3,6 +3,9 @@
   const processedScroll = new WeakSet();
   const scrollStorageKey = "ai-broker-dashboard-scroll";
   const testerStorageKey = "ai-broker-tester-form";
+  // Solo se usa cuando la respuesta llega sin título propio; el habitual lo pone
+  // el servidor, que es quien sabe si ha fallado guardar, validar o sondear.
+  const CONFIG_ERROR_TITLE = "No se ha guardado la configuración";
   const refreshMap = {
     "#summary-panel": "/dashboard/fragments/summary",
     "#queue-panel": "/dashboard/fragments/queue",
@@ -190,13 +193,52 @@
     return items.length ? items : [alert.textContent.trim()];
   }
 
+  // Guardar, validar y sondear comparten esta barra, y solo el servidor sabe
+  // cuál de las tres ha fallado: el título viaja en el aviso que devuelve, en
+  // vez de estar fijo aquí contradiciendo al mensaje que encabeza.
+  function alertTitle(alert) {
+    const heading = alert ? alert.querySelector("strong") : null;
+    const title = heading ? heading.textContent.trim() : "";
+    return title || CONFIG_ERROR_TITLE;
+  }
+
+  function configErrorTitle(doc) {
+    return alertTitle(doc.querySelector(".alert.danger.config-alert"));
+  }
+
   // Campo al que apunta cada error, cuando el mensaje permite deducirlo. Los
   // del panel de proveedores nombran el índice de la fila o el id del
   // proveedor, que es lo que se puede resolver contra el formulario; los
   // demás se quedan sin salto en vez de adivinar.
+  // El sondeo nombra al proveedor por su rótulo visible (display_name, o el id
+  // si no lo tiene), no por el índice de la fila: hay que buscarlo por los dos
+  // campos para saber qué ficha abrir.
+  function providerIndexByName(form, name) {
+    const needle = (name || "").trim().toLowerCase();
+    if (!needle) return null;
+    const owner = Array.from(form.querySelectorAll('[name^="custom_provider_"][name$="_id"], [name^="custom_provider_"][name$="_display_name"]'))
+      .find((input) => input.value.trim().toLowerCase() === needle);
+    return owner ? owner.getAttribute("name").split("_")[2] : null;
+  }
+
   function errorTargetField(message) {
     const form = document.querySelector("form.config-form");
     if (!form) return null;
+    // "Activa el proveedor X antes de analizarlo": la casilla que falta está en
+    // la cabecera de la ficha, lejos de los campos que el usuario acaba de
+    // rellenar, así que sin este salto el aviso no dice dónde se corrige.
+    const inactive = message.match(/Activa el proveedor (.+?) antes de analizar/i);
+    if (inactive) {
+      const index = providerIndexByName(form, inactive[1]);
+      if (index) return form.querySelector(`[name="custom_provider_${index}_enabled"]`);
+    }
+    // Falta la credencial de un api_key_env declarado: casi siempre sobra el
+    // campo, no falta la variable.
+    const credentials = message.match(/Falta credencial para (.+?):/i);
+    if (credentials) {
+      const index = providerIndexByName(form, credentials[1]);
+      if (index) return form.querySelector(`[name="custom_provider_${index}_api_key_env"]`);
+    }
     const byIndex = message.match(/Proveedor custom (\d+)\s*:/i);
     if (byIndex) return form.querySelector(`[name="custom_provider_${byIndex[1]}_id"]`);
     const byId = message.match(/Proveedor custom ([A-Za-z0-9_-]+)\s*:/i);
@@ -240,7 +282,7 @@
   // El aviso se ancla al borde inferior en vez de reemplazar el panel: el
   // formulario mide varias pantallas, y repintarlo desde el servidor borraría
   // lo que el usuario acaba de escribir, que es justo lo que debe corregir.
-  function showConfigErrors(messages) {
+  function showConfigErrors(messages, heading) {
     if (!messages.length) return;
     dismissConfigErrors();
     const bar = document.createElement("div");
@@ -248,7 +290,7 @@
     bar.setAttribute("role", "alert");
     const list = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = "No se ha guardado la configuración";
+    title.textContent = heading || CONFIG_ERROR_TITLE;
     const items = document.createElement("ul");
     messages.forEach((message) => {
       const item = document.createElement("li");
@@ -307,7 +349,7 @@
       const next = new DOMParser().parseFromString(html, "text/html");
       const errors = configErrorMessages(next);
       if (errors.length) {
-        showConfigErrors(errors);
+        showConfigErrors(errors, configErrorTitle(next));
         return true;
       }
       const nextTarget = next.querySelector(targetSelector);
@@ -365,7 +407,7 @@
       if (errors.length) {
         // La barra se queda hasta que se corrige; el toast dura 2,6 s y el
         // usuario necesita leer qué falla sin perder lo escrito.
-        showConfigErrors(errors);
+        showConfigErrors(errors, configErrorTitle(next));
         throw new Error(errors[0]);
       }
       const nextPanel = next.querySelector("#config-panel");
@@ -694,8 +736,9 @@
       const messages = Array.from(rendered.querySelectorAll("li"))
         .map((item) => item.textContent.trim())
         .filter(Boolean);
+      const heading = alertTitle(rendered);
       rendered.remove();
-      showConfigErrors(messages.length ? messages : ["No se ha guardado la configuración."]);
+      showConfigErrors(messages.length ? messages : [heading + "."], heading);
     }
     root.querySelectorAll("form").forEach((form) => {
       if (processedScroll.has(form)) return;

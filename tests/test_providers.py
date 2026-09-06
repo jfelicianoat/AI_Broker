@@ -974,6 +974,48 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0]["compatibility"], "unknown")
         self.assertIn("endpoint de ejecución", results[0]["compatibility_error"])
 
+    async def test_probe_skips_transcription_models_published_next_to_chat_models(self) -> None:
+        """Un servidor local publica su ASR en el mismo /models que sus LLM.
+        Pedirle /chat/completions a Whisper hacia que Lemonade arrancara
+        whisper-server para nada y contestara un 500 que el panel presentaba
+        como una averia del proveedor."""
+        chat_probes: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v1/models":
+                return httpx.Response(
+                    200,
+                    json={"data": [
+                        {"id": "Whisper-Large-v3"},
+                        {"id": "DeepSeek-R1-Distill-Llama-8B-NPU"},
+                    ]},
+                )
+            if request.url.path == "/v1/chat/completions":
+                chat_probes.append(json.loads(request.content)["model"])
+                return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+            raise AssertionError(f"ruta inesperada: {request.url.path}")
+
+        config = OpenAICompatibleProviderConfig(
+            id="lemonade",
+            enabled=True,
+            base_url="http://localhost:13305/v1",
+            sync_models=True,
+            probe_features=False,
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        catalog = await provider.models()
+        results = await provider.probe_all_models()
+        await provider.close()
+
+        whisper = next(item for item in catalog if item["name"] == "Whisper-Large-v3")
+        self.assertEqual(whisper["capabilities"], ["transcription"])
+        self.assertNotIn("completion", whisper["capabilities"])
+        # El LLM del mismo catalogo se sigue sondeando con normalidad.
+        self.assertEqual(chat_probes, ["DeepSeek-R1-Distill-Llama-8B-NPU"])
+        by_name = {item["name"]: item for item in results}
+        self.assertEqual(by_name["DeepSeek-R1-Distill-Llama-8B-NPU"]["compatibility"], "compatible")
+        self.assertEqual(by_name["Whisper-Large-v3"]["compatibility"], "unknown")
+
     async def test_sync_models_infers_non_chat_capabilities_from_names(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             self.assertEqual(request.url.path, "/v1/models")
@@ -1097,6 +1139,34 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         health = await RoutedModelProvider._provider_health(provider)
         self.assertEqual(health["status"], "unavailable")
         self.assertIn("INVALID_PROVIDER_RESPONSE", health["detail"])
+        await provider.close()
+
+    async def test_missing_credential_names_both_lookups_and_the_way_out(self) -> None:
+        """Declarar una variable de API key y no crearla es el tropiezo tipico al
+        dar de alta un servidor local que no pide clave. El mensaje tiene que
+        decir donde se ha buscado y que el arreglo es vaciar el campo: sin eso,
+        desde el panel parece que falta una credencial que no existe."""
+
+        def unreachable_handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("no deberia llegar a la red sin credencial")
+
+        config = OpenAICompatibleProviderConfig(
+            id="lemonade",
+            enabled=True,
+            base_url="http://localhost:13305/v1",
+            api_key_env="LEMONADE_TEST_KEY_AUSENTE",
+            keyring_username="LEMONADE_TEST_KEY_AUSENTE",
+        )
+        os.environ.pop("LEMONADE_TEST_KEY_AUSENTE", None)
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(unreachable_handler))
+        with patch("app.providers.base.CredentialResolver.get", return_value=None):
+            with self.assertRaises(ProviderError) as raised:
+                await provider.probe_chat_compatibility("modelo")
+        message = str(raised.exception)
+        self.assertEqual(raised.exception.code, "CREDENTIALS_UNAVAILABLE")
+        self.assertIn("LEMONADE_TEST_KEY_AUSENTE", message)
+        self.assertIn("ai-broker/LEMONADE_TEST_KEY_AUSENTE", message)
+        self.assertIn("Variable API key", message)
         await provider.close()
 
     async def test_sync_models_maps_http_error_and_reraises_credential_error(self) -> None:
