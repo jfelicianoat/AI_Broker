@@ -69,6 +69,7 @@ from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.providers.routing import task_affinity_excluded, task_affinity_patterns
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository
+from app.residency import build_report, local_openai_provider_roots
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
     DashboardInvocationItem,
@@ -76,6 +77,7 @@ from app.schemas import (
     DashboardTaskDetail,
     HealthResponse,
     InferenceKind,
+    ResidencyReport,
     TaskCreateRequest,
     TaskKind,
     TaskStatus,
@@ -213,6 +215,9 @@ def create_dashboard_router(
     async def resources() -> DashboardResourcesResponse:
         return await load_dashboard_resources(provider, scheduler, config)
 
+    async def residency() -> ResidencyReport:
+        return await load_dashboard_residency(provider, config)
+
     async def models() -> tuple[list[dict[str, Any]], str | None]:
         try:
             return await provider.models(), None
@@ -262,6 +267,7 @@ def create_dashboard_router(
             "active": queries.active_task_detail(),
             "health": await health_loader(),
             "resources": await resources(),
+            "residency": await residency(),
             "nav_active": "resumen",
         }
         return _template_response(request, "dashboard.html", context)
@@ -745,6 +751,14 @@ def create_dashboard_router(
             request=request,
             name="fragments/resources.html",
             context={"resources": await resources()},
+        )
+
+    @protected.get("/dashboard/fragments/residency", response_class=HTMLResponse)
+    async def residency_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/residency.html",
+            context={"residency": await residency()},
         )
 
     @protected.get("/dashboard/fragments/history", response_class=HTMLResponse)
@@ -1832,6 +1846,32 @@ async def load_dashboard_resources(
         reserved_vram_bytes=int(snapshot["reserved_vram_bytes"]),
         max_parallel_invocations=scheduler.max_parallel_invocations(),
         loaded_models=snapshot["loaded_models"],
+    )
+
+
+async def load_dashboard_residency(
+    provider,
+    config: BrokerConfig,
+) -> ResidencyReport:
+    """Informe de residencia sobre el mismo snapshot que pinta el panel.
+
+    Se pide el snapshot aquí y no se recibe hecho para que la ruta del fragmento
+    siga siendo una sola llamada; si el proveedor no responde, el informe se
+    emite igual con lo que se pueda leer del sistema y del log, que es
+    precisamente cuando más falta hace.
+    """
+    try:
+        snapshot = await provider.resource_snapshot()
+        loaded = snapshot["loaded_models"]
+        reserved = int(snapshot["reserved_vram_bytes"])
+    except ProviderError:
+        loaded, reserved = [], 0
+    return await run_in_threadpool(
+        build_report,
+        budget_bytes=int(local_memory_budget_gb(config) * 1024**3),
+        reserved_bytes=reserved,
+        loaded_models=loaded,
+        lmstudio_urls=local_openai_provider_roots(config),
     )
 
 

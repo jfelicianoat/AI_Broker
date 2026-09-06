@@ -61,6 +61,7 @@ AUTHENTICATED_ROUTES = {
     ("GET", "/api/v1/dashboard/tasks"),
     ("GET", "/api/v1/dashboard/tasks/{task_id}"),
     ("GET", "/api/v1/dashboard/resources"),
+    ("GET", "/api/v1/dashboard/residency"),
     ("GET", "/api/v1/auth/check"),
     # Documentación autogenerada. FastAPI la sirve abierta; aquí no. El
     # esquema enumera cada ruta, parámetro y modelo del broker, y eso es más

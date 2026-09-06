@@ -1,0 +1,69 @@
+{# Contraste entre el presupuesto local y lo que el runtime tiene de verdad
+   cargado. Va justo debajo de Recursos locales porque solo tiene sentido leído
+   contra el depósito que se pinta ahí arriba: aquel dice cuánto cree el broker
+   que cabe, y este dice qué techo aplica el runtime en realidad. #}
+<div id="residency-panel"
+     class="panel residency-panel"
+     hx-get="/dashboard/fragments/residency"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML"
+     data-refresh-pauseable>
+  {% set problems = residency.findings|selectattr('level', 'equalto', 'problema')|list %}
+  {% set warnings = residency.findings|selectattr('level', 'equalto', 'aviso')|list %}
+  <div class="panel-heading" id="residencia">
+    <div>
+      <h2>Residencia real</h2>
+      <p>contraste con el runtime - {{ residency.checked_at|short_time }}</p>
+    </div>
+    {% if problems %}
+      <span class="badge badge-unavailable">{{ problems|length }} problema{{ '' if problems|length == 1 else 's' }}</span>
+    {% elif warnings %}
+      <span class="badge badge-degraded">{{ warnings|length }} aviso{{ '' if warnings|length == 1 else 's' }}</span>
+    {% else %}
+      <span class="badge badge-healthy">sin desajustes</span>
+    {% endif %}
+  </div>
+  <p class="panel-note">
+    El presupuesto de arriba no es el único techo: en memoria unificada el runtime admite
+    un modelo contra la RAM libre del sistema, y desaloja lo residente cuando no le cuadra
+    aunque quede GPU de sobra.
+  </p>
+
+  <div class="residency-facts">
+    <div>
+      <span>RAM libre del sistema</span>
+      <strong>{{ residency.system_free_bytes|gb if residency.system_free_bytes else 'N/D' }}</strong>
+      <small>techo que aplica el runtime</small>
+    </div>
+    <div>
+      <span>Pool que anuncia el runtime</span>
+      <strong>{{ residency.runtime_pool_bytes|gb if residency.runtime_pool_bytes else 'N/D' }}</strong>
+      <small>{{ 'del log de arranque' if residency.runtime_pool_bytes else 'log no disponible' }}</small>
+    </div>
+    <div>
+      <span>Desalojos ({{ residency.eviction_window_hours }} h)</span>
+      <strong>{{ residency.eviction_count if residency.log_available else 'N/D' }}</strong>
+      <small>{{ ('ultimo ' ~ residency.last_eviction_at|short_date) if residency.last_eviction_at else 'ninguno registrado' }}</small>
+    </div>
+  </div>
+
+  {% if residency.lmstudio_loaded %}
+  <div class="residency-external">
+    <span>Fuera del presupuesto</span>
+    {% for model in residency.lmstudio_loaded %}<code>{{ model }}</code>{% endfor %}
+  </div>
+  {% endif %}
+
+  {% if residency.findings %}
+  <div class="residency-findings">
+    {% for finding in residency.findings %}
+    <div class="residency-finding residency-{{ finding.level }}">
+      <strong>{{ finding.title }}</strong>
+      <p>{{ finding.detail }}</p>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+    <div class="empty-inline">Lo que el broker cree residente coincide con lo que hay cargado.</div>
+  {% endif %}
+</div>
