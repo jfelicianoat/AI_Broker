@@ -1444,6 +1444,34 @@ class DashboardLoadedModel(StrictBaseModel):
     lease_count: int = 0
 
 
+class ResidencyFinding(StrictBaseModel):
+    """Un desajuste entre lo que el broker cree residente y lo que hay cargado."""
+    level: Literal["problema", "aviso", "info"]
+    title: str
+    detail: str
+
+
+class ResidencyReport(StrictBaseModel):
+    """Contraste del presupuesto local contra el estado real del runtime.
+
+    Va aparte de DashboardResourcesResponse a propósito: aquello es la lectura
+    del proveedor y esto es un diagnóstico de mejor esfuerzo sobre fuentes que
+    pueden faltar (log del runtime, LM Studio, memoria del sistema). Mezclarlos
+    obligaría a que el panel de recursos dependiera de que todas respondan.
+    """
+    checked_at: datetime
+    # None = no se pudo leer. Es el techo que el runtime aplica de verdad en una
+    # máquina de memoria unificada, y por eso se publica junto al presupuesto.
+    system_free_bytes: int | None = None
+    runtime_pool_bytes: int | None = None
+    lmstudio_loaded: list[str] = Field(default_factory=list)
+    eviction_count: int = 0
+    eviction_window_hours: int = 48
+    last_eviction_at: datetime | None = None
+    log_available: bool = False
+    findings: list[ResidencyFinding] = Field(default_factory=list)
+
+
 class DashboardResourcesResponse(StrictBaseModel):
     checked_at: datetime
     provider: str

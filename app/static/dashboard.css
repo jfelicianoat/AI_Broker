@@ -572,3 +572,24 @@ body.has-config-error-bar .app-shell { padding-bottom: 33vh; }
      se conserva, el trayecto no. */
   .probe-progress-bar span { transition: none; }
 }
+
+/* --- Residencia real ------------------------------------------------------
+   Mismo lenguaje que .resource-summary. Ningun texto por debajo de --text-body
+   salvo la unidad bajo la cifra, que es la misma regla que sigue el resto. */
+.residency-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; padding: 14px 16px; border-top: 1px solid var(--border-soft); }
+.residency-facts > div { display: flex; flex-direction: column; gap: 2px; }
+.residency-facts span { color: var(--muted); font-size: var(--text-body); }
+.residency-facts strong { color: var(--text); font-size: var(--text-title); font-variant-numeric: tabular-nums; }
+.residency-facts small { color: var(--muted); font-size: var(--text-label); }
+.residency-external { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border-soft); background: var(--well); font-size: var(--text-body); }
+.residency-external span { color: var(--muted); }
+.residency-external code { padding: 2px 6px; border: 1px solid var(--amber-line); background: var(--amber-fill); color: var(--amber-ink); font-size: var(--text-code); }
+.residency-findings { display: flex; flex-direction: column; }
+.residency-finding { padding: 12px 16px; border-top: 1px solid var(--border-soft); border-left: 3px solid var(--muted-line); }
+.residency-finding strong { display: block; margin-bottom: 4px; color: var(--text); font-size: var(--text-title-sm); }
+.residency-finding p { margin: 0; color: var(--text-3); font-size: var(--text-body); line-height: 1.5; }
+.residency-problema { border-left-color: var(--red-line); }
+.residency-problema strong { color: var(--red-ink); }
+.residency-aviso { border-left-color: var(--amber-line); }
+.residency-aviso strong { color: var(--amber-ink); }
+.residency-info { border-left-color: var(--border-strong); }

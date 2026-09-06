@@ -31,6 +31,7 @@ from app.dashboard import DashboardQueryRepository, lane_capacities
 from app.dashboard_web import (
     CSRF_COOKIE_NAME,
     create_dashboard_router,
+    load_dashboard_residency,
     load_dashboard_resources,
     set_csrf_cookie,
     valid_csrf_token_shape,
@@ -87,6 +88,7 @@ from app.schemas import (
     ModelContextResponse,
     QueueReorderRequest,
     QueueResponse,
+    ResidencyReport,
     SchedulingPolicy,
     TaskAcceptedResponse,
     TaskArtifactsResponse,
@@ -962,6 +964,11 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         # hardware de quien hospeda el broker. Protegido desde 2026-09.
         verify_admin_access(request, broker_config)
         return await load_dashboard_resources(provider, scheduler, broker_config)
+
+    @app.get("/api/v1/dashboard/residency", response_model=ResidencyReport)
+    async def dashboard_residency(request: Request) -> ResidencyReport:
+        verify_admin_access(request, broker_config)
+        return await load_dashboard_residency(provider, broker_config)
 
     @app.get("/api/v1/auth/check", response_model=AuthCheckResponse)
     def auth_check(request: Request) -> AuthCheckResponse:
