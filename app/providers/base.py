@@ -365,6 +365,14 @@ def infer_openai_compatible_capabilities(model_name: str) -> list[str]:
         capabilities.add("document")
     if any(hint in name for hint in ("video", "detector", "gliner", "ising-calibration", "reward")):
         capabilities.add("specialized")
+    # Un servidor local publica en el mismo /models sus modelos de voz junto a
+    # los de chat (Lemonade lista Whisper-Large-v3 al lado de un LLM). Sin esta
+    # rama caían en "completion" y el análisis de compatibilidad les pedía un
+    # /chat/completions que ningún ASR sabe contestar: el servidor arrancaba su
+    # motor de transcripción para nada y devolvía un 500 que se leía como una
+    # avería del proveedor.
+    if any(hint in name for hint in ("whisper", "transcrib", "speech", "voxtral", "parakeet", "-tts", "tts-")):
+        capabilities.add("transcription")
     if not capabilities:
         capabilities.add("completion")
     return sorted(capabilities)

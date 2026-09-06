@@ -14,7 +14,7 @@
 {% endif %}
 {% if config_errors %}
   <div class="alert danger config-alert">
-    <strong>No se ha guardado la configuración</strong>
+    <strong>{{ config_error_title or "No se ha guardado la configuración" }}</strong>
     <ul>
       {% for error in config_errors %}
         <li>{{ error }}</li>

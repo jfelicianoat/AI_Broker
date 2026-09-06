@@ -81,8 +81,18 @@ class OpenAICompatibleProvider:
             return {}
         key = CredentialResolver.get(self.config)
         if not key:
+            # Declarar la variable y no crearla es el error típico al dar de alta
+            # un servidor local que no pide clave: el mensaje dice los dos sitios
+            # donde se ha buscado y cuál es el arreglo, porque desde el panel no
+            # hay forma de ver que aquí se falla por un campo que sobra.
             label = self.config.display_name or self.config.id
-            raise ProviderError("CREDENTIALS_UNAVAILABLE", f"Falta credencial para {label}: {self.config.api_key_env}")
+            slot = f"{self.config.keyring_service}/{self.config.keyring_username or self.config.api_key_env}"
+            raise ProviderError(
+                "CREDENTIALS_UNAVAILABLE",
+                f"Falta credencial para {label}: no existe la variable de entorno "
+                f"{self.config.api_key_env} ni la entrada {slot} en el keyring. "
+                "Si el proveedor no pide API key, deja vacía su 'Variable API key'.",
+            )
         return {"Authorization": f"Bearer {key}"}
 
     async def models(self) -> list[dict[str, Any]]:

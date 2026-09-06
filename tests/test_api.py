@@ -1481,6 +1481,43 @@ def test_probe_rejects_the_placeholder_id_of_an_unsaved_row(tmp_path: Path) -> N
     assert "Proveedor custom no encontrado: provider-1" in response.text
 
 
+def test_probe_error_does_not_claim_the_config_was_not_saved(tmp_path: Path) -> None:
+    """El aviso rojo lo comparten guardar, validar y sondear. Con el titulo fijo,
+    un sondeo fallido anunciaba "no se ha guardado la configuracion" a quien
+    acababa de guardarla bien, y la cabecera desmentia al propio mensaje."""
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-titulo.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        response = client.post(
+            "/dashboard/actions/providers/lemonade/probe",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "auto",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                # Sin "custom_provider_1_enabled": la casilla Activo es lo unico
+                # que falta, y el sondeo no llega a tocar el proveedor.
+                "custom_provider_1_id": "lemonade",
+                "custom_provider_1_base_url": "http://localhost:13305/v1",
+                "custom_provider_1_deployment": "api",
+                "custom_provider_1_sync_models": "on",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 200
+    assert "Activa el proveedor lemonade antes de analizarlo." in response.text
+    assert "No se ha podido analizar la compatibilidad" in response.text
+    assert "No se ha guardado la configuraci" not in response.text
+
+
 def test_models_dashboard_can_probe_one_custom_model(tmp_path: Path, monkeypatch) -> None:
     class FakeProbeProvider:
         def __init__(self, config):

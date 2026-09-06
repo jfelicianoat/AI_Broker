@@ -549,6 +549,14 @@ body.has-config-error-bar .app-shell { padding-bottom: 33vh; }
    formulario de esta densidad el foco solo mueve un cursor de un píxel. */
 .field-flagged input,
 .field-flagged select { border-color: var(--red-line); box-shadow: 0 0 0 2px var(--red-fill); }
+/* La casilla "Activo" vive en la cabecera de la ficha, fuera de un `.field`, y
+   una casilla nativa no tiene borde que teñir: se marca con contorno y se
+   colorea su rótulo, que es lo que de verdad se lee a esa distancia. */
+.field-flagged input[type="checkbox"] {
+  outline: 2px solid var(--red-line);
+  outline-offset: 3px;
+}
+label.field-flagged { color: var(--red-ink); font-weight: 600; }
 
 /* Movimiento reducido. No se anula el feedback con un `animation: 0.01ms`
    global —eso destruiría señales útiles—: cada movimiento se sustituye por su
