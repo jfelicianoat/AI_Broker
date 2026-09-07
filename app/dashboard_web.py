@@ -55,6 +55,7 @@ from app.dashboard_forms import (
     _prompt_tester_feature_warnings,
     _prompt_tester_impact,
     _validation_messages,
+    custom_provider_credential_sources,
 )
 from app.ingestion.detection import ALLOWED_FORMATS
 from app.ingestion.service import (
@@ -262,6 +263,9 @@ def create_dashboard_router(
             "config_error_title": config_error_title,
             "config_review": config_review if config_review is not None else [],
             "config_fingerprint": _config_fingerprint(),
+            "provider_credentials": custom_provider_credential_sources(
+                cfg if cfg is not None else config
+            ),
             "nav_active": "configuracion",
         }
 
@@ -787,6 +791,7 @@ def create_dashboard_router(
                 "config_errors": [],
                 "config_review": [],
                 "config_fingerprint": _config_fingerprint(),
+                "provider_credentials": custom_provider_credential_sources(config),
             },
         )
 

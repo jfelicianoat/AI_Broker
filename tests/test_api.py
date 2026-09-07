@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3460,3 +3461,40 @@ def test_prune_terminal_task_artifacts(tmp_path: Path) -> None:
     assert db.query_one("SELECT COUNT(*) AS n FROM artifacts")["n"] == 0
     assert prune_terminal_task_artifacts(db, artifacts_root, older_than_days=0) == 0
     db.close()
+
+
+def test_config_page_offers_an_api_key_field_without_ever_echoing_the_secret(tmp_path: Path) -> None:
+    """La clave se teclea en el panel, se guarda en el llavero y no vuelve al
+    navegador: el campo se pinta vacío y la página solo dice de dónde sale."""
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="unsloth",
+                    enabled=True,
+                    base_url="http://127.0.0.1:8888/v1",
+                    api_key_env=None,
+                    sync_models=True,
+                ),
+            ]
+        ),
+    )
+    # Solo la ranura del proveedor: devolver algo para cualquier consulta
+    # también le daría token de admin al panel y la página iría al login.
+    def stored(service: str, username: str) -> str | None:
+        return "sk-unsloth-secretisima" if (service, username) == ("ai-broker", "unsloth_api_key") else None
+
+    with patch("keyring.get_password", side_effect=stored):
+        with TestClient(create_app(config, config_path=tmp_path / "broker_config.yaml")) as client:
+            page = client.get("/dashboard/config").text
+
+    assert 'name="custom_provider_1_api_key"' in page
+    assert 'type="password"' in page
+    assert "sk-unsloth-secretisima" not in page
+    # Hay clave guardada: se dice dónde está y se ofrece borrarla.
+    assert "ai-broker/unsloth_api_key" in page
+    assert 'name="custom_provider_1_api_key_clear"' in page
+    # La tarjeta vacía del alta no puede anunciar una credencial que no existe.
+    assert 'name="custom_provider_2_api_key_clear"' not in page

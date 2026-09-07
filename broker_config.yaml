@@ -119,17 +119,6 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    code: []
-    long_context:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
     prose:
     - '*-coder*'
     - '*_coder*'
@@ -140,6 +129,17 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    code: []
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -197,11 +197,14 @@ providers:
     base_url: http://127.0.0.1:1234/v1
     timeout_seconds: 2400.0
     api_key_env: null
+    api_key: null
     keyring_service: ai-broker
     keyring_username: lmstudio_api_key
     deployment: local
     auto_start: true
     sync_models: true
+    sync_include: []
+    sync_exclude: []
     catalog_cache_seconds: 5.0
     default_context_window: 32768
     probe_max_output_tokens: 8
@@ -593,11 +596,14 @@ providers:
     base_url: https://integrate.api.nvidia.com/v1
     timeout_seconds: 300.0
     api_key_env: NVIDIA_API_KEY
+    api_key: null
     keyring_service: ai-broker
     keyring_username: nvidia_api_key
     deployment: api
     auto_start: false
     sync_models: true
+    sync_include: []
+    sync_exclude: []
     catalog_cache_seconds: 5.0
     default_context_window: 128000
     probe_max_output_tokens: 1
@@ -2201,11 +2207,14 @@ providers:
     base_url: https://api.hcnsec.cn/v1
     timeout_seconds: 300.0
     api_key_env: HCNSEC_API_KEY
+    api_key: null
     keyring_service: ai-broker
     keyring_username: HCNSEC_api_key
     deployment: cloud
     auto_start: false
     sync_models: true
+    sync_include: []
+    sync_exclude: []
     catalog_cache_seconds: 5.0
     default_context_window: 128000
     probe_max_output_tokens: 1
@@ -2604,11 +2613,14 @@ providers:
     base_url: http://localhost:13305/v1
     timeout_seconds: 18000.0
     api_key_env: null
+    api_key: null
     keyring_service: ai-broker
     keyring_username: lemonade_api_key
     deployment: api
     auto_start: true
     sync_models: true
+    sync_include: []
+    sync_exclude: []
     catalog_cache_seconds: 5.0
     default_context_window: 128000
     probe_max_output_tokens: 1
@@ -2640,10 +2652,106 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: error
-      compatibility_checked_at: '2026-09-06T18:47:34.759641+00:00'
-      compatibility_error: 'HTTP 500 en http://localhost:13305/v1/chat/completions:
-        {"error":{"code":"model_load_error","message":"Failed to load model ''Whisper-Large-v3'':
-        whisper-server failed to start or become ready","param":"model","requested_model":"Whisper-Large-v3","type":"model_load_error"}}'
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-07T19:44:01.642944+00:00'
+      compatibility_error: 'HTTP 400 en http://localhost:13305/v1/chat/completions:
+        {"error":{"message":"This model does not support chat completion. Only LLM
+        models support this endpoint.","type":"invalid_request_error"}}'
+      features: {}
+      features_checked_at: null
+  - id: unsloth
+    enabled: true
+    adapter: openai_compatible
+    display_name: unsloth
+    base_url: http://127.0.0.1:8888/v1
+    timeout_seconds: 18000.0
+    api_key_env: UNSLOTH_API_KEY
+    api_key: null
+    keyring_service: ai-broker
+    keyring_username: unsloth_api_key
+    deployment: cloud
+    auto_start: false
+    sync_models: true
+    sync_include: []
+    sync_exclude:
+    - lmstudio-community/*
+    - huihui-ai/*
+    - JonathanColetti/*
+    - OBLITERATUS/*
+    - 0bserverx/*
+    - mradermacher/*
+    - jabbatheduck/*
+    - poolside/*
+    - tensorblock/*
+    - unsloth/Laguna-S-2.1-GGUF
+    catalog_cache_seconds: 5.0
+    default_context_window: 128000
+    probe_max_output_tokens: 1
+    probe_delay_seconds: 0.25
+    probe_max_models: 50
+    probe_skip_compatible: true
+    probe_skip_checked: true
+    probe_features: true
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+    rescue_reasoning_content: true
+    models:
+    - name: unsloth/GLM-4.7-Flash-GGUF
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-07T19:26:09.313084+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-07T19:26:12.145429+00:00'
+    - name: aj9o9/GLM-5.3-Flash-GGUF
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-07T19:44:05.130556+00:00'
+      compatibility_error: 'HTTP 404 en http://127.0.0.1:8888/v1/chat/completions:
+        {"error":{"message":"The model ''aj9o9/GLM-5.3-Flash-GGUF'' is downloaded
+        but not loaded, and ''Switch model by request'' is off, so this server can
+        only serve the loaded model. Turn it on in Unsloth Studio under Settings >
+        API.","type":"not_found_error","param":"model","code":"model_not_found"}}'
+      features: {}
+      features_checked_at: null
+    - name: unsloth/GLM-5.3-Flash-GGUF
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-07T19:44:06.938395+00:00'
+      compatibility_error: 'HTTP 404 en http://127.0.0.1:8888/v1/chat/completions:
+        {"error":{"message":"The model ''unsloth/GLM-5.3-Flash-GGUF'' is downloaded
+        but not loaded, and ''Switch model by request'' is off, so this server can
+        only serve the loaded model. Turn it on in Unsloth Studio under Settings >
+        API.","type":"not_found_error","param":"model","code":"model_not_found"}}'
+      features: {}
+      features_checked_at: null
+    - name: unsloth/Qwen3.6-35B-A3B-GGUF
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-07T19:44:08.656688+00:00'
+      compatibility_error: 'HTTP 404 en http://127.0.0.1:8888/v1/chat/completions:
+        {"error":{"message":"The model ''unsloth/Qwen3.6-35B-A3B-GGUF'' is downloaded
+        but not loaded, and ''Switch model by request'' is off, so this server can
+        only serve the loaded model. Turn it on in Unsloth Studio under Settings >
+        API.","type":"not_found_error","param":"model","code":"model_not_found"}}'
       features: {}
       features_checked_at: null

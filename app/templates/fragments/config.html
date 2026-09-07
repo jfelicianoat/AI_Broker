@@ -664,6 +664,35 @@
               <span>Variable API key</span>
               <input name="custom_provider_{{ index }}_api_key_env" value="{{ provider.api_key_env if provider and provider.api_key_env else '' }}" placeholder="NVIDIA_API_KEY (vacío si no requiere)">
             </label>
+            {# La clave se guarda en el keyring del sistema, no en el YAML (que
+               está versionado), y el campo se pinta siempre vacío: el secreto no
+               vuelve al navegador. Por eso hace falta decir aparte si hay una. #}
+            {% set credential_source = (provider_credentials | default({}, true)).get(provider.id) if provider and provider.id else none %}
+            <label class="field">
+              <span>API key</span>
+              <input type="password" name="custom_provider_{{ index }}_api_key" value="" autocomplete="off" spellcheck="false"
+                     placeholder="{% if credential_source %}guardada — deja vacío para conservarla{% else %}pega aquí la clave (vacío si no requiere){% endif %}">
+            </label>
+            <p class="form-hint provider-wide">
+              {% if credential_source == 'config' %}
+                Credencial tomada de <code>api_key</code> en el fichero de configuración; lo que escribas aquí no la sustituye.
+              {% elif credential_source == 'env' %}
+                Credencial tomada de la variable de entorno <code>{{ provider.api_key_env }}</code>; lo que escribas aquí no la sustituye.
+              {% elif credential_source == 'keyring' %}
+                Credencial guardada en el keyring (<code>ai-broker/{{ provider.keyring_username }}</code>). Deja el campo vacío para conservarla.
+              {% else %}
+                Sin credencial. Pega la clave y se guardará en el keyring del sistema: no hace falta declarar ninguna variable de entorno, y no se escribe en el YAML.
+              {% endif %}
+              {# Solo cuando la clave está en el llavero: es lo único que este
+                 formulario puede borrar. Ofrecerlo sobre una variable de entorno
+                 o sobre el YAML prometería algo que la casilla no hace. #}
+              {% if credential_source == 'keyring' %}
+              <label>
+                <input type="checkbox" name="custom_provider_{{ index }}_api_key_clear">
+                Borrar la clave guardada al guardar
+              </label>
+              {% endif %}
+            </p>
             <label class="field">
               <span>Deployment</span>
               <select name="custom_provider_{{ index }}_deployment">
@@ -701,6 +730,24 @@
               <span>Coste output / 1M</span>
               <input name="custom_provider_{{ index }}_output_cost_per_million" value="{{ provider.output_cost_per_million if provider else 0 }}" inputmode="decimal">
             </label>
+            <details class="provider-wide provider-models-details">
+              <summary>Filtro del catálogo sincronizado ({{ (provider.sync_include|length + provider.sync_exclude|length) if provider else 0 }} patrones) — opcional</summary>
+              <p class="form-hint">
+                Un endpoint no siempre sirve solo lo suyo: Unsloth Studio publica como propios los GGUF
+                que encuentra en la carpeta de LM Studio, y sincronizar su catálogo mete el de LM Studio
+                por segunda vez bajo otro proveedor. Patrones <code>fnmatch</code>, uno por línea,
+                insensibles a mayúsculas, contra el nombre del modelo. Solo afectan a lo que descubre
+                «sincronizar catálogo»; los modelos declarados a mano no se filtran.
+              </p>
+              <label class="field provider-wide">
+                <span>Incluir solo (vacío = todo)</span>
+                <textarea name="custom_provider_{{ index }}_sync_include" rows="3" placeholder="unsloth/*">{% if provider %}{{ provider.sync_include|join('\n') }}{% endif %}</textarea>
+              </label>
+              <label class="field provider-wide">
+                <span>Excluir (se aplica después y manda)</span>
+                <textarea name="custom_provider_{{ index }}_sync_exclude" rows="5" placeholder="lmstudio-community/*">{% if provider %}{{ provider.sync_exclude|join('\n') }}{% endif %}</textarea>
+              </label>
+            </details>
             <details class="provider-wide provider-models-details">
               <summary>Modelos declarados a mano ({{ provider.models|length if provider else 0 }}) — opcional</summary>
               <p class="form-hint">Solo hace falta si el proveedor no soporta sincronizar desde /models. El estado de cada modelo se ve en <a href="/dashboard/models">Modelos</a>.</p>

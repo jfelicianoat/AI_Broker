@@ -2415,3 +2415,182 @@ class ContextSizingTests(unittest.TestCase):
 
         self.assertEqual(set(silent), {"temperature", "num_predict"})
         self.assertEqual(sized["num_ctx"], 4096)
+
+
+class CredentialSourcesTests(unittest.IsolatedAsyncioTestCase):
+    """La cabecera la decide la credencial, no el nombre de la variable.
+
+    Antes `_headers` salía vacío en cuanto 'Variable API key' estaba en blanco,
+    así que una clave puesta en la configuración o en el keyring no se enviaba
+    nunca y un servidor local con autenticación devolvía 401 sin arreglo posible
+    desde el panel.
+    """
+
+    @staticmethod
+    def _config(**overrides: Any) -> OpenAICompatibleProviderConfig:
+        defaults: dict[str, Any] = {
+            "id": "unsloth",
+            "enabled": True,
+            "base_url": "http://127.0.0.1:8888/v1",
+            "sync_models": True,
+        }
+        defaults.update(overrides)
+        return OpenAICompatibleProviderConfig(**defaults)
+
+    @staticmethod
+    def _catalog_handler(seen: dict[str, Any]):
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["authorization"] = request.headers.get("authorization")
+            return httpx.Response(200, json={"data": [{"id": "modelo"}]})
+
+        return handler
+
+    async def test_keyring_alone_authenticates_without_declaring_a_variable(self) -> None:
+        seen: dict[str, Any] = {}
+        provider = OpenAICompatibleProvider(
+            self._config(api_key_env=None),
+            transport=httpx.MockTransport(self._catalog_handler(seen)),
+        )
+        with patch("keyring.get_password", return_value="sk-del-keyring"):
+            await provider.models()
+        self.assertEqual(seen["authorization"], "Bearer sk-del-keyring")
+        await provider.close()
+
+    async def test_api_key_in_the_config_is_used_and_beats_the_environment(self) -> None:
+        seen: dict[str, Any] = {}
+        provider = OpenAICompatibleProvider(
+            self._config(api_key="sk-del-fichero", api_key_env="UNSLOTH_TEST_KEY"),
+            transport=httpx.MockTransport(self._catalog_handler(seen)),
+        )
+        with patch.dict(os.environ, {"UNSLOTH_TEST_KEY": "sk-del-entorno"}):
+            await provider.models()
+        self.assertEqual(seen["authorization"], "Bearer sk-del-fichero")
+        await provider.close()
+
+    async def test_environment_still_beats_the_keyring(self) -> None:
+        seen: dict[str, Any] = {}
+        provider = OpenAICompatibleProvider(
+            self._config(api_key_env="UNSLOTH_TEST_KEY"),
+            transport=httpx.MockTransport(self._catalog_handler(seen)),
+        )
+        with patch.dict(os.environ, {"UNSLOTH_TEST_KEY": "sk-del-entorno"}):
+            with patch("keyring.get_password", return_value="sk-del-keyring"):
+                await provider.models()
+        self.assertEqual(seen["authorization"], "Bearer sk-del-entorno")
+        await provider.close()
+
+    async def test_no_variable_and_no_stored_key_still_means_no_header(self) -> None:
+        """Un servidor local abierto sigue funcionando sin credencial: consultar
+        el keyring no puede convertir 'no hace falta clave' en un error."""
+        seen: dict[str, Any] = {}
+        provider = OpenAICompatibleProvider(
+            self._config(api_key_env=None),
+            transport=httpx.MockTransport(self._catalog_handler(seen)),
+        )
+        with patch("keyring.get_password", return_value=None):
+            await provider.models()
+        self.assertIsNone(seen["authorization"])
+        await provider.close()
+
+    async def test_declaring_a_variable_that_does_not_exist_still_fails_loudly(self) -> None:
+        def unreachable(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("no debería llegar a la red sin credencial")
+
+        provider = OpenAICompatibleProvider(
+            self._config(api_key_env="UNSLOTH_TEST_KEY_AUSENTE"),
+            transport=httpx.MockTransport(unreachable),
+        )
+        os.environ.pop("UNSLOTH_TEST_KEY_AUSENTE", None)
+        with patch("keyring.get_password", return_value=None):
+            with self.assertRaises(ProviderError) as raised:
+                await provider.models()
+        self.assertEqual(raised.exception.code, "CREDENTIALS_UNAVAILABLE")
+        self.assertIn("UNSLOTH_TEST_KEY_AUSENTE", str(raised.exception))
+        self.assertIn("ai-broker/unsloth_api_key", str(raised.exception))
+        await provider.close()
+
+
+class CatalogFilterTests(unittest.IsolatedAsyncioTestCase):
+    """Un endpoint OpenAI-compatible no tiene por qué servir solo lo suyo.
+
+    Unsloth Studio publica como propios los GGUF que encuentra en la carpeta de
+    LM Studio: sincronizar su catálogo mete el de LM Studio por segunda vez con
+    otros nombres y bajo otro proveedor, y el broker acaba repartiendo trabajo
+    entre dos proveedores que cargan el mismo fichero en la misma GPU.
+    """
+
+    AJENOS = [
+        "lmstudio-community/gemma-4-31B-it-GGUF",
+        "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF",
+        "unsloth/Laguna-S-2.1-GGUF",
+    ]
+    PROPIOS = ["unsloth/GLM-4.7-Flash-GGUF", "aj9o9/GLM-5.3-Flash-GGUF"]
+
+    def _provider(self, **overrides: Any) -> OpenAICompatibleProvider:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"data": [{"id": name} for name in self.PROPIOS + self.AJENOS]}
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="unsloth",
+            enabled=True,
+            base_url="http://127.0.0.1:8888/v1",
+            api_key_env=None,
+            sync_models=True,
+            **overrides,
+        )
+        return OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+
+    async def test_without_patterns_the_catalog_is_untouched(self) -> None:
+        provider = self._provider()
+        with patch("keyring.get_password", return_value=None):
+            names = [entry["name"] for entry in await provider.models()]
+        self.assertEqual(names, self.PROPIOS + self.AJENOS)
+        await provider.close()
+
+    async def test_exclude_drops_the_models_that_belong_to_another_server(self) -> None:
+        provider = self._provider(
+            sync_exclude=["lmstudio-community/*", "huihui-ai/*", "unsloth/Laguna-S-2.1-GGUF"],
+        )
+        with patch("keyring.get_password", return_value=None):
+            names = [entry["name"] for entry in await provider.models()]
+        self.assertEqual(names, self.PROPIOS)
+        await provider.close()
+
+    async def test_include_restricts_and_exclude_still_wins_over_it(self) -> None:
+        provider = self._provider(
+            sync_include=["unsloth/*"],
+            sync_exclude=["unsloth/Laguna-S-2.1-GGUF"],
+        )
+        with patch("keyring.get_password", return_value=None):
+            names = [entry["name"] for entry in await provider.models()]
+        self.assertEqual(names, ["unsloth/GLM-4.7-Flash-GGUF"])
+        await provider.close()
+
+    async def test_patterns_are_case_insensitive(self) -> None:
+        provider = self._provider(sync_exclude=["LMSTUDIO-COMMUNITY/*"])
+        with patch("keyring.get_password", return_value=None):
+            names = [entry["name"] for entry in await provider.models()]
+        self.assertNotIn("lmstudio-community/gemma-4-31B-it-GGUF", names)
+        await provider.close()
+
+    async def test_manually_declared_models_are_not_filtered(self) -> None:
+        """El filtro es del catálogo descubierto: lo que se declara a mano es una
+        decisión explícita del operador y no se le puede quitar por un patrón."""
+        def unreachable(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("sync_models apagado: no debería llamar a /models")
+
+        config = OpenAICompatibleProviderConfig(
+            id="unsloth",
+            enabled=True,
+            base_url="http://127.0.0.1:8888/v1",
+            api_key_env=None,
+            sync_models=False,
+            sync_exclude=["lmstudio-community/*"],
+            models=[OpenAICompatibleModelConfig(name="lmstudio-community/gemma-4-31B-it-GGUF")],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(unreachable))
+        names = [entry["name"] for entry in await provider.models()]
+        self.assertEqual(names, ["lmstudio-community/gemma-4-31B-it-GGUF"])
+        await provider.close()

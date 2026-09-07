@@ -22,6 +22,7 @@ from app.providers.base import (
     ToolCall,
     _CatalogCache,
     _estimation_text,
+    catalog_filter_allows,
     classify_probe_http_error,
     decoded_json,
     effective_generation,
@@ -77,12 +78,17 @@ class OpenAICompatibleProvider:
         await self.client.aclose()
 
     def _headers(self) -> dict[str, str]:
-        if not self.config.api_key_env:
-            return {}
+        # La credencial manda, no el nombre de la variable. Antes esto salía sin
+        # cabecera en cuanto 'Variable API key' estaba vacía, y una clave puesta
+        # en la configuración o en el keyring no se enviaba nunca: un servidor
+        # local con autenticación (Unsloth Studio) devolvía 401 sin manera de
+        # arreglarlo desde el panel salvo inventarse una variable de entorno.
         key = CredentialResolver.get(self.config)
-        if not key:
+        if key:
+            return {"Authorization": f"Bearer {key}"}
+        if self.config.api_key_env:
             # Declarar la variable y no crearla es el error típico al dar de alta
-            # un servidor local que no pide clave: el mensaje dice los dos sitios
+            # un servidor local que no pide clave: el mensaje dice los sitios
             # donde se ha buscado y cuál es el arreglo, porque desde el panel no
             # hay forma de ver que aquí se falla por un campo que sobra.
             label = self.config.display_name or self.config.id
@@ -91,9 +97,11 @@ class OpenAICompatibleProvider:
                 "CREDENTIALS_UNAVAILABLE",
                 f"Falta credencial para {label}: no existe la variable de entorno "
                 f"{self.config.api_key_env} ni la entrada {slot} en el keyring. "
-                "Si el proveedor no pide API key, deja vacía su 'Variable API key'.",
+                "Pega la clave en el campo 'API key' del proveedor, o deja vacía "
+                "su 'Variable API key' si no pide credencial.",
             )
-        return {"Authorization": f"Bearer {key}"}
+        # Sin variable declarada y sin clave guardada: servidor local abierto.
+        return {}
 
     async def models(self) -> list[dict[str, Any]]:
         if not self.config.enabled:
@@ -118,6 +126,7 @@ class OpenAICompatibleProvider:
                         str(item["id"])
                         for item in payload.get("data") or []
                         if isinstance(item, dict) and item.get("id")
+                        and catalog_filter_allows(self.config, str(item["id"]))
                     ]
                 except ProviderError:
                     raise

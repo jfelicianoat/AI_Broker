@@ -20,7 +20,11 @@ from app.config import (
     OpenAICompatibleProviderConfig,
 )
 from app.logging_config import configure_logging
-from app.providers.base import infer_openai_compatible_capabilities
+from app.providers.base import (
+    CredentialResolver,
+    catalog_filter_allows,
+    infer_openai_compatible_capabilities,
+)
 from app.schemas import (
     DEFAULT_TASK_TIMEOUT_SECONDS,
     DataClassification,
@@ -592,6 +596,12 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         payload["logging"] = logging_cfg
     payload["providers"]["ollama"] = _parse_ollama_provider(current, form)
     payload["providers"]["deepseek"] = _parse_deepseek_provider(current, form)
+    # Antes de construir la config: el botón Analizar comparte formulario con
+    # Guardar y sondea con la credencial recién tecleada, que ya tiene que estar
+    # en el llavero cuando el adapter la busque. "Revisar sin guardar" no
+    # escribe nada, tampoco esto.
+    if form.get("config_action") != "validate":
+        _store_custom_provider_credentials(form)
     payload["providers"]["custom"] = _parse_custom_providers(current, form)
     return BrokerConfig.model_validate(payload)
 
@@ -681,6 +691,79 @@ def _custom_provider_form_indexes(form: dict[str, str]) -> list[int]:
     return sorted(indexes)
 
 
+DEFAULT_KEYRING_SERVICE = "ai-broker"
+
+
+def custom_provider_credential_sources(config: BrokerConfig) -> dict[str, str]:
+    """De dónde saldría la credencial de cada proveedor custom, si la hay.
+
+    El panel pinta el campo "API key" siempre vacío, así que sin esto no habría
+    forma de distinguir "no hay clave" de "hay una guardada y no te la enseño".
+    Devuelve el origen (config/env/keyring), nunca el secreto.
+    """
+    sources: dict[str, str] = {}
+    for provider in config.providers.custom:
+        source = CredentialResolver.source(provider)
+        if source:
+            sources[provider.id] = source
+    return sources
+
+
+def _custom_provider_keyring_slot(provider_id: str, index: int, form: dict[str, str]) -> tuple[str, str]:
+    """Ranura del keyring de un proveedor del formulario.
+
+    Replica el default del modelo (`<id>_api_key` cuando no se declara
+    keyring_username) porque aquí todavía no hay config validada: la clave se
+    guarda antes de construirla, para que el botón Analizar sondee con ella.
+    """
+    username = form.get(f"custom_provider_{index}_keyring_username", "").strip()
+    return DEFAULT_KEYRING_SERVICE, username or f"{provider_id}_api_key"
+
+
+def _store_custom_provider_credentials(form: dict[str, str]) -> None:
+    """Guarda en el keyring las API keys tecleadas en el panel.
+
+    El campo no viaja al YAML a propósito: broker_config.yaml está versionado y
+    una clave en claro ahí acabaría en el repositorio. Va al mismo sitio que ya
+    consulta CredentialResolver, así que el proveedor la encuentra sin declarar
+    ninguna variable de entorno.
+
+    Vacío significa "deja la que haya", no "bórrala": el campo se pinta siempre
+    en blanco (el secreto no vuelve al navegador), así que cualquier otro
+    criterio haría que guardar la configuración borrase la clave sin querer.
+    Para quitarla está la casilla de borrado.
+    """
+    import keyring
+
+    for index in _custom_provider_form_indexes(form):
+        provider_id = form.get(f"custom_provider_{index}_id", "").strip()
+        if not provider_id:
+            continue
+        secret = form.get(f"custom_provider_{index}_api_key", "").strip()
+        clear = _checked(form, f"custom_provider_{index}_api_key_clear")
+        deleted = _checked(form, f"custom_provider_{index}_delete")
+        if not secret and not clear and not deleted:
+            continue
+        service, username = _custom_provider_keyring_slot(provider_id, index, form)
+        # Dar de baja el proveedor se lleva su credencial: dejarla huérfana en
+        # el llavero es un secreto vivo que ya no aparece en ninguna pantalla.
+        if clear or deleted:
+            try:
+                keyring.delete_password(service, username)
+            except Exception:
+                # Borrar lo que no existe (o un backend que no lo permite) no es
+                # un error para quien está guardando la configuración.
+                pass
+            continue
+        try:
+            keyring.set_password(service, username, secret)
+        except Exception as error:
+            raise PromptTesterError(
+                f"Proveedor custom {provider_id}: no se pudo guardar la API key en "
+                f"el keyring ({service}/{username}): {error}"
+            ) from error
+
+
 def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list[dict[str, Any]]:
     providers: list[dict[str, Any]] = []
     for index in _custom_provider_form_indexes(form):
@@ -708,6 +791,18 @@ def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list
         else:
             models = _parse_custom_provider_models(provider_id, models_text, previous_models)
         sync_models = _checked(form, f"custom_provider_{index}_sync_models")
+        # Ausente del formulario = conservar (igual que los modelos); presente y
+        # vacío = quitar los patrones, que es una decisión legítima.
+        sync_include = (
+            _pattern_lines(form, f"custom_provider_{index}_sync_include")
+            if form.get(f"custom_provider_{index}_sync_include") is not None
+            else list(previous.sync_include) if previous is not None else []
+        )
+        sync_exclude = (
+            _pattern_lines(form, f"custom_provider_{index}_sync_exclude")
+            if form.get(f"custom_provider_{index}_sync_exclude") is not None
+            else list(previous.sync_exclude) if previous is not None else []
+        )
         if enabled and not sync_models and not models:
             raise PromptTesterError(
                 f"Proveedor custom {provider_id}: anade al menos un modelo o activa sincronizar catalogo."
@@ -720,11 +815,16 @@ def _parse_custom_providers(current: BrokerConfig, form: dict[str, str]) -> list
             "base_url": base_url.rstrip("/"),
             "timeout_seconds": _float_field(form, f"custom_provider_{index}_timeout_seconds", 300.0),
             "api_key_env": form.get(f"custom_provider_{index}_api_key_env", "").strip() or None,
-            "keyring_service": "ai-broker",
+            # El formulario no ofrece este campo (su clave va al keyring): se
+            # arrastra el valor del YAML para no borrar la de quien lo edita a mano.
+            "api_key": previous.api_key if previous is not None else None,
+            "keyring_service": DEFAULT_KEYRING_SERVICE,
             "keyring_username": form.get(f"custom_provider_{index}_keyring_username", "").strip() or None,
             "deployment": form.get(f"custom_provider_{index}_deployment", "cloud") or "cloud",
             "auto_start": _checked(form, f"custom_provider_{index}_auto_start"),
             "sync_models": sync_models,
+            "sync_include": sync_include,
+            "sync_exclude": sync_exclude,
             "default_context_window": _int_field(form, f"custom_provider_{index}_default_context_window", 128000),
             "probe_max_output_tokens": _int_field(form, f"custom_provider_{index}_probe_max_output_tokens", 1),
             "probe_delay_seconds": _float_field(form, f"custom_provider_{index}_probe_delay_seconds", 0.25),
@@ -863,7 +963,15 @@ def _apply_probe_results(
                 else (previous.features_checked_at if previous is not None else None)
             ),
         )
-    provider_config.models = list(updated_by_name.values())
+    # El merge solo acumula: un modelo que entró una vez al YAML se queda ahí
+    # aunque el endpoint deje de ofrecerlo. Con un filtro de catálogo eso
+    # dejaría a la vista justo lo que se acaba de excluir, así que al aplicar
+    # los resultados se podan los que el filtro ya no admite. Sin patrones
+    # configurados no aparta nada y el comportamiento es el de siempre.
+    provider_config.models = [
+        model for model in updated_by_name.values()
+        if catalog_filter_allows(provider_config, model.name)
+    ]
 
 
 def _build_prompt_tester_request(

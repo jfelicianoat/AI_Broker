@@ -25,7 +25,9 @@ from app.dashboard_forms import (
     _parse_model_reference,
     _parse_ollama_provider,
     _parse_proposers,
+    _store_custom_provider_credentials,
     _validation_messages,
+    custom_provider_credential_sources,
 )
 from app.schemas import ModelReference
 
@@ -347,3 +349,176 @@ def test_every_config_form_field_is_parsed() -> None:
         "campos del formulario que dashboard_forms no lee (controles muertos): "
         + ", ".join(unparsed)
     )
+
+
+class _FakeKeyring:
+    """Llavero en memoria: los tests no pueden tocar el del sistema."""
+
+    def __init__(self) -> None:
+        self.store: dict[tuple[str, str], str] = {}
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.store[(service, username)] = password
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.store.get((service, username))
+
+    def delete_password(self, service: str, username: str) -> None:
+        del self.store[(service, username)]
+
+
+def _form_with_key(**extra: str) -> dict[str, str]:
+    form = {
+        "custom_provider_1_enabled": "on",
+        "custom_provider_1_id": "unsloth",
+        "custom_provider_1_base_url": "http://127.0.0.1:8888/v1",
+        "custom_provider_1_sync_models": "on",
+    }
+    form.update(extra)
+    return form
+
+
+def test_api_key_from_the_form_goes_to_the_keyring_not_to_the_yaml(monkeypatch) -> None:
+    """broker_config.yaml está versionado: una clave en claro ahí acabaría en el
+    repositorio. El panel la guarda donde el proveedor ya la busca."""
+    fake = _FakeKeyring()
+    monkeypatch.setitem(__import__("sys").modules, "keyring", fake)
+    _store_custom_provider_credentials(_form_with_key(custom_provider_1_api_key="sk-secreta"))
+    assert fake.store == {("ai-broker", "unsloth_api_key"): "sk-secreta"}
+
+    providers = _parse_custom_providers(BrokerConfig(), _form_with_key(custom_provider_1_api_key="sk-secreta"))
+    assert providers[0]["api_key"] is None
+
+
+def test_blank_api_key_field_keeps_the_stored_one(monkeypatch) -> None:
+    """El campo se pinta siempre vacío (el secreto no vuelve al navegador), así
+    que un guardado normal no puede interpretarse como 'bórrala'."""
+    fake = _FakeKeyring()
+    fake.store[("ai-broker", "unsloth_api_key")] = "sk-previa"
+    monkeypatch.setitem(__import__("sys").modules, "keyring", fake)
+    _store_custom_provider_credentials(_form_with_key(custom_provider_1_api_key="   "))
+    assert fake.store[("ai-broker", "unsloth_api_key")] == "sk-previa"
+
+
+def test_clear_checkbox_and_provider_deletion_remove_the_stored_key(monkeypatch) -> None:
+    fake = _FakeKeyring()
+    fake.store[("ai-broker", "unsloth_api_key")] = "sk-previa"
+    monkeypatch.setitem(__import__("sys").modules, "keyring", fake)
+    _store_custom_provider_credentials(_form_with_key(custom_provider_1_api_key_clear="on"))
+    assert fake.store == {}
+
+    # Dar de baja el proveedor tampoco deja la credencial huérfana en el llavero.
+    fake.store[("ai-broker", "unsloth_api_key")] = "sk-previa"
+    _store_custom_provider_credentials(_form_with_key(custom_provider_1_delete="on"))
+    assert fake.store == {}
+
+
+def test_keyring_failure_becomes_a_readable_form_error(monkeypatch) -> None:
+    class _Broken(_FakeKeyring):
+        def set_password(self, service: str, username: str, password: str) -> None:
+            raise RuntimeError("backend caído")
+
+    monkeypatch.setitem(__import__("sys").modules, "keyring", _Broken())
+    with pytest.raises(PromptTesterError, match="no se pudo guardar la API key"):
+        _store_custom_provider_credentials(_form_with_key(custom_provider_1_api_key="sk-secreta"))
+
+
+def test_saving_from_the_panel_keeps_an_api_key_written_by_hand_in_the_yaml() -> None:
+    """El formulario no ofrece el campo `api_key`: si no se arrastrase, guardar
+    cualquier otra cosa desde el panel borraría la clave de quien edita el YAML."""
+    config = BrokerConfig(
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="unsloth",
+                    enabled=True,
+                    base_url="http://127.0.0.1:8888/v1",
+                    api_key="sk-en-el-fichero",
+                    sync_models=True,
+                )
+            ]
+        )
+    )
+    providers = _parse_custom_providers(config, _form_with_key())
+    assert providers[0]["api_key"] == "sk-en-el-fichero"
+
+
+def test_credential_sources_report_where_the_key_comes_from_without_revealing_it(monkeypatch) -> None:
+    fake = _FakeKeyring()
+    fake.store[("ai-broker", "conkeyring_api_key")] = "sk-guardada"
+    monkeypatch.setitem(__import__("sys").modules, "keyring", fake)
+    monkeypatch.setenv("PROVEEDOR_CON_ENV_KEY", "sk-entorno")
+    config = BrokerConfig(
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="confichero", base_url="http://x/v1", api_key="sk-fichero", api_key_env=None
+                ),
+                OpenAICompatibleProviderConfig(
+                    id="conenv", base_url="http://x/v1", api_key_env="PROVEEDOR_CON_ENV_KEY"
+                ),
+                OpenAICompatibleProviderConfig(id="conkeyring", base_url="http://x/v1", api_key_env=None),
+                OpenAICompatibleProviderConfig(id="sinclave", base_url="http://x/v1", api_key_env=None),
+            ]
+        )
+    )
+    sources = custom_provider_credential_sources(config)
+    assert sources == {"confichero": "config", "conenv": "env", "conkeyring": "keyring"}
+
+
+def test_probe_results_prune_models_the_catalog_filter_no_longer_admits() -> None:
+    """El merge de resultados solo acumula: sin poda, los modelos ajenos que ya
+    estaban en el YAML seguirían a la vista justo después de excluirlos."""
+    config = BrokerConfig(
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="unsloth",
+                    enabled=True,
+                    base_url="http://127.0.0.1:8888/v1",
+                    sync_models=True,
+                    sync_exclude=["lmstudio-community/*"],
+                    models=[
+                        OpenAICompatibleModelConfig(name="unsloth/GLM-4.7-Flash-GGUF"),
+                        OpenAICompatibleModelConfig(name="lmstudio-community/gemma-4-31B-it-GGUF"),
+                    ],
+                )
+            ]
+        )
+    )
+    _apply_probe_results(config, "unsloth", [], catalog=[{"name": "unsloth/GLM-4.7-Flash-GGUF"}])
+    assert [m.name for m in config.providers.custom[0].models] == ["unsloth/GLM-4.7-Flash-GGUF"]
+
+
+def test_catalog_filter_patterns_survive_a_form_that_does_not_carry_them() -> None:
+    """El sondeo reescribe el YAML desde el formulario: si un panel viejo o un
+    fragmento sin el campo lo omite, los patrones no pueden desaparecer."""
+    config = BrokerConfig(
+        providers=ProvidersConfig(
+            custom=[
+                OpenAICompatibleProviderConfig(
+                    id="unsloth",
+                    enabled=True,
+                    base_url="http://127.0.0.1:8888/v1",
+                    sync_models=True,
+                    sync_exclude=["lmstudio-community/*"],
+                )
+            ]
+        )
+    )
+    form = {
+        "custom_provider_1_enabled": "on",
+        "custom_provider_1_id": "unsloth",
+        "custom_provider_1_base_url": "http://127.0.0.1:8888/v1",
+        "custom_provider_1_sync_models": "on",
+    }
+    assert _parse_custom_providers(config, form)[0]["sync_exclude"] == ["lmstudio-community/*"]
+
+    # Presente y vacío sí es una decisión: quitar los patrones.
+    vaciado = _parse_custom_providers(config, {**form, "custom_provider_1_sync_exclude": ""})
+    assert vaciado[0]["sync_exclude"] == []
+
+    escrito = _parse_custom_providers(
+        config, {**form, "custom_provider_1_sync_exclude": " lmstudio-community/*\n\n huihui-ai/* "}
+    )
+    assert escrito[0]["sync_exclude"] == ["lmstudio-community/*", "huihui-ai/*"]
