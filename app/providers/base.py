@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from typing import Any
 
 import httpx
@@ -870,14 +871,72 @@ def classify_probe_http_error(error: httpx.HTTPStatusError) -> tuple[str, str]:
     return "incompatible", message
 
 
+def catalog_filter_allows(config: Any, name: str) -> bool:
+    """¿Entra este modelo en el catálogo sincronizado del proveedor?
+
+    Un endpoint OpenAI-compatible no tiene por qué servir solo sus modelos:
+    Unsloth Studio publica como propios los GGUF que encuentra en la carpeta de
+    LM Studio. Sincronizar su catálogo duplica entonces el de LM Studio con
+    otros nombres y bajo otro proveedor, y el broker —que no puede saber que son
+    el mismo fichero— reparte trabajo entre dos proveedores que compiten por la
+    misma GPU.
+
+    `sync_include` vacío significa "todo". `sync_exclude` se aplica después y
+    manda: excluir de más es reversible, colar un modelo ajeno no.
+    """
+    identity = str(name or "").strip().lower()
+    if not identity:
+        return False
+    include = [str(pattern).lower() for pattern in getattr(config, "sync_include", None) or []]
+    if include and not any(fnmatch(identity, pattern) for pattern in include):
+        return False
+    exclude = [str(pattern).lower() for pattern in getattr(config, "sync_exclude", None) or []]
+    return not any(fnmatch(identity, pattern) for pattern in exclude)
+
+
 class CredentialResolver:
+    """Tres sitios donde puede estar la clave de un proveedor, en orden.
+
+    `api_key` (la clave escrita en la configuración) gana a la variable de
+    entorno, y esta al keyring. El orden importa poco mientras solo haya una,
+    pero al haber tres hace falta uno fijo: lo explícito en el fichero manda
+    sobre el entorno del proceso, y el entorno sobre el almacén del sistema.
+
+    El keyring se consulta aunque no se declare ninguna variable: un servidor
+    local que pide credencial (Unsloth Studio, por ejemplo) no tiene por qué
+    obligar a inventarse un nombre de variable que no existe en ningún sitio.
+    """
+
+    CONFIG = "config"
+    ENV = "env"
+    KEYRING = "keyring"
+
     @staticmethod
-    def get(config: Any) -> str | None:
-        value = os.environ.get(config.api_key_env)
-        if value:
-            return value
+    def resolve(config: Any) -> tuple[str | None, str | None]:
+        """Devuelve (clave, origen); (None, None) si no hay credencial."""
+        direct = (getattr(config, "api_key", None) or "").strip()
+        if direct:
+            return direct, CredentialResolver.CONFIG
+        env_name = getattr(config, "api_key_env", None)
+        if env_name:
+            value = os.environ.get(env_name)
+            if value:
+                return value, CredentialResolver.ENV
         try:
             import keyring
-            return keyring.get_password(config.keyring_service, config.keyring_username)
+            stored = keyring.get_password(config.keyring_service, config.keyring_username)
         except Exception:
-            return None
+            return None, None
+        if stored:
+            return stored, CredentialResolver.KEYRING
+        return None, None
+
+    @staticmethod
+    def get(config: Any) -> str | None:
+        return CredentialResolver.resolve(config)[0]
+
+    @staticmethod
+    def source(config: Any) -> str | None:
+        """Origen de la credencial sin devolverla: el panel dice si hay clave
+        y de dónde sale, pero el secreto no vuelve nunca al navegador."""
+        return CredentialResolver.resolve(config)[1]

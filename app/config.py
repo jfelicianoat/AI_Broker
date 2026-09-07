@@ -674,11 +674,33 @@ class OpenAICompatibleProviderConfig(BaseModel):
     # suyo se sube al plazo por defecto de una tarea (ver validate_provider_id).
     timeout_seconds: float = Field(default=300, gt=0)
     api_key_env: str | None = Field(default="NVIDIA_API_KEY", max_length=120)
+    # La clave en sí, como alternativa al nombre de la variable. Existe para
+    # quien edita el YAML a mano o lo genera fuera del repositorio: el panel
+    # NUNCA escribe aquí, porque broker_config.yaml está versionado y una clave
+    # en claro acabaría en el histórico de git. Lo que se teclea en el campo
+    # "API key" del panel va al keyring (la misma ranura que ya lee
+    # CredentialResolver) y este campo se conserva intacto al guardar.
+    api_key: str | None = Field(default=None, max_length=512, repr=False)
     keyring_service: str = Field(default="ai-broker", max_length=120)
     keyring_username: str | None = Field(default=None, max_length=120)
     deployment: Literal["cloud", "api", "local"] = "cloud"
     auto_start: bool = False
     sync_models: bool = False
+    # Filtro del catálogo descubierto por sync_models, en patrones fnmatch
+    # insensibles a mayúsculas contra el nombre del modelo.
+    #
+    # Un endpoint no tiene por qué servir solo lo suyo: Unsloth Studio publica
+    # como propios los GGUF que encuentra en la carpeta de LM Studio, así que
+    # sincronizar su catálogo mete el de LM Studio por segunda vez, con otro
+    # nombre y bajo otro proveedor. Para el broker son modelos distintos —los
+    # identificadores no se parecen— y acaba repartiendo trabajo entre dos
+    # proveedores que cargan el MISMO fichero en la misma GPU.
+    #
+    # `sync_include` vacío significa "todo"; con patrones, solo entra lo que
+    # case con alguno. `sync_exclude` se aplica después y manda sobre él.
+    # Ninguno de los dos toca los modelos declarados a mano en `models`.
+    sync_include: list[str] = Field(default_factory=list)
+    sync_exclude: list[str] = Field(default_factory=list)
     catalog_cache_seconds: float = Field(default=5.0, ge=0)
     default_context_window: int = Field(default=128_000, gt=0)
     probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
@@ -715,6 +737,8 @@ class OpenAICompatibleProviderConfig(BaseModel):
             raise ValueError("provider id only allows letters, numbers, underscore and dash")
         if self.api_key_env is not None and not self.api_key_env.strip():
             self.api_key_env = None
+        if self.api_key is not None and not self.api_key.strip():
+            self.api_key = None
         if self.keyring_username is None:
             self.keyring_username = f"{self.id}_api_key"
         if (

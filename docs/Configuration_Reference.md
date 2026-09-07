@@ -26,9 +26,12 @@ documento tiene un error que hay que corregir.
   compartido en vivo. Las excepciones son las que dependen del proceso o de la
   construcción de la app: `server.*`, `persistence.database` y
   `logging.*`, que exigen reiniciar.
-- **Ninguna credencial vive aquí.** Los campos `*_api_key_env` nombran una
-  variable de entorno; las claves se guardan en el keyring del sistema. El YAML
-  guarda el *nombre*, nunca el secreto.
+- **Ninguna credencial vive aquí, salvo que la pongas tú.** Los campos
+  `*_api_key_env` nombran una variable de entorno; las claves se guardan en el
+  keyring del sistema, y es donde escribe el campo "API key" del panel. El único
+  campo que admite el secreto en claro es `providers.custom[].api_key`, pensado
+  para un YAML que no se versiona: en este repositorio `broker_config.yaml` sí
+  está en git, así que usar ese campo aquí mete la clave en el histórico.
 
 ---
 
@@ -475,12 +478,15 @@ usar los nombres reservados `ollama`, `deepseek` ni `bootstrap`.
 | `display_name` | `null` | Nombre para el panel |
 | `base_url` | *(obligatorio)* | |
 | `timeout_seconds` | `300` (remoto) / `2400` (`deployment: local`) | Un proveedor local que no declare el suyo hereda el plazo por defecto de una tarea; un valor explícito se respeta siempre |
-| `api_key_env` | `NVIDIA_API_KEY` | Ojo con el defecto heredado: en un proveedor que no sea NVIDIA, ponlo o vacíalo explícitamente |
+| `api_key_env` | `NVIDIA_API_KEY` | Ojo con el defecto heredado: en un proveedor que no sea NVIDIA, ponlo o vacíalo explícitamente. Vaciarlo ya no significa "sin credencial": si hay clave guardada, se envía igual |
+| `api_key` | `null` | La clave en claro, para un YAML que no se versiona. El panel nunca escribe aquí y conserva lo que encuentre |
 | `keyring_service` | `ai-broker` | |
-| `keyring_username` | `null` → `{id}_api_key` | Se rellena solo con el id del proveedor |
+| `keyring_username` | `null` → `{id}_api_key` | Se rellena solo con el id del proveedor. Es donde el panel guarda lo que se teclea en "API key" |
 | `deployment` | `cloud` | `cloud` \| `api` \| `local`. **Es lo que decide la frontera de datos**: solo `local` cuenta como local para `local_only`/`confidential` |
 | `auto_start` | `false` | Levantar el servidor local al arrancar. Hoy solo implementado para LM Studio (`lms server start`) y solo con `deployment: local`; en cualquier otro caso se ignora con un warning |
 | `sync_models` | `false` | Descubrir el catálogo llamando a `/models` en vez de usar solo la lista escrita en `models` |
+| `sync_include` | `[]` | Patrones fnmatch: con alguno, solo entra al catálogo lo que case. Vacío = todo |
+| `sync_exclude` | `[]` | Patrones fnmatch que apartan del catálogo. Se aplica después de `sync_include` y manda sobre él |
 | `catalog_cache_seconds` | `5.0` | |
 | `default_context_window` | `128000` | Ventana que se asume para un modelo descubierto sin declarar |
 | `probe_max_output_tokens` | `1` | Tokens de cada petición de sondeo (1–1024) |
@@ -492,6 +498,31 @@ usar los nombres reservados `ollama`, `deepseek` ni `bootstrap`.
 | `input_cost_per_million` / `output_cost_per_million` | `0.0` | Tarifas por defecto del proveedor; cada modelo puede fijar las suyas |
 | `rescue_reasoning_content` | `true` | Usar `reasoning_content` cuando `content` llega vacío. Nunca pisa una respuesta válida y siempre queda marcado con `content_source` |
 | `models` | `[]` | Catálogo declarado (ver abajo) |
+
+**El catálogo sincronizado se filtra con `sync_include`/`sync_exclude`**
+(patrones fnmatch, insensibles a mayúsculas, contra el nombre del modelo). Hace
+falta porque un endpoint no tiene por qué servir solo lo suyo: Unsloth Studio
+publica como propios los GGUF que encuentra en la carpeta de LM Studio
+(`~/.lmstudio/models`, cableado en su código y sin ajuste que lo apague), así
+que sincronizar su catálogo mete el de LM Studio por segunda vez con otros
+nombres y bajo otro proveedor. El broker no puede saber que son el mismo
+fichero —los identificadores no se parecen en nada— y acaba repartiendo trabajo
+entre dos proveedores que cargan el mismo modelo en la misma GPU.
+
+El filtro solo toca lo que descubre `sync_models`: los modelos declarados a mano
+en `models` son una decisión explícita y no se filtran. Al aplicar los
+resultados de un análisis se podan del YAML los que el filtro ya no admite; sin
+patrones configurados no aparta nada.
+
+**De dónde sale la credencial**, en este orden: `api_key` → la variable de
+entorno de `api_key_env` → la ranura `keyring_service/keyring_username` del
+keyring. El keyring se consulta aunque `api_key_env` esté vacío, así que un
+servidor local con autenticación (Unsloth Studio, por ejemplo) funciona sin
+inventarse un nombre de variable. Solo se exige credencial cuando `api_key_env`
+declara una variable y no hay clave en ninguno de los tres sitios: ahí sale
+`CREDENTIALS_UNAVAILABLE` antes de tocar la red. Sin variable declarada y sin
+clave guardada no se manda cabecera, que es lo que necesita un servidor local
+abierto.
 
 Cada entrada de `models`:
 
