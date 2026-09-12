@@ -493,10 +493,17 @@
         badge.classList.add(payload.compatibility_class || "model-unknown");
         badge.textContent = payload.compatibility_text || "Pendiente de analizar";
       }
-      const errorNode = row ? row.querySelector(".compatibility-error") : null;
-      if (errorNode) {
+      // El error vive en la fila-detalle que sigue al modelo, no dentro de la
+      // fila: es la que se oculta entera cuando el sondeo deja de devolverlo.
+      const errorRow = row && row.nextElementSibling && row.nextElementSibling.matches("[data-row-detail]")
+        ? row.nextElementSibling
+        : null;
+      const errorNode = errorRow ? errorRow.querySelector(".compatibility-error") : null;
+      if (errorRow && errorNode) {
         errorNode.textContent = payload.compatibility_error || "";
-        errorNode.hidden = !payload.compatibility_error;
+        errorRow.hidden = !payload.compatibility_error;
+        const details = errorRow.querySelector("details");
+        if (details) details.open = false;
       }
       toast(payload.message || "Compatibilidad actualizada");
     } catch (error) {
@@ -523,12 +530,21 @@
     const requiredCompat = activeChips
       .filter((value) => value.startsWith("compat:"))
       .map((value) => value.slice("compat:".length));
-    table.querySelectorAll("tbody tr").forEach((row) => {
+    table.querySelectorAll("tbody tr:not([data-row-detail])").forEach((row) => {
       const textOk = needle === "" || row.textContent.toLowerCase().includes(needle);
       const rowCaps = (row.getAttribute("data-caps") || "").split(/\s+/).filter(Boolean);
       const capsOk = requiredCaps.every((cap) => rowCaps.includes(cap));
       const compatOk = requiredCompat.length === 0 || requiredCompat.includes(row.getAttribute("data-compat") || "");
       row.hidden = !(textOk && capsOk && compatOk);
+      // La fila-detalle no se filtra por su cuenta: sigue a su modelo. Si se
+      // evaluara sola, un filtro por nombre dejaria el error colgando bajo
+      // otro modelo. Sin error propio se queda oculta pase lo que pase.
+      const detail = row.nextElementSibling;
+      if (detail && detail.matches("[data-row-detail]")) {
+        const errorText = detail.querySelector(".compatibility-error");
+        const hasError = !!errorText && errorText.textContent.trim() !== "";
+        detail.hidden = row.hidden || !hasError;
+      }
     });
   }
 
