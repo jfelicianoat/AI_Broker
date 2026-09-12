@@ -99,10 +99,7 @@
                             </button>
                           {% endif %}
                         </td>
-                        <td>
-                          <strong>{{ model.name }}</strong>
-                          <small class="compatibility-error" {% if not model.compatibility_error %}hidden{% endif %}>{{ model.compatibility_error or '' }}</small>
-                        </td>
+                        <td><strong>{{ model.name }}</strong></td>
                         <td>{{ model.provider }}</td>
                         <td>{{ model.deployment }}</td>
                         <td>{{ model.context_window or 'N/D' }}</td>
@@ -116,7 +113,7 @@
                             N/D
                           {%- endif -%}
                         </td>
-                        <td>
+                        <td class="compat-cell">
                           {% if model.provider|lower in probeable_provider_ids %}
                             <form class="compatibility-probe-form" method="post" action="/dashboard/actions/models/probe">
                               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -132,6 +129,24 @@
                           {% else %}
                             <span class="badge {{ model|model_compatibility_class }}">{{ model|model_compatibility_text }}</span>
                           {% endif %}
+                        </td>
+                      </tr>
+                      {# El error del proveedor va en su propia fila a lo ancho de
+                         la tabla, no bajo el nombre del modelo: son 300-600
+                         caracteres y, metidos en una celda, estiraban la columna
+                         hasta empujar los botones fuera de la pantalla. Aquí no
+                         reparte ancho a ninguna columna. La fila existe siempre
+                         —oculta si no hay error— porque el sondeo la rellena sin
+                         recargar la pagina. #}
+                      <tr class="provider-error-row" data-row-detail
+                          {% if not model.compatibility_error %}hidden{% endif %}>
+                        <td colspan="9">
+                          <details class="provider-error">
+                            <summary>
+                              <span class="provider-error-tag">Error del proveedor</span>
+                              <span class="compatibility-error">{{ model.compatibility_error or '' }}</span>
+                            </summary>
+                          </details>
                         </td>
                       </tr>
                     {% endfor %}

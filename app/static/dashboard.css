@@ -296,7 +296,23 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .routing-strat { display: flex; gap: 8px; align-items: baseline; font-size: var(--text-body); }
 .routing-strat small { color: var(--muted); font-size: var(--text-label); }
 .routing-reason { display: block; margin-top: 4px; color: var(--muted); line-height: 1.4; }
-.routing-subheading { margin: 16px 16px 0; font-size: var(--text-title-sm); font-weight: 680; }
+.routing-zone {
+  border-top: 1px solid var(--border);
+  border-left: 4px solid var(--zone);
+  background-image: linear-gradient(var(--zone-wash), var(--zone-wash));
+}
+.routing-zone-heading {
+  min-height: 46px; padding: 11px 16px; display: flex; align-items: center;
+  justify-content: space-between; gap: 12px;
+  background-color: var(--elevated);
+  background-image: linear-gradient(var(--zone-veil), var(--zone-veil));
+  border-bottom: 2px solid var(--zone);
+}
+.routing-zone-heading h3 { margin: 0; font-size: var(--text-title-sm); font-weight: 680; }
+.routing-zone .table-wrap table thead th { background: transparent; }
+/* La cabecera de la zona ya es la banda fuerte; la de la tabla, justo debajo,
+   deja de competir con ella y se queda como fila de rotulos. */
+.affinity-table td:first-child { border-left: 4px solid var(--zone); }
 
 .upload-form { display: flex; gap: 14px; align-items: end; padding: 4px 16px 16px; flex-wrap: wrap; }
 .upload-form .field { min-width: 320px; }
@@ -343,8 +359,40 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
    --border y la cabecera de cada una se apoya en el escalón tonal --elevated,
    de modo que el ojo encuentra el bloque antes de leer su título. Separación
    por tono y espacio, nunca por adorno. */
-.config-subsection { border-top: 1px solid var(--border); }
-.config-subsection > .subsection-heading { background: var(--elevated); border-bottom: 1px solid var(--border-soft); }
+/* Zonas de ajuste -----------------------------------------------------------
+   Cada bloque lleva su propio color en el rail de la izquierda y en la linea
+   bajo su cabecera: el rail dice donde empieza y donde acaba la zona, el color
+   dice cual es. Siete tonos en ciclo, ninguno de la familia verde/ambar/rojo,
+   que en este panel significan salud y no pertenencia.
+
+   El color solo entra como velo, y por eso no toca a lo que va dentro: con el
+   mas cargado de los siete, el texto apagado pasa de 6.85:1 a 6.28:1 sobre el
+   cuerpo y se queda en 5.05:1 sobre la cabecera, ambos por encima del 4.5:1 de
+   AA; los campos conservan su fondo hundido y su 16.7:1 intactos.
+   ------------------------------------------------------------------------- */
+[data-zone] {
+  --zone: var(--muted-line);
+  --zone-veil: rgba(159, 179, 201, .14);
+  --zone-wash: rgba(159, 179, 201, .05);
+}
+[data-zone="1"] { --zone: #34c9b0; --zone-veil: rgba(52, 201, 176, .14);  --zone-wash: rgba(52, 201, 176, .05); }
+[data-zone="2"] { --zone: #5aaef7; --zone-veil: rgba(90, 174, 247, .14);  --zone-wash: rgba(90, 174, 247, .05); }
+[data-zone="3"] { --zone: #8f9bf6; --zone-veil: rgba(143, 155, 246, .14); --zone-wash: rgba(143, 155, 246, .05); }
+[data-zone="4"] { --zone: #b892ef; --zone-veil: rgba(184, 146, 239, .14); --zone-wash: rgba(184, 146, 239, .05); }
+[data-zone="5"] { --zone: #dd8ac9; --zone-veil: rgba(221, 138, 201, .14); --zone-wash: rgba(221, 138, 201, .05); }
+[data-zone="6"] { --zone: #4fcfe3; --zone-veil: rgba(79, 207, 227, .14);  --zone-wash: rgba(79, 207, 227, .05); }
+[data-zone="7"] { --zone: #9fb3c9; --zone-veil: rgba(159, 179, 201, .14); --zone-wash: rgba(159, 179, 201, .05); }
+
+.config-subsection {
+  border-top: 1px solid var(--border);
+  border-left: 4px solid var(--zone);
+  background-image: linear-gradient(var(--zone-wash), var(--zone-wash));
+}
+.config-subsection > .subsection-heading {
+  background-color: var(--elevated);
+  background-image: linear-gradient(var(--zone-veil), var(--zone-veil));
+  border-bottom: 2px solid var(--zone);
+}
 .config-subsection > .form-body { padding-top: 18px; padding-bottom: 20px; }
 /* Valores no editables: se leen como una ficha, no como campos deshabilitados
    —un input gris invita a intentar escribir en él. */
@@ -383,9 +431,62 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .models-overview { margin-bottom: 14px; grid-template-columns: repeat(6, minmax(140px, 1fr)); }
 .models-grid { display: grid; grid-template-columns: minmax(720px, 1fr) minmax(330px, .38fr); gap: 14px; align-items: start; }
 .models-side { display: grid; gap: 14px; }
-.models-catalog td strong { display: block; color: var(--text-2); max-width: 420px; overflow-wrap: anywhere; }
+/* `break-word`, no `anywhere`: `anywhere` rebaja el ancho minimo de la celda a
+   un caracter y el reparto automatico de la tabla exprimia el nombre del
+   modelo a tres lineas. Asi la columna pide el nombre entero, con el techo de
+   max-width para que un id kilometrico no vuelva a desbordar la tabla. */
+.models-catalog td strong { display: block; color: var(--text-2); max-width: 260px; overflow-wrap: break-word; }
 .models-catalog td .badge { justify-content: center; }
-.compatibility-probe-form { margin: 0; display: flex; align-items: center; gap: 8px; }
+/* Nueve columnas en el ancho que deja el aside: dos pixeles de aire por lado
+   son los que evitan la barra horizontal a 1600px. */
+.models-catalog th, .models-catalog td { padding-left: 11px; padding-right: 11px; }
+/* Estado y sondeo se apilan: en linea pedian 247px de columna y eran los
+   primeros en irse fuera de pantalla al ensancharse la tabla. */
+.compatibility-probe-form { margin: 0; display: grid; justify-items: start; gap: 6px; }
+
+/* El error del proveedor ocupa su propia fila a lo ancho de la tabla. Cerrado
+   enseña dos lineas; abierto, el texto entero. El `overflow-wrap: anywhere` no
+   es cosmetico: es lo que impide que un JSON de 600 caracteres sin espacios
+   reclame ancho de tabla y vuelva a empujar los botones fuera de la pantalla. */
+.models-catalog tbody tr:has(+ .provider-error-row:not([hidden])) > td { border-bottom: 0; }
+.provider-error-row > td { padding: 0 13px 10px; }
+.provider-error-row:hover { background: none; }
+.provider-error { padding: 7px 10px; border-radius: 4px; border-left: 3px solid var(--red-line); background: var(--red-fill); }
+/* `display: flex` en el summary se lleva por delante el marcador nativo, asi
+   que el desplegable se dibuja aqui: sin el, nada indica que el texto
+   recortado a dos lineas se puede abrir entero. */
+.provider-error > summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; }
+.provider-error > summary::-webkit-details-marker { display: none; }
+.provider-error > summary::before {
+  content: ""; flex: none; align-self: center; width: 0; height: 0;
+  border-left: 5px solid var(--red-ink); border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent; transition: transform .15s ease;
+}
+.provider-error[open] > summary::before { transform: rotate(90deg); }
+.provider-error > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 3px; }
+.provider-error-tag { flex: none; color: var(--red-ink); font-size: var(--text-label); font-weight: 650; }
+.provider-error .compatibility-error {
+  flex: 1 1 auto; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere;
+  color: var(--text-3); font-size: var(--text-body); line-height: 1.45;
+}
+.provider-error[open] .compatibility-error { display: block; overflow: visible; }
+
+/* Las dos columnas con botones se anclan a los bordes del area que hace
+   scroll: pase lo que pase con el ancho —una capacidad larga, una ventana
+   estrecha—, Borrar y Analizar siguen a la vista y el resto de columnas pasa
+   por debajo. Antes se iban fuera de pantalla y solo se alcanzaban bajando al
+   final de la pagina para arrastrar la barra horizontal. */
+.models-catalog th:first-child,
+.models-catalog td.model-actions { position: sticky; left: 0; z-index: 2; box-shadow: 1px 0 0 var(--border-soft); }
+.models-catalog th:last-child,
+.models-catalog td.compat-cell { position: sticky; right: 0; z-index: 2; box-shadow: -1px 0 0 var(--border-soft); }
+.models-catalog td.model-actions,
+.models-catalog td.compat-cell { background: var(--surface); }
+.models-catalog tbody tr:hover > td.model-actions,
+.models-catalog tbody tr:hover > td.compat-cell { background: var(--raised); }
+.models-catalog thead th:first-child,
+.models-catalog thead th:last-child { z-index: 3; }
 .table-filter { width: 220px; max-width: 100%; border: 1px solid var(--border); border-radius: 4px; background: var(--well); color: var(--text); padding: 8px 10px; font-size: var(--text-body); }
 .table-filter:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
 .compatibility-probe { cursor: pointer; font: inherit; }
@@ -458,6 +559,13 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .artifact-gallery img { display: block; max-width: 100%; max-height: 360px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--well); }
 .artifact-gallery small { color: var(--muted); font-size: var(--text-body); overflow-wrap: anywhere; }
 .artifact-missing { margin: 0; padding: 18px 12px; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); }
+
+/* El catalogo pierde antes la columna lateral que las suyas propias: con el
+   aside al lado, por debajo de este ancho la tabla ya no cabe entera (mide
+   939px de minimo y el aside se lleva un 38% de lo que quede). */
+@media (max-width: 1600px) {
+  .models-grid { grid-template-columns: 1fr; }
+}
 
 @media (max-width: 1150px) {
   .metric-grid, .models-overview { grid-template-columns: repeat(3, 1fr); }

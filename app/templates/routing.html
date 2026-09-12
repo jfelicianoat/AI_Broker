@@ -14,6 +14,7 @@
 {% endblock %}
 
 {% block content %}
+  {% set task_zone = {'code': '1', 'long_context': '2', 'prose': '4', 'vision': '5'} %}
   {% if not router.enabled %}
     <div class="alert warning">
       <strong>Meta-router desactivado</strong>
@@ -100,47 +101,52 @@
     </div>
     {% if model_routing.groups %}
       {% for group in model_routing.groups %}
-        <h3 class="routing-subheading">{{ group.label }}</h3>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                {# La primera columna de medida es el tiempo estimado porque es
-                   el criterio con el que se elige; latencia y éxito quedan
-                   detrás como las piezas de las que sale. #}
-                <th scope="col">Modelo</th>
-                <th scope="col">Tiempo estimado</th>
-                <th scope="col">Ritmo</th>
-                <th scope="col">Invocaciones</th>
-                <th scope="col">Éxito</th>
-                <th scope="col">Latencia media</th>
-                <th scope="col">Coste medio</th>
-                <th scope="col">Estado</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in group.rows %}
+        <div class="routing-zone" data-zone="{{ task_zone.get(group.task_type, '7') }}">
+          <div class="routing-zone-heading">
+            <h3>{{ group.label }}</h3>
+            <span class="badge badge-neutral">{{ group.rows|length }} modelo(s)</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
                 <tr>
-                  <td><strong>{{ row.provider }}/{{ row.model }}</strong> <small>({{ row.deployment }})</small></td>
-                  <td{% if row.estimate_detail %} title="{{ row.estimate_detail }}"{% endif %}>
-                    {{ ('%.1f s'|format(row.estimated_seconds)) if row.estimated_seconds is not none else 'sin medir' }}
-                  </td>
-                  <td>{{ (row.tokens_per_second ~ ' tok/s') if row.tokens_per_second is not none else '—' }}</td>
-                  <td>{{ row.attempts }}</td>
-                  <td>{{ row.success_rate }}%</td>
-                  <td>{{ (row.avg_latency_ms ~ ' ms') if row.avg_latency_ms is not none else '—' }}</td>
-                  <td>{{ '$%.4f'|format(row.avg_cost_usd) if row.avg_cost_usd is not none else '—' }}</td>
-                  <td>
-                    {% if row.usable %}
-                      <span class="badge badge-completed">puntúa</span>
-                    {% else %}
-                      <span class="badge badge-neutral">arranque en frío</span>
-                    {% endif %}
-                  </td>
+                  {# La primera columna de medida es el tiempo estimado porque es
+                     el criterio con el que se elige; latencia y éxito quedan
+                     detrás como las piezas de las que sale. #}
+                  <th scope="col">Modelo</th>
+                  <th scope="col">Tiempo estimado</th>
+                  <th scope="col">Ritmo</th>
+                  <th scope="col">Invocaciones</th>
+                  <th scope="col">Éxito</th>
+                  <th scope="col">Latencia media</th>
+                  <th scope="col">Coste medio</th>
+                  <th scope="col">Estado</th>
                 </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {% for row in group.rows %}
+                  <tr>
+                    <td><strong>{{ row.provider }}/{{ row.model }}</strong> <small>({{ row.deployment }})</small></td>
+                    <td{% if row.estimate_detail %} title="{{ row.estimate_detail }}"{% endif %}>
+                      {{ ('%.1f s'|format(row.estimated_seconds)) if row.estimated_seconds is not none else 'sin medir' }}
+                    </td>
+                    <td>{{ (row.tokens_per_second ~ ' tok/s') if row.tokens_per_second is not none else '—' }}</td>
+                    <td>{{ row.attempts }}</td>
+                    <td>{{ row.success_rate }}%</td>
+                    <td>{{ (row.avg_latency_ms ~ ' ms') if row.avg_latency_ms is not none else '—' }}</td>
+                    <td>{{ '$%.4f'|format(row.avg_cost_usd) if row.avg_cost_usd is not none else '—' }}</td>
+                    <td>
+                      {% if row.usable %}
+                        <span class="badge badge-completed">puntúa</span>
+                      {% else %}
+                        <span class="badge badge-neutral">arranque en frío</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
         </div>
       {% endfor %}
     {% else %}
@@ -165,7 +171,7 @@
       <div class="alert warning"><strong>Catálogo no disponible</strong><p>{{ catalog_error }} — no se puede calcular a quién aparta el filtro ahora mismo.</p></div>
     {% elif affinity.enabled %}
       <div class="table-wrap">
-        <table>
+        <table class="affinity-table">
           <thead>
             <tr>
               <th scope="col">Tipo de tarea</th>
@@ -176,7 +182,7 @@
           </thead>
           <tbody>
             {% for group in affinity.groups %}
-              <tr>
+              <tr data-zone="{{ task_zone.get(group.task_type, '7') }}">
                 <td><strong>{{ group.label }}</strong></td>
                 <td>{{ group.remaining }} de {{ affinity.catalog_size }}</td>
                 <td>

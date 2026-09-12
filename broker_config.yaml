@@ -119,17 +119,6 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    code: []
-    long_context:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
     prose:
     - '*-coder*'
     - '*_coder*'
@@ -140,6 +129,17 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    code: []
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -569,7 +569,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-08-25T07:15:25.026994+00:00'
+      compatibility_checked_at: '2026-09-12T20:01:28.202804+00:00'
       compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
         {"error":"Engine protocol predict stream returned an error: {\"code\":500,\"message\":\"The
         model produced output that does not match the expected peg-gemma4 format\",\"type\":\"server_error\"}"}'
@@ -589,6 +589,20 @@ providers:
         json_mode: false
         tools: true
       features_checked_at: '2026-08-25T07:14:03.584064+00:00'
+    - name: qwen/qwen3.8-27b
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-12T20:00:33.170856+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: false
+        tools: true
+      features_checked_at: '2026-09-12T20:01:21.589411+00:00'
   - id: nvidia
     enabled: true
     adapter: openai_compatible
@@ -1839,7 +1853,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-07-06T12:11:10.452089+00:00'
+      compatibility_checked_at: '2026-09-12T15:52:13.874203+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''f35337fa-b4dd-4996-bcba-5476ee01171d'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
