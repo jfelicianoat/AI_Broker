@@ -119,16 +119,7 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    prose:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
+    code: []
     long_context:
     - '*-coder*'
     - '*_coder*'
@@ -139,7 +130,16 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
-    code: []
+    prose:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -600,7 +600,7 @@ providers:
     keyring_service: ai-broker
     keyring_username: nvidia_api_key
     deployment: api
-    auto_start: false
+    auto_start: true
     sync_models: true
     sync_include: []
     sync_exclude: []
@@ -1335,7 +1335,7 @@ providers:
       capabilities:
       - completion
       compatibility: error
-      compatibility_checked_at: '2026-08-15T07:41:20.754737+00:00'
+      compatibility_checked_at: '2026-09-12T15:45:48.809592+00:00'
       compatibility_error: 'HTTP 500 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"type":"urn:nvcf-worker-service:problem-details:internal-server-error","title":"Internal
         Server Error","status":500,"detail":"Internal error while making inference
@@ -2200,6 +2200,40 @@ providers:
         vision: true
         json_mode: true
       features_checked_at: '2026-08-23T07:35:50.978689+00:00'
+    - name: deepseek-ai/deepseek-v4-pro-0813
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-12T15:40:46.812854+00:00'
+      compatibility_error: ''
+      features: {}
+      features_checked_at: null
+    - name: nvidia/nemotron-parse-2.0
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - document
+      compatibility: unknown
+      compatibility_checked_at: '2026-09-12T15:45:51.059845+00:00'
+      compatibility_error: Capacidad no-chat catalogada; endpoint de ejecución aún
+        no soportado.
+      features: {}
+      features_checked_at: null
+    - name: z-ai/glm-5.3-flash
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-12T15:45:53.068118+00:00'
+      compatibility_error: ''
+      features: {}
+      features_checked_at: null
   - id: HCNSEC
     enabled: true
     adapter: openai_compatible
@@ -2606,6 +2640,109 @@ providers:
         json_mode: true
         tools: true
       features_checked_at: '2026-08-23T08:00:40.526115+00:00'
+    - name: deepseek-v4-flash-vision-exp
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-12T15:19:18.228434+00:00'
+      compatibility_error: 'HTTP 500 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"分组 auto 下模型 deepseek-v4-flash-vision-exp 的可用渠道不存在（retry）
+        (request id: 202609121519177399125148268d9d6ZPgZNxte)","type":"new_api_error","param":"","code":"get_channel_failed"}}'
+      features: {}
+      features_checked_at: null
+    - name: glm-5.3-flash
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-12T15:19:21.585277+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-12T15:20:45.109837+00:00'
+    - name: kimi-k3
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-12T15:20:45.371006+00:00'
+      compatibility_error: ''
+      features: {}
+      features_checked_at: null
+    - name: longcat-2.0
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-12T15:25:45.592271+00:00'
+      compatibility_error: 'HTTP 500 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"分组 auto 下模型 longcat-2.0 的可用渠道不存在（retry） (request id:
+        202609121525457699575928268d9d6DMGFiSuj)","type":"new_api_error","param":"","code":"get_channel_failed"}}'
+      features: {}
+      features_checked_at: null
+    - name: Qwen3.8-Flash-Next
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-12T15:26:57.660020+00:00'
+      compatibility_error: 'HTTP 504 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"openai_error","type":"bad_response_status_code","param":"","code":"bad_response_status_code"}}'
+      features: {}
+      features_checked_at: null
+    - name: sensenova-6.8-flash-lite
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-12T15:27:58.511062+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-12T15:29:23.018517+00:00'
+    - name: sensenova-u1.5-lite
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-12T15:29:23.277924+00:00'
+      compatibility_error: 'HTTP 404 en https://api.hcnsec.cn/v1/chat/completions:
+        {"error":{"message":"model is not found","type":"not_found_error","param":"","code":"5"}}'
+      features: {}
+      features_checked_at: null
+    - name: spark-x2.5
+      context_window: 128000
+      input_cost_per_million: 70.0
+      output_cost_per_million: 70.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-12T15:29:23.907089+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-12T15:29:29.841209+00:00'
   - id: lemonade
     enabled: true
     adapter: openai_compatible

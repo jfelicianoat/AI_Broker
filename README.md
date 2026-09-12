@@ -292,6 +292,7 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | [`docs/Prompt_Tester.md`](docs/Prompt_Tester.md) | Probador de prompts |
 | [`docs/Mixture_Slow_Concurrency.md`](docs/Mixture_Slow_Concurrency.md) | Concurrencia del preset slow |
 | [`docs/Phase_6_Operations.md`](docs/Phase_6_Operations.md) | Operación: backup, logging, servicio |
+| [`docs/Thinking_Control.md`](docs/Thinking_Control.md) | Desactivar el razonamiento: qué admite cada proveedor (medido) y qué costaría exponerlo |
 | [`AI_Broker_consenso_multi_LLM.md`](AI_Broker_consenso_multi_LLM.md) | Diseño original del consenso multi-LLM |
 
 ## 14. Licencia
