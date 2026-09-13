@@ -437,7 +437,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-08-23T07:31:22.133364+00:00'
+      compatibility_checked_at: '2026-09-13T06:27:45.365863+00:00'
       compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
         {"error":{"message":"Failed to load model \"laguna-s-2.1-heretic-i1\". Error:
         Model loading was stopped due to insufficient system resources. Under the
@@ -569,7 +569,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-09-12T20:01:28.202804+00:00'
+      compatibility_checked_at: '2026-09-13T06:27:26.829296+00:00'
       compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
         {"error":"Engine protocol predict stream returned an error: {\"code\":500,\"message\":\"The
         model produced output that does not match the expected peg-gemma4 format\",\"type\":\"server_error\"}"}'
@@ -637,7 +637,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-07-16T18:45:38.890698+00:00'
+      compatibility_checked_at: '2026-09-13T06:27:57.546832+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''23bd454d-b225-49a3-8118-582a62fc51b8'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -661,7 +661,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-07-16T18:45:48.503556+00:00'
+      compatibility_checked_at: '2026-09-13T06:28:01.302136+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''e598bfc1-b058-41af-869d-556d3c7e1b48'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -674,7 +674,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:40:09.559921+00:00'
+      compatibility_checked_at: '2026-09-13T06:28:03.457643+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''6497fc2b-7ff8-4019-8946-123dccbfc863'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -687,7 +687,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-06-28T11:40:11.745766+00:00'
+      compatibility_checked_at: '2026-09-13T06:28:06.356071+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''02f84bf4-c1a1-489b-a9de-ac3e8dcdec14'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -712,7 +712,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-07-16T18:45:57.019496+00:00'
+      compatibility_checked_at: '2026-09-13T06:28:07.582532+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         404 page not found'
       features: {}
@@ -2220,11 +2220,14 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: error
-      compatibility_checked_at: '2026-09-12T15:40:46.812854+00:00'
-      compatibility_error: ''
-      features: {}
-      features_checked_at: null
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-13T06:28:13.439745+00:00'
+      compatibility_error: null
+      features:
+        vision: false
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-13T06:30:00.929414+00:00'
     - name: nvidia/nemotron-parse-2.0
       context_window: 128000
       input_cost_per_million: 0.0
