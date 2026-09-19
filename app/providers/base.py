@@ -7,6 +7,8 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from fnmatch import fnmatch
 from typing import Any
 
@@ -16,7 +18,35 @@ from app import execution_fingerprint
 from app.providers.diagnostics import diagnose
 from app.schemas import InferenceKind, OutputFormat, TaskCreateRequest
 
-PROBE_HARD_MAX_MODELS = 20
+# Tope absoluto de modelos por tanda de sondeo. Coincide con el máximo que
+# admite `probe_max_models`, así que el valor del panel se respeta tal cual:
+# antes esto valía 20 y recortaba en silencio un campo que aceptaba hasta 1000,
+# de modo que un proveedor con 242 modelos dejaba 222 sin analizar sin decirlo.
+PROBE_HARD_MAX_MODELS = 1000
+
+# Un 429 habla del modelo que lo recibió, no del proveedor: una pasarela que
+# multiplexa varias cuentas agota una ruta y sirve las demás sin enterarse. La
+# tanda solo se corta cuando bastantes modelos seguidos dan límite de tasa sin
+# que ninguna llamada entre medias llegue a pasar, que es la única evidencia
+# observable de que lo limitado es el proveedor entero.
+#
+# El umbral escala con la tanda (una cuarta parte, con este suelo) porque los
+# catálogos vienen ordenados por popularidad: los primeros de la cola son justo
+# los que más se agotan, y un suelo fijo corto se comía esa cabecera y paraba
+# antes de llegar a la zona donde sí contestan. Un 429 se responde al instante
+# y sin cómputo, así que el coste de tolerarlo es tiempo, no cuota.
+PROBE_RATE_LIMIT_STREAK = 8
+
+
+def probe_rate_limit_streak_limit(candidates: int) -> int:
+    """Cuántos límites de tasa seguidos hacen falta para dar por caído al
+    proveedor, en una tanda de `candidates` modelos."""
+    return max(PROBE_RATE_LIMIT_STREAK, candidates // 4)
+
+# Un `Retry-After` corto es una ventana por minuto: se espera y se reintenta el
+# mismo modelo una vez. Uno largo (horas) no se espera nunca; ese modelo queda
+# como error temporal y la tanda sigue por el siguiente.
+PROBE_RATE_LIMIT_SHORT_WAIT_SECONDS = 5.0
 
 # Prompts de sistema por rol para mixture_of_agents. La estrategia single no
 # recibe system prompt: la inferencia single es transparente por contrato.
@@ -851,6 +881,51 @@ def provider_http_error_message(error: httpx.HTTPStatusError) -> str:
             body = body[:1000]
         return f"HTTP {response.status_code} en {response.url}: {body}"
     return f"HTTP {response.status_code} en {response.url}"
+
+
+def retry_after_seconds(response: httpx.Response) -> float | None:
+    """Cuánto pide esperar el proveedor, en segundos, o None si no lo dice.
+
+    `Retry-After` es la única forma estándar que tiene un proveedor de decir
+    cuándo vuelve a estar disponible, y admite dos formas: un número de
+    segundos o una fecha HTTP. Sin esto no hay manera de distinguir una ventana
+    de un minuto —que se espera— de un agotamiento de trece horas, que no.
+    """
+    raw = (response.headers.get("Retry-After") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        pass
+    try:
+        moment = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max((moment - datetime.now(timezone.utc)).total_seconds(), 0.0)
+
+
+def rate_limited_error(error: httpx.HTTPStatusError) -> ProviderError:
+    """El 429 de un sondeo, con el plazo que el proveedor haya declarado."""
+    wait = retry_after_seconds(error.response)
+    message = provider_http_error_message(error)
+    if wait is not None:
+        message = f"{message} (Retry-After: {_readable_delay(wait)})"
+    return ProviderError(
+        "RATE_LIMITED", message, retryable=True, details={"retry_after": wait},
+    )
+
+
+def _readable_delay(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
 
 
 def classify_probe_http_error(error: httpx.HTTPStatusError) -> tuple[str, str]:

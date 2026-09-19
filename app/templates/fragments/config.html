@@ -6,10 +6,19 @@
   <span class="badge badge-neutral">broker_config.yaml</span>
 </div>
 
-{% if config_saved %}
+{# Tras un sondeo, el aviso de la tanda sustituye al «guardada» genérico: con
+   los dos juntos, un verde de "todo bien" encabezaba una tanda que no había
+   analizado nada. #}
+{% if config_saved and not probe_notice %}
   <div class="alert success config-alert">
     <strong>Configuración guardada</strong>
     <p>Los cambios operativos ya están aplicados en memoria.</p>
+  </div>
+{% endif %}
+{% if probe_notice %}
+  <div class="alert {{ probe_notice.kind }} config-alert probe-alert">
+    <strong>{{ probe_notice.title }}</strong>
+    <p>{{ probe_notice.message }}</p>
   </div>
 {% endif %}
 {% if config_errors %}
@@ -215,6 +224,11 @@
             <label class="field">
               <span>Máx. modelos por análisis</span>
               <input name="custom_provider_{{ index }}_probe_max_models" value="{{ provider.probe_max_models if provider else 50 }}" inputmode="numeric">
+              <small class="form-hint">
+                Modelos por tanda, de 1 a 1000, y se respeta tal cual. Si el catálogo tiene
+                más sin analizar, al terminar se dice cuántos quedan: se sigue pulsando
+                «Analizar compatibilidad» hasta vaciar la cola.
+              </small>
             </label>
             <label class="field">
               <span>Coste input / 1M</span>
@@ -302,7 +316,7 @@
             </div>
             <div class="provider-wide probe-progress" data-probe-progress="{{ index }}" hidden>
               <div>
-                <strong>Analizando compatibilidad</strong>
+                <strong data-probe-progress-title>Analizando compatibilidad</strong>
                 <span data-probe-progress-label>Preparando catálogo...</span>
               </div>
               <div class="probe-progress-bar" aria-hidden="true"><span data-probe-progress-bar></span></div>

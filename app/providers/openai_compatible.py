@@ -15,6 +15,7 @@ from app.config import OpenAICompatibleProviderConfig
 from app.providers.base import (
     _IMAGE_ONLY_ANSWER,
     PROBE_HARD_MAX_MODELS,
+    PROBE_RATE_LIMIT_SHORT_WAIT_SECONDS,
     AgentTurn,
     CredentialResolver,
     ModelOutput,
@@ -30,8 +31,9 @@ from app.providers.base import (
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
     multimodal_content,
+    probe_rate_limit_streak_limit,
     provider_error_from_http,
-    provider_http_error_message,
+    rate_limited_error,
     request_with_context_capped_output,
     rescued_content,
     returned_images,
@@ -73,6 +75,10 @@ class OpenAICompatibleProvider:
         # Solo cachea los nombres devueltos por /models: los campos derivados de la
         # configuración (compatibilidad, costes) se reconstruyen en cada llamada.
         self._names_cache = _CatalogCache(config.catalog_cache_seconds)
+        # Resumen de la última tanda de sondeo: cuántos modelos quedaron fuera y
+        # por qué. Lo lee el panel para no anunciar un "guardado" que esconde
+        # una tanda que no analizó nada.
+        self.last_probe_run: dict[str, Any] | None = None
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -255,11 +261,7 @@ class OpenAICompatibleProvider:
             }
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 429:
-                raise ProviderError(
-                    "RATE_LIMITED",
-                    provider_http_error_message(error),
-                    retryable=True,
-                ) from error
+                raise rate_limited_error(error) from error
             compatibility, detail = classify_probe_http_error(error)
             return {
                 "name": model,
@@ -321,11 +323,7 @@ class OpenAICompatibleProvider:
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             if status == 429:
-                raise ProviderError(
-                    "RATE_LIMITED",
-                    provider_http_error_message(error),
-                    retryable=True,
-                ) from error
+                raise rate_limited_error(error) from error
             if status in (401, 403, 408) or status >= 500:
                 return None
             return False
@@ -370,11 +368,7 @@ class OpenAICompatibleProvider:
             }
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 429:
-                raise ProviderError(
-                    "RATE_LIMITED",
-                    provider_http_error_message(error),
-                    retryable=True,
-                ) from error
+                raise rate_limited_error(error) from error
             compatibility, detail = classify_probe_http_error(error)
             return {
                 "name": model,
@@ -389,6 +383,73 @@ class OpenAICompatibleProvider:
                 "compatibility_checked_at": started.isoformat(),
                 "compatibility_error": str(error),
             }
+
+    def _rate_limited_result(self, model: str, error: ProviderError) -> dict[str, Any]:
+        """El modelo que recibió el 429 no puede quedar como si nadie lo
+        hubiera mirado: sin esto la pantalla lo sigue dando por pendiente y no
+        hay ni rastro de que el proveedor dijo que no. Queda como error
+        temporal, que es lo que es, y se reintenta en la próxima tanda."""
+        return {
+            "name": model,
+            "compatibility": "error",
+            "compatibility_checked_at": datetime.now(timezone.utc).isoformat(),
+            "compatibility_error": f"Límite de tasa del proveedor: {error}",
+        }
+
+    async def _probe_tolerating_rate_limit(
+        self,
+        model: str,
+        probe: Callable[[str], Awaitable[dict[str, Any]]],
+    ) -> tuple[dict[str, Any], bool]:
+        """Sondea un modelo y devuelve (resultado, limitado_por_tasa).
+
+        Una ventana corta declarada por el proveedor se espera y se reintenta
+        una sola vez: es la diferencia entre un límite por minuto, que se pasa
+        solo en segundos, y una cuota agotada durante horas, que no se espera
+        nunca porque bloquearía la tanda entera.
+        """
+        try:
+            return await probe(model), False
+        except ProviderError as error:
+            if error.code != "RATE_LIMITED":
+                raise
+            wait = error.details.get("retry_after")
+            if not isinstance(wait, (int, float)) or not 0 < wait <= PROBE_RATE_LIMIT_SHORT_WAIT_SECONDS:
+                return self._rate_limited_result(model, error), True
+        await asyncio.sleep(float(wait))
+        try:
+            return await probe(model), False
+        except ProviderError as error:
+            if error.code != "RATE_LIMITED":
+                raise
+            return self._rate_limited_result(model, error), True
+
+    def _probe_candidates(
+        self,
+        catalog: list[dict[str, Any]],
+        *,
+        skip_compatible: bool,
+        skip_checked: bool,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Los nunca sondeados van delante de los que fallaron por causas
+        temporales. Con el orden del catálogo, un proveedor con errores al
+        principio gastaba la tanda entera reintentando los mismos y la cola de
+        modelos sin analizar no avanzaba en ninguna pulsación."""
+        pending: list[dict[str, Any]] = []
+        retries: list[dict[str, Any]] = []
+        for item in catalog:
+            compatibility = str(item.get("compatibility") or "unknown")
+            checked = bool(item.get("compatibility_checked_at"))
+            # Los errores temporales se reintentan siempre: "ya analizado" no
+            # aplica a un sondeo que falló por causas ajenas al modelo.
+            if skip_checked and checked and compatibility != "error":
+                continue
+            if skip_compatible and compatibility == "compatible":
+                continue
+            (retries if checked else pending).append(item)
+        queue = pending + retries
+        return queue[:limit], len(queue)
 
     async def probe_all_models(
         self,
@@ -405,55 +466,58 @@ class OpenAICompatibleProvider:
             skip_checked = self.config.probe_skip_checked
         requested_limit = max_models or self.config.probe_max_models
         limit = min(requested_limit, PROBE_HARD_MAX_MODELS)
-        candidates = []
-        for item in catalog:
-            compatibility = str(item.get("compatibility") or "unknown")
-            # Los errores temporales se reintentan siempre: "ya analizado" no
-            # aplica a un sondeo que falló por causas ajenas al modelo.
-            if skip_checked and item.get("compatibility_checked_at") and compatibility != "error":
-                continue
-            if skip_compatible and compatibility == "compatible":
-                continue
-            candidates.append(item)
-            if len(candidates) >= limit:
-                break
+        candidates, queued = self._probe_candidates(
+            catalog,
+            skip_compatible=skip_compatible,
+            skip_checked=skip_checked,
+            limit=limit,
+        )
         results: list[dict[str, Any]] = []
-        if progress_callback is not None:
+        stop_reason: str | None = None
+        stop_detail: str | None = None
+        # Un 429 describe la ruta que lo devolvió, no al proveedor: una
+        # pasarela que multiplexa cuentas agota una y sirve las demás. Se
+        # cuentan los límites seguidos *sin nada que pase entre medias*, que es
+        # la única señal observable de que lo agotado es el proveedor entero.
+        rate_limit_streak = 0
+        rate_limit_streak_limit = probe_rate_limit_streak_limit(len(candidates))
+        rate_limited = 0
+        last_rate_limit_detail: str | None = None
+        # Las capacidades son secundarias: si el proveedor las limita, se dejan
+        # de sondear y la tanda sigue clasificando compatibilidad, que es lo
+        # que vacía la cola.
+        features_paused = False
+
+        async def report(phase: str, current: str | None, last: dict[str, Any] | None) -> None:
+            if progress_callback is None:
+                return
             await progress_callback({
-                "phase": "running",
-                "completed": 0,
+                "phase": phase,
+                "completed": len(results),
                 "total": len(candidates),
-                "current_model": None,
-                "last_result": None,
+                "queued": queued,
+                "catalog_total": len(catalog),
+                "current_model": current,
+                "last_result": last,
             })
+
+        await report("running", None, None)
         for item in candidates:
             name = str(item["name"])
             capabilities = {str(capability).lower() for capability in item.get("capabilities") or []}
-            if progress_callback is not None:
-                await progress_callback({
-                    "phase": "running",
-                    "completed": len(results),
-                    "total": len(candidates),
-                    "current_model": name,
-                    "last_result": None,
-                })
-            rate_limited = False
+            await report("running", name, None)
             if "completion" in capabilities:
-                try:
-                    result = await self.probe_chat_compatibility(name)
-                except ProviderError as error:
-                    if error.code == "RATE_LIMITED":
-                        break
-                    raise
-                if result["compatibility"] == "compatible" and self.config.probe_features:
-                    if progress_callback is not None:
-                        await progress_callback({
-                            "phase": "running",
-                            "completed": len(results),
-                            "total": len(candidates),
-                            "current_model": f"{name} (capacidades)",
-                            "last_result": None,
-                        })
+                result, limited = await self._probe_tolerating_rate_limit(
+                    name, self.probe_chat_compatibility,
+                )
+                probe_features = (
+                    not limited
+                    and result["compatibility"] == "compatible"
+                    and self.config.probe_features
+                    and not features_paused
+                )
+                if probe_features:
+                    await report("running", f"{name} (capacidades)", None)
                     try:
                         result["features"] = await self.probe_model_features(name)
                         result["features_checked_at"] = datetime.now(timezone.utc).isoformat()
@@ -464,45 +528,104 @@ class OpenAICompatibleProvider:
                         if partial:
                             result["features"] = partial
                             result["features_checked_at"] = datetime.now(timezone.utc).isoformat()
-                        rate_limited = True
-                results.append(result)
+                        # El chat de este modelo sí pasó: lo limitado son las
+                        # sondas extra de capacidades. Se aparcan para el resto
+                        # de la tanda en vez de cortarla, porque clasificar
+                        # compatibilidad es lo que vacía la cola.
+                        features_paused = True
             elif "embedding" in capabilities:
-                try:
-                    result = await self.probe_embedding_compatibility(name)
-                    results.append(result)
-                except ProviderError as error:
-                    if error.code == "RATE_LIMITED":
-                        break
-                    raise
+                result, limited = await self._probe_tolerating_rate_limit(
+                    name, self.probe_embedding_compatibility,
+                )
             else:
+                limited = False
                 result = {
                     "name": name,
                     "compatibility": "unknown",
                     "compatibility_checked_at": datetime.now(timezone.utc).isoformat(),
                     "compatibility_error": "Capacidad no-chat catalogada; endpoint de ejecución aún no soportado.",
                 }
-                results.append(result)
-            if progress_callback is not None:
-                await progress_callback({
-                    "phase": "running",
-                    "completed": len(results),
-                    "total": len(candidates),
-                    "current_model": name,
-                    "last_result": result,
-                })
-            if rate_limited:
+            results.append(result)
+            if limited:
+                rate_limit_streak += 1
+                rate_limited += 1
+                last_rate_limit_detail = str(result.get("compatibility_error") or "")
+            else:
+                # Cualquier respuesta que llegue prueba que el proveedor
+                # atiende: la racha vuelve a cero aunque el modelo haya salido
+                # incompatible o con un error ajeno al límite de tasa.
+                rate_limit_streak = 0
+            await report("running", name, result)
+            if rate_limit_streak >= rate_limit_streak_limit:
+                stop_reason, stop_detail = "rate_limited", last_rate_limit_detail
                 break
             if self.config.probe_delay_seconds:
                 await asyncio.sleep(self.config.probe_delay_seconds)
+        self.last_probe_run = self._probe_summary(
+            catalog=catalog,
+            results=results,
+            queued=queued,
+            candidates=len(candidates),
+            limit=limit,
+            requested_limit=requested_limit,
+            stop_reason=stop_reason,
+            stop_detail=stop_detail,
+            rate_limited=rate_limited,
+            features_paused=features_paused,
+        )
         if progress_callback is not None:
             await progress_callback({
                 "phase": "completed",
                 "completed": len(results),
                 "total": len(candidates),
+                "queued": queued,
+                "catalog_total": len(catalog),
                 "current_model": None,
                 "last_result": results[-1] if results else None,
+                "summary": self.last_probe_run,
             })
         return results
+
+    def _probe_summary(
+        self,
+        *,
+        catalog: list[dict[str, Any]],
+        results: list[dict[str, Any]],
+        queued: int,
+        candidates: int,
+        limit: int,
+        requested_limit: int,
+        stop_reason: str | None,
+        stop_detail: str | None,
+        rate_limited: int = 0,
+        features_paused: bool = False,
+    ) -> dict[str, Any]:
+        """Lo que la tanda dejó sin hacer, en números. El botón respondía
+        siempre "guardado" aunque no hubiera analizado ni un modelo, y con un
+        catálogo mayor que el tope no había forma de saber que quedaba cola."""
+        outcomes = {str(item["name"]): str(item.get("compatibility") or "unknown") for item in results}
+        resolved = sum(1 for value in outcomes.values() if value != "error")
+        return {
+            "catalog_total": len(catalog),
+            "queued": queued,
+            "candidates": candidates,
+            "analyzed": len(results),
+            "resolved": resolved,
+            # Lo que sigue sin clasificar tras esta tanda: lo que no cupo más
+            # lo que volvió con error temporal.
+            "pending": max(queued - resolved, 0),
+            "limit": limit,
+            "truncated_by_limit": max(queued - candidates, 0),
+            # El tope duro solo recorta cuando alguien pide más por código: el
+            # campo del panel ya no puede superarlo.
+            "limit_capped": requested_limit > limit,
+            # Modelos que la tanda tuvo que dejar por límite de tasa sin que eso
+            # la cortara: en una pasarela son rutas agotadas, no el proveedor.
+            "rate_limited": rate_limited,
+            "features_paused": features_paused,
+            "stop_reason": stop_reason,
+            "stop_detail": stop_detail,
+        }
 
     async def embed(self, request: TaskCreateRequest, model: str, input_text: str) -> ModelOutput:
         catalog = await self.models()

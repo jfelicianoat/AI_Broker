@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
 
@@ -1283,6 +1284,81 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called_models, ["fallo-temporal"])
         self.assertEqual(results[0]["compatibility"], "compatible")
 
+    async def test_probe_all_models_honours_configured_limit_over_old_hard_cap(self) -> None:
+        """El campo del panel manda: 20 era un tope interno que recortaba en
+        silencio un valor configurado mayor y dejaba la cola sin avanzar."""
+        called_models: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            called_models.append(json.loads(request.content)["model"])
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            probe_features=False,
+            probe_max_models=50,
+            models=[
+                OpenAICompatibleModelConfig(name=f"modelo-{index:03d}")
+                for index in range(60)
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(len(called_models), 50)
+        self.assertEqual(len(results), 50)
+        summary = provider.last_probe_run
+        assert summary is not None
+        self.assertEqual(summary["catalog_total"], 60)
+        self.assertEqual(summary["truncated_by_limit"], 10)
+        self.assertEqual(summary["pending"], 10)
+        self.assertIsNone(summary["stop_reason"])
+        self.assertFalse(summary["limit_capped"])
+
+    async def test_probe_all_models_puts_never_probed_models_before_retries(self) -> None:
+        """Los errores temporales se reintentan, pero no por delante: con el
+        orden del catálogo, una cabecera de errores consumía la tanda entera y
+        los modelos sin analizar no llegaban nunca a sondearse."""
+        called_models: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            called_models.append(json.loads(request.content)["model"])
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            probe_features=False,
+            probe_max_models=2,
+            models=[
+                OpenAICompatibleModelConfig(
+                    name="fallo-1",
+                    compatibility="error",
+                    compatibility_checked_at="2026-09-18T19:33:00+00:00",
+                ),
+                OpenAICompatibleModelConfig(
+                    name="fallo-2",
+                    compatibility="error",
+                    compatibility_checked_at="2026-09-18T19:33:01+00:00",
+                ),
+                OpenAICompatibleModelConfig(name="nunca-sondeado-1"),
+                OpenAICompatibleModelConfig(name="nunca-sondeado-2"),
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(called_models, ["nunca-sondeado-1", "nunca-sondeado-2"])
+
     async def test_probe_all_models_probes_features_for_operational_models(self) -> None:
         calls: list[tuple[str, str]] = []
 
@@ -1330,7 +1406,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("features", by_name["roto"])
         self.assertEqual([item for item in calls if item[0] == "roto"], [("roto", "chat")])
 
-    async def test_probe_features_rate_limit_keeps_partial_and_stops_batch(self) -> None:
+    async def test_probe_features_rate_limit_keeps_partial_and_parks_feature_probing(self) -> None:
         calls: list[tuple[str, str]] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -1363,12 +1439,21 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         await provider.close()
 
         # El rate limit a mitad de capacidades conserva el resultado del chat
-        # con las capacidades parciales ya verificadas, y corta la tanda.
-        self.assertEqual(len(results), 1)
+        # con las capacidades parciales ya verificadas. La tanda NO se corta:
+        # el chat de ese modelo si paso, asi que lo limitado son las sondas
+        # extra. Se aparcan y el siguiente modelo se sigue clasificando.
+        self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["name"], "uno")
         self.assertEqual(results[0]["compatibility"], "compatible")
         self.assertEqual(results[0]["features"], {"vision": True})
-        self.assertNotIn(("dos", "chat"), calls)
+        self.assertIn(("dos", "chat"), calls)
+        self.assertEqual(results[1]["compatibility"], "compatible")
+        # Aparcadas de verdad: al segundo modelo no se le sondea ninguna.
+        self.assertNotIn(("dos", "vision"), calls)
+        summary = provider.last_probe_run
+        assert summary is not None
+        self.assertTrue(summary["features_paused"])
+        self.assertIsNone(summary["stop_reason"])
 
     async def test_probe_embedding_compatibility_maps_rate_limit_http_and_network_errors(self) -> None:
         config = OpenAICompatibleProviderConfig(id="nvidia", enabled=True, base_url="https://integrate.api.nvidia.com/v1")
@@ -1400,23 +1485,32 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(network_result["compatibility"], "error")
         await provider2.close()
 
-    async def test_probe_all_models_reports_progress_and_stops_on_rate_limit(self) -> None:
+    async def test_probe_all_models_walks_past_a_rate_limited_route(self) -> None:
+        """Un 429 describe la ruta, no al proveedor.
+
+        Es el caso de una pasarela que multiplexa varias cuentas: agota la
+        cuota de un modelo y sirve los demás sin enterarse. Cortar la tanda al
+        primer 429 dejaba el catálogo entero sin clasificar por una sola ruta.
+        """
         progress_events = []
 
         async def on_progress(payload):
             progress_events.append(payload["phase"])
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(429, json={"error": {"message": "rate"}})
+            if json.loads(request.content)["model"] == "agotado":
+                return httpx.Response(429, json={"error": {"message": "rate"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
 
         config = OpenAICompatibleProviderConfig(
             id="nvidia",
             enabled=True,
             base_url="https://integrate.api.nvidia.com/v1",
             probe_delay_seconds=0,
+            probe_features=False,
             models=[
-                OpenAICompatibleModelConfig(name="uno", compatibility="unknown"),
-                OpenAICompatibleModelConfig(name="dos", compatibility="unknown"),
+                OpenAICompatibleModelConfig(name="agotado", compatibility="unknown"),
+                OpenAICompatibleModelConfig(name="vivo", compatibility="unknown"),
             ],
         )
         provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
@@ -1424,27 +1518,221 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
             results = await provider.probe_all_models(progress_callback=on_progress)
         await provider.close()
 
-        # El límite de tasa corta el sondeo: no llega al segundo modelo.
-        self.assertEqual(results, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["compatibility"], "error")
+        self.assertIn("Límite de tasa", results[0]["compatibility_error"])
+        # La ruta viva se clasifica: es justo lo que la política antigua perdía.
+        self.assertEqual(results[1]["name"], "vivo")
+        self.assertEqual(results[1]["compatibility"], "compatible")
         self.assertIn("running", progress_events)
         self.assertEqual(progress_events[-1], "completed")
+        summary = provider.last_probe_run
+        assert summary is not None
+        self.assertIsNone(summary["stop_reason"])
+        self.assertEqual(summary["rate_limited"], 1)
+        self.assertEqual(summary["resolved"], 1)
+        # El limitado sigue en cola: error temporal, se reintenta en la próxima.
+        self.assertEqual(summary["pending"], 1)
 
-    async def test_probe_all_models_stops_on_rate_limit_for_embedding_models(self) -> None:
+    async def test_probe_all_models_stops_after_a_streak_of_rate_limits(self) -> None:
+        """La parada necesita evidencia de que no pasa nada: una racha de
+        límites seguidos sin una sola llamada que llegue entre medias."""
+        from app.providers.base import probe_rate_limit_streak_limit
+
+        attempted: list[str] = []
+
         def handler(request: httpx.Request) -> httpx.Response:
+            attempted.append(json.loads(request.content)["model"])
             return httpx.Response(429, json={"error": {"message": "rate"}})
+
+        total = 12
+        esperados = probe_rate_limit_streak_limit(total)
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(name=f"m{index}", compatibility="unknown")
+                for index in range(total)
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        # Se gastan tantas llamadas como dice la racha y ni una más: el coste
+        # de tolerar el 429 suelto queda acotado.
+        self.assertEqual(len(attempted), esperados)
+        self.assertEqual(len(results), esperados)
+        summary = provider.last_probe_run
+        assert summary is not None
+        self.assertEqual(summary["stop_reason"], "rate_limited")
+        self.assertEqual(summary["rate_limited"], esperados)
+        self.assertEqual(summary["resolved"], 0)
+        self.assertEqual(summary["pending"], total)
+
+    async def test_probe_all_models_resets_the_streak_on_any_answer(self) -> None:
+        """Cualquier respuesta que llegue prueba que el proveedor atiende,
+        aunque el modelo salga incompatible: la racha vuelve a cero."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Uno de cada dos pasa (404: el proveedor contesta), así que la
+            # racha nunca llega al umbral y la tanda recorre el catálogo entero.
+            if json.loads(request.content)["model"].endswith("-vivo"):
+                return httpx.Response(404, json={"error": {"message": "no existe"}})
+            return httpx.Response(429, json={"error": {"message": "rate"}})
+
+        total = 40
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(
+                    name=f"m{index}-vivo" if index % 2 else f"m{index}-limitado",
+                    compatibility="unknown",
+                )
+                for index in range(total)
+            ],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(len(results), total)
+        summary = provider.last_probe_run
+        assert summary is not None
+        self.assertIsNone(summary["stop_reason"])
+
+    async def test_rate_limit_streak_limit_scales_with_the_batch(self) -> None:
+        """Los catálogos vienen ordenados por popularidad y los primeros de la
+        cola son justo los más agotados: con un suelo fijo corto, la tanda se
+        comía esa cabecera y paraba antes de llegar a donde sí contestan."""
+        from app.providers.base import PROBE_RATE_LIMIT_STREAK, probe_rate_limit_streak_limit
+
+        # Tandas pequeñas: manda el suelo, no la proporción.
+        self.assertEqual(probe_rate_limit_streak_limit(4), PROBE_RATE_LIMIT_STREAK)
+        self.assertEqual(probe_rate_limit_streak_limit(0), PROBE_RATE_LIMIT_STREAK)
+        # Tandas grandes: una cuarta parte seguida sin que pase nada.
+        self.assertEqual(probe_rate_limit_streak_limit(100), 25)
+        self.assertEqual(probe_rate_limit_streak_limit(240), 60)
+
+    async def test_probe_all_models_waits_out_a_short_retry_after(self) -> None:
+        """Una ventana corta declarada por el proveedor se espera y se
+        reintenta una vez: es un límite por minuto, no una cuota agotada."""
+        attempts: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            model = json.loads(request.content)["model"]
+            attempts.append(model)
+            if attempts.count(model) == 1:
+                return httpx.Response(
+                    429, json={"error": {"message": "rate"}}, headers={"Retry-After": "2"},
+                )
+            return httpx.Response(200, json={"choices": [{"message": {"content": "pong"}}]})
 
         config = OpenAICompatibleProviderConfig(
             id="nvidia",
             enabled=True,
             base_url="https://integrate.api.nvidia.com/v1",
             probe_delay_seconds=0,
-            models=[OpenAICompatibleModelConfig(name="embed-1", capabilities=["embedding"], compatibility="unknown")],
+            probe_features=False,
+            models=[OpenAICompatibleModelConfig(name="uno", compatibility="unknown")],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with patch("app.providers.openai_compatible.asyncio.sleep", fake_sleep):
+                results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(slept, [2.0])
+        self.assertEqual(attempts, ["uno", "uno"])
+        self.assertEqual(results[0]["compatibility"], "compatible")
+        summary = provider.last_probe_run
+        assert summary is not None
+        self.assertEqual(summary["rate_limited"], 0)
+
+    async def test_probe_all_models_never_waits_out_a_long_retry_after(self) -> None:
+        """Trece horas no se esperan: ese modelo queda como error temporal y la
+        tanda sigue por el siguiente."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429, json={"error": {"message": "rate"}}, headers={"Retry-After": "47925"},
+            )
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[OpenAICompatibleModelConfig(name="uno", compatibility="unknown")],
+        )
+        provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
+            with patch("app.providers.openai_compatible.asyncio.sleep", fake_sleep):
+                results = await provider.probe_all_models()
+        await provider.close()
+
+        self.assertEqual(slept, [])
+        self.assertEqual(results[0]["compatibility"], "error")
+        # El plazo declarado viaja en el motivo: es lo que explica la espera.
+        self.assertIn("Retry-After", results[0]["compatibility_error"])
+
+    async def test_probe_all_models_marks_rate_limited_embedding_and_continues(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if json.loads(request.content)["model"] == "embed-1":
+                return httpx.Response(429, json={"error": {"message": "rate"}})
+            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+        config = OpenAICompatibleProviderConfig(
+            id="nvidia",
+            enabled=True,
+            base_url="https://integrate.api.nvidia.com/v1",
+            probe_delay_seconds=0,
+            models=[
+                OpenAICompatibleModelConfig(name="embed-1", capabilities=["embedding"], compatibility="unknown"),
+                OpenAICompatibleModelConfig(name="embed-2", capabilities=["embedding"], compatibility="unknown"),
+            ],
         )
         provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
         with patch.dict(os.environ, {"NVIDIA_API_KEY": "secret"}):
             results = await provider.probe_all_models()
         await provider.close()
-        self.assertEqual(results, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["compatibility"], "error")
+        self.assertIn("Límite de tasa", results[0]["compatibility_error"])
+        self.assertEqual(results[1]["compatibility"], "compatible")
+
+    async def test_retry_after_header_accepts_seconds_and_http_dates(self) -> None:
+        """Las dos formas que admite el estándar. Sin la fecha, un proveedor
+        que la use quedaría como si no hubiera declarado plazo ninguno."""
+        from email.utils import format_datetime
+
+        from app.providers.base import retry_after_seconds
+
+        self.assertEqual(retry_after_seconds(httpx.Response(429, headers={"Retry-After": "120"})), 120.0)
+        self.assertIsNone(retry_after_seconds(httpx.Response(429)))
+        self.assertIsNone(retry_after_seconds(httpx.Response(429, headers={"Retry-After": "pronto"})))
+        # Una fecha ya pasada no produce una espera negativa.
+        past = format_datetime(datetime(2020, 1, 1, tzinfo=timezone.utc), usegmt=True)
+        self.assertEqual(retry_after_seconds(httpx.Response(429, headers={"Retry-After": past})), 0.0)
+        future = format_datetime(
+            datetime.now(timezone.utc) + timedelta(minutes=10), usegmt=True,
+        )
+        self.assertGreater(retry_after_seconds(httpx.Response(429, headers={"Retry-After": future})), 500)
 
     async def test_embed_validates_model_capability_budget_and_response(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

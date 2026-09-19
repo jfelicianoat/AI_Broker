@@ -4,7 +4,9 @@
 /ai_broker.egg-info/
 /state/
 *.pyc
-/logs/
+ /logs/
+/training/
+
 .coverage
 .coverage.*
 /htmlcov/

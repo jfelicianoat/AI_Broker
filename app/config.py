@@ -705,7 +705,10 @@ class OpenAICompatibleProviderConfig(BaseModel):
     default_context_window: int = Field(default=128_000, gt=0)
     probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
     probe_delay_seconds: float = Field(default=1.0, ge=0, le=60)
-    probe_max_models: int = Field(default=10, ge=1, le=1000)
+    # 50 es también el valor que propone el panel para un proveedor nuevo:
+    # con 10 aqui, un proveedor dado de alta por YAML sondeaba cinco veces
+    # menos modelos por tanda que uno identico creado desde la pantalla.
+    probe_max_models: int = Field(default=50, ge=1, le=1000)
     probe_skip_compatible: bool = True
     probe_skip_checked: bool = True
     # Tras verificar el chat, sondea también visión, JSON estructurado y tools

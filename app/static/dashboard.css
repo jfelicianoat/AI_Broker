@@ -421,6 +421,9 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .probe-progress span, .probe-progress small { color: var(--muted); font-size: var(--text-label); overflow-wrap: anywhere; }
 .probe-progress[data-phase="failed"] { border-color: var(--red-line); background: var(--red-fill); }
 .probe-progress[data-phase="completed"] { border-color: var(--green-line); background: var(--green-fill); }
+/* Una tanda que se corta o deja cola no es un final feliz: el verde de
+   "completado" solo se gana cuando no queda nada pendiente. */
+.probe-progress[data-phase="stopped"] { border-color: var(--amber-line); background: var(--amber-fill); }
 .probe-progress-bar { height: 6px; border-radius: 6px; overflow: hidden; background: var(--track); }
 /* El relleno ocupa el ancho completo y se escala: animar `width` fuerza
    recálculo de layout en cada fotograma. El radio vive en la pista, que ya
@@ -428,6 +431,7 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 .probe-progress-bar span { display: block; width: 100%; height: 100%; transform: scaleX(.08); transform-origin: left; background: var(--teal); transition: transform .24s ease; }
 .probe-progress[data-phase="failed"] .probe-progress-bar span { background: var(--red); }
 .probe-progress[data-phase="completed"] .probe-progress-bar span { background: var(--green); }
+.probe-progress[data-phase="stopped"] .probe-progress-bar span { background: var(--amber); }
 .models-overview { margin-bottom: 14px; grid-template-columns: repeat(6, minmax(140px, 1fr)); }
 .models-grid { display: grid; grid-template-columns: minmax(720px, 1fr) minmax(330px, .38fr); gap: 14px; align-items: start; }
 .models-side { display: grid; gap: 14px; }
