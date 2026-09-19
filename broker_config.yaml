@@ -119,16 +119,7 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    prose:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
+    code: []
     long_context:
     - '*-coder*'
     - '*_coder*'
@@ -139,7 +130,16 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
-    code: []
+    prose:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -437,7 +437,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-09-13T06:27:45.365863+00:00'
+      compatibility_checked_at: '2026-09-18T19:33:47.469968+00:00'
       compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
         {"error":{"message":"Failed to load model \"laguna-s-2.1-heretic-i1\". Error:
         Model loading was stopped due to insufficient system resources. Under the
@@ -637,7 +637,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-09-13T06:27:57.546832+00:00'
+      compatibility_checked_at: '2026-09-18T19:33:58.802786+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''23bd454d-b225-49a3-8118-582a62fc51b8'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -661,7 +661,7 @@ providers:
       capabilities:
       - completion
       compatibility: incompatible
-      compatibility_checked_at: '2026-09-13T06:28:01.302136+00:00'
+      compatibility_checked_at: '2026-09-18T19:34:00.947215+00:00'
       compatibility_error: 'HTTP 404 en https://integrate.api.nvidia.com/v1/chat/completions:
         {"status":404,"title":"Not Found","detail":"Function ''e598bfc1-b058-41af-869d-556d3c7e1b48'':
         Not found for account ''SlZlziEmo6NKz2eyVoLa_xZXOLF6BPrvR589b6cd1PA''"}'
@@ -2251,6 +2251,17 @@ providers:
       compatibility_error: ''
       features: {}
       features_checked_at: null
+    - name: z-ai/glm-5.3
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
   - id: HCNSEC
     enabled: true
     adapter: openai_compatible
@@ -2907,5 +2918,2819 @@ providers:
         but not loaded, and ''Switch model by request'' is off, so this server can
         only serve the loaded model. Turn it on in Unsloth Studio under Settings >
         API.","type":"not_found_error","param":"model","code":"model_not_found"}}'
+      features: {}
+      features_checked_at: null
+  - id: FreeLLMapi
+    enabled: true
+    adapter: openai_compatible
+    display_name: FreeLLMapi
+    base_url: http://127.0.0.1:31415/v1
+    timeout_seconds: 18000.0
+    api_key_env: null
+    api_key: null
+    keyring_service: ai-broker
+    keyring_username: FreeLLMapi_api_key
+    deployment: cloud
+    auto_start: true
+    sync_models: true
+    sync_include: []
+    sync_exclude: []
+    catalog_cache_seconds: 5.0
+    default_context_window: 512000
+    probe_max_output_tokens: 1
+    probe_delay_seconds: 0.25
+    probe_max_models: 100
+    probe_skip_compatible: true
+    probe_skip_checked: true
+    probe_features: true
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+    rescue_reasoning_content: true
+    models:
+    - name: auto
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-18T19:28:08.285380+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-18T19:28:13.955802+00:00'
+    - name: fusion
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-18T19:28:14.220349+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        tools: true
+      features_checked_at: '2026-09-18T19:28:37.829617+00:00'
+    - name: claude-opus-4-5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-18T19:30:19.262312+00:00'
+      compatibility_error: 'HTTP 404 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"Model ''claude-opus-4-5'' is not in the catalog. Use
+        ''auto'' (or omit the ''model'' field) to auto-route, or call /v1/models for
+        the available list.","type":"invalid_request_error","code":"model_not_found"},"execution_id":"30762a79-ab00-4244-898c-a13ba5b6ccff"}'
+      features: {}
+      features_checked_at: null
+    - name: claude-sonnet-4-5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-18T19:30:23.953475+00:00'
+      compatibility_error: 'HTTP 404 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"Model ''claude-sonnet-4-5'' is not in the catalog. Use
+        ''auto'' (or omit the ''model'' field) to auto-route, or call /v1/models for
+        the available list.","type":"invalid_request_error","code":"model_not_found"},"execution_id":"8d9859b5-940d-4b9b-87ae-22b0531e02c6"}'
+      features: {}
+      features_checked_at: null
+    - name: claude-haiku-4-5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-18T19:30:27.144710+00:00'
+      compatibility_error: 'HTTP 404 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"Model ''claude-haiku-4-5'' is not in the catalog. Use
+        ''auto'' (or omit the ''model'' field) to auto-route, or call /v1/models for
+        the available list.","type":"invalid_request_error","code":"model_not_found"},"execution_id":"dd6e6abb-97f1-4b8b-8ee9-6905e3617a37"}'
+      features: {}
+      features_checked_at: null
+    - name: kimi-k3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-19T05:33:37.741914+00:00'
+      compatibility_error: 'Límite de tasa del proveedor: HTTP 429 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All models exhausted: 1 route checked (1 rate-limited
+        or on cooldown). Add more API keys or wait for rate limits to reset. Soonest
+        reset ~14h.","type":"rate_limit_error","code":"rate_limit_exceeded","retryAtMs":1789846287131},"execution_id":"41e57e7b-0186-4faf-8ddc-10ffb02e7597"}'
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v4-pro
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-19T05:34:26.980830+00:00'
+      compatibility_error: 'Límite de tasa del proveedor: HTTP 429 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All models exhausted: 1 route checked (1 rate-limited
+        or on cooldown). Add more API keys or wait for rate limits to reset. Soonest
+        reset ~14h. 1 model skipped: no key configured for their platform.","type":"rate_limit_error","code":"rate_limit_exceeded","retryAtMs":1789846287131},"execution_id":"a7b574b4-23fc-4575-9afc-885b192775d2"}'
+      features: {}
+      features_checked_at: null
+    - name: glm-5.2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-19T05:34:33.210618+00:00'
+      compatibility_error: 'Límite de tasa del proveedor: HTTP 429 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All models exhausted: 1 route checked (1 rate-limited
+        or on cooldown). Add more API keys or wait for rate limits to reset. Soonest
+        reset ~14h. 1 model skipped: no key configured for their platform.","type":"rate_limit_error","code":"rate_limit_exceeded","retryAtMs":1789846287131},"execution_id":"96365a05-559a-4cd4-8d56-4fc14a6974a5"}'
+      features: {}
+      features_checked_at: null
+    - name: kimi-k2.6
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-19T05:34:39.848203+00:00'
+      compatibility_error: 'Límite de tasa del proveedor: HTTP 429 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All models exhausted: 1 route checked (1 rate-limited
+        or on cooldown). Add more API keys or wait for rate limits to reset. Soonest
+        reset ~14h.","type":"rate_limit_error","code":"rate_limit_exceeded","retryAtMs":1789846287131},"execution_id":"38cb1e53-88a8-4b2d-bde8-0dbdca2556cf"}'
+      features: {}
+      features_checked_at: null
+    - name: kimi-k2.7-code
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-coder-480b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-coder-next
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v4-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-397b-a17b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v3.2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v4-flash-0731
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-5.2-fp8
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: kimi-k2.5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mimo-v2.5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mimo-v2.5-pro
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: minimax-m3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-235b-a22b-thinking-2507
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-122b-a10b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-27b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-35b-a3b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: compound
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v4-pro-0813
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ernie-4.5-vl-424b-a47b-base-pt
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.7
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gpt-oss-120b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: kimi-k2-instruct-0905
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: minimax-m2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-235b-a22b-instruct-2507
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-vl-235b-a22b-thinking
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-vl-235b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.8-2.4t-a95b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-ultra
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v3.2-exp
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.6v
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.6v-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.7-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.7-fp8
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: muse-glimmer-30b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-super
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nvidia-nemotron-3-ultra-550b-a55b-bf16
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nvidia-nemotron-3-ultra-550b-a55b-nvfp4
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-235b-a22b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-next-80b-a3b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: tencent-hy3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: dots3-note-preview
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: inkling
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v3-0324
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v3.1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v3.1-terminus
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.5v
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.5v-fp8
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.6
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.6v-fp8
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-4-maverick
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: minimax-m2.7
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nvidia-nemotron-3.5-lightning-30b-a3b-bf16
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: agnes-2.5-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-a-2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1-distill-llama-70b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gpt-oss-20b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: hermes-3-llama-3.1-70b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.3-70b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-4-scout-17b-16e-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: minimax-m2.1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: poolside-laguna-s-2.1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-72b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-18T19:31:09.101410+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All routed providers rejected the request as invalid.
+        Attempt trail: huggingface/Qwen/Qwen2.5-72B-Instruct key1: provider_bad_request.
+        Last error: HuggingFace Router API error 400: The requested model ''Qwen/Qwen2.5-72B-Instruct''
+        is not supported by any provider you have enabled.","type":"invalid_request_error","code":"provider_rejected_request"},"execution_id":"9cc38acc-d40c-4825-a98d-3cc273b871f1"}'
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-vl-72b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: step-3.5-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: step-3.7-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-18T19:31:17.911360+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        tools: true
+      features_checked_at: '2026-09-18T19:31:20.648433+00:00'
+    - name: command-a-reasoning
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:31:28.845328+00:00'
+      compatibility_error: 'HTTP 502 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All 1 routed attempt(s) failed with upstream provider
+        errors (empty_completion ×1). This is a provider-side failure, not a problem
+        with your request; retry, or check provider status. Attempt trail: cohere/command-a-reasoning-08-2025
+        key1: empty_completion. Last error: empty completion from Command A Reasoning
+        (08-2025)","type":"provider_error","code":"upstream_failed"},"execution_id":"d32939a0-74a0-4488-8142-b37c899bce24"}'
+      features: {}
+      features_checked_at: null
+    - name: qwen3.6-35b-a3b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-a-vision
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3.5-lightning
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: aya-expanse-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: aya-vision-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: c4ai-command-a-03-2025
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: codestral
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-a-reasoning-08-2025
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-a-translate-08-2025
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-3-27b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-sea-lion-v4-27b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4-32b-0414
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: poolside-laguna-xs-2.1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen-sea-lion-v4-32b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-vl-30b-a3b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ternary-bonsai-27b-awq-4bit
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ternary-bonsai-27b-gguf
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: wizardlm-2-8x22b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: agnes-2.0-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.6-27b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: apertus-v1.5-70b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: compound-mini
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: default
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gpt-oss-safeguard-20b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:31:51.722517+00:00'
+      compatibility_error: 'HTTP 502 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"All 1 routed attempt(s) failed with upstream provider
+        errors (empty_completion ×1). This is a provider-side failure, not a problem
+        with your request; retry, or check provider status. Attempt trail: groq/openai/gpt-oss-safeguard-20b
+        key1: empty_completion. Last error: empty completion from GPT-OSS Safeguard
+        20B (Groq)","type":"provider_error","code":"upstream_failed"},"execution_id":"eb35c5b6-93b1-4dbb-a1f5-d513fbea2848"}'
+      features: {}
+      features_checked_at: null
+    - name: kimi-k2-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: phi-4
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-coder-32b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-30b-a3b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-coder-30b-a3b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-31b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: autoglm-phone-9b-multilingual
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: c4ai-command-r-08-2024
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: c4ai-command-r7b-12-2024
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-a-translate
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: minimax-m1-80k
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: north-mini-code
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-26b-a4b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-26b-a4b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.5-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-super-120b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-nano-30b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-nano-30b-reasoning
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: apertus-8b-instruct-2509
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: bielik-11b-v3.0-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1-0528
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1-distill-qwen-14b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1-distill-qwen-7b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-v3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-3-12b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-3-4b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: glm-4.5-air
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: inkling-small
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: l3-8b-stheno-v3.2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.1-8b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-guard-4-12b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: minimax-m2.5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-coder-3b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-coder-7b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-14b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-4b-instruct-2507
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-r
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mistral-nemo-instruct-2407
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: fast
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-r-2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-a
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-9b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: apertus-v1.5-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1-distill-llama-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: l3-8b-lunaris-v1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-4b-thinking-2507
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: tiny-aya-earth
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: tiny-aya-fire
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: tiny-aya-global
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: tiny-aya-water
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: lfm2.5-2.6b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: command-r7b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3.5-content-safety
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: allam-2-7b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-prompt-guard-2-86m
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-prompt-guard-2-22m
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemini-3.6-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemini-3.7-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemini-3.5-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-ultra-550b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-397b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-vl-235b-a22b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-30b-a3b-fp8
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: bazaarlink-auto
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-next-80b-a3b-thinking
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: deepseek-r1-distill-qwen-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-120b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3.5-lightning-30b-a3b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.7-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: aion-3.0
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: diffusiongemma-26b-a4b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:22.428639+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~49s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"a3a20c33-7236-4c00-b80b-5893bce32a3c"}'
+      features: {}
+      features_checked_at: null
+    - name: leanstral-1.5
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:24.948330+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~47s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"f5ba02d5-3371-4da0-b4d2-683779893bae"}'
+      features: {}
+      features_checked_at: null
+    - name: reka-flash-3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:27.747295+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~44s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"e3f27bf9-6f33-4aa3-a358-d69cf5b5632c"}'
+      features: {}
+      features_checked_at: null
+    - name: stepfun-3.7-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:31.096070+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~41s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"388b121b-a167-4bcb-9479-1670448513a7"}'
+      features: {}
+      features_checked_at: null
+    - name: gemini-3-flash-preview
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:33.312439+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~38s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"adbed24c-d938-4d4b-9391-291708e7512c"}'
+      features: {}
+      features_checked_at: null
+    - name: gemini-3.5-flash-lite
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:35.859546+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~36s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"61b89770-6ec1-4501-ab46-0b1b196988b5"}'
+      features: {}
+      features_checked_at: null
+    - name: llama-4-scout
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:40.257033+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~32s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"27115c0b-910b-4c29-a385-59e05a708db9"}'
+      features: {}
+      features_checked_at: null
+    - name: qwq-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: aion-3.0-mini
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mistral-code
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:43.054885+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~29s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"16af338d-2103-4859-ad30-bf7e95b87cb7"}'
+      features: {}
+      features_checked_at: null
+    - name: aion-2.0
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3.5-lightning-30b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-coder-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:45.771509+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~26s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"fe986fba-44af-4f68-bd6f-c68a3c1a1746"}'
+      features: {}
+      features_checked_at: null
+    - name: llama-3.3-70b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.3-70b-fp8-fast
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: aion-rp-llama-3.1-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: free-router
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemini-3.1-flash-lite
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: kilo-auto
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.2-90b-vision
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:49.035067+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~23s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"4061dcf6-c768-4a46-88b9-4b487e191e8a"}'
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-31b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3-coder-30b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:52.411924+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~19s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"7d69a698-5c64-499d-bcd9-0547413988d4"}'
+      features: {}
+      features_checked_at: null
+    - name: gemini-2.5-flash
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-26b-it
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-sea-lion-v3-70b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mistral-small-3.1-24b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: reka-edge
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen2.5-vl-72b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemini-robotics-er-2-preview
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen-sea-lion-v4.5-27b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mistral-small-3.2-24b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: nemotron-3-nano-omni-reasoning
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen-sea-lion-v4-32b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemini-2.5-flash-lite
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-sea-lion-v4-27b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ministral-14b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ministral-3-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:32:55.733314+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~16s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"9dd87d3b-f007-44d6-979f-ba0c87566990"}'
+      features: {}
+      features_checked_at: null
+    - name: mistral-nemo
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: granite-4.0-h-micro
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.2-11b-vision
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mistral-7b-instruct-v0.3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3guard-gen-0.6b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3guard-gen-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: moondream-3.1-9b-a2b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.1-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.1-8b-instruct-fast
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.2-3b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mistral-7b-instruct-v0.2-lora
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-7b-it-lora
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.2-1b-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-2-7b-chat-lora
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-2b-it-lora
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ising-calibration-1.5-31b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - specialized
+      compatibility: unknown
+      compatibility_checked_at: '2026-09-18T19:32:59.528894+00:00'
+      compatibility_error: Capacidad no-chat catalogada; endpoint de ejecucion aun
+        no soportado.
+      features: {}
+      features_checked_at: null
+    - name: cydonia-24b-v4.3
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:09.131625+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~3s. 2 models skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"187a135e-6611-4d9c-9bb4-004dd3a54e7a"}'
+      features: {}
+      features_checked_at: null
+    - name: skyfall-31b-v4.2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:12.941868+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~27s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"ffe2d134-0734-4a92-9caf-67cef361dfb0"}'
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-e4b-uncensored-aggressive
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-e4b-ultra-uncensored
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3-stheno-8b-v3.2
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3-super-nova-rp-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: qwen3.5-0.8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:25.375548+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~14s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"e413f620-c995-4532-9670-badb05f8b031"}'
+      features: {}
+      features_checked_at: null
+    - name: qwen3-0.6b-iq4
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: llama-3.2-1b-unsloth
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:23.050157+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~17s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"f5a0f071-98a3-4ec0-887d-b34f8768b646"}'
+      features: {}
+      features_checked_at: null
+    - name: llama-guard-3-8b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: sea-guard
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:21.818848+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~18s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"835bb4de-f2c2-4b83-ac24-a8e4fb02cec5"}'
+      features: {}
+      features_checked_at: null
+    - name: gemma-4-31b-heretic
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:20.737035+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~19s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"71da4804-b632-4d26-8d3f-2fc2134c13a1"}'
+      features: {}
+      features_checked_at: null
+    - name: cerebras-gpt-111m-instruct
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:15.956110+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~24s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"9d86edaf-d7c8-47de-8cdc-41d41bc2db2c"}'
+      features: {}
+      features_checked_at: null
+    - name: pythia-70m-deduped
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: error
+      compatibility_checked_at: '2026-09-18T19:33:18.880965+00:00'
+      compatibility_error: 'HTTP 503 en http://127.0.0.1:31415/v1/chat/completions:
+        {"error":{"message":"No candidate model has a configured, usable provider
+        key. Add provider API keys in the dashboard. All models exhausted. Add more
+        API keys or wait for rate limits to reset. Soonest reset ~21s. 1 model skipped:
+        no key configured for their platform.","type":"service_unavailable","code":"no_providers_configured"},"execution_id":"e16db210-a742-4d40-8e55-65eaa9ec2ee1"}'
+      features: {}
+      features_checked_at: null
+    - name: mini-magnum-12b-v1.1
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: angelic-eclipse-12b
+      context_window: 512000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - embedding
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-18T19:33:29.462802+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:31415/v1/embeddings: {"error":{"message":"embedding
+        error: Unknown embedding model ''angelic-eclipse-12b''. Use ''auto'', a family
+        name, or a provider model id.","type":"invalid_request_error"}}'
       features: {}
       features_checked_at: null

@@ -491,7 +491,7 @@ usar los nombres reservados `ollama`, `deepseek` ni `bootstrap`.
 | `default_context_window` | `128000` | Ventana que se asume para un modelo descubierto sin declarar |
 | `probe_max_output_tokens` | `1` | Tokens de cada petición de sondeo (1–1024) |
 | `probe_delay_seconds` | `1.0` | Pausa entre sondeos, para no golpear el endpoint (0–60) |
-| `probe_max_models` | `10` | Modelos por tanda de sondeo (1–1000) |
+| `probe_max_models` | `50` | Modelos por tanda de sondeo (1–1000). Se respeta tal cual: si el catálogo tiene más modelos sin analizar, el panel avisa de cuántos quedan para la siguiente tanda |
 | `probe_skip_compatible` | `true` | No repetir los ya verificados como compatibles |
 | `probe_skip_checked` | `true` | No repetir ningún modelo ya comprobado, aunque saliera incompatible |
 | `probe_features` | `true` | Tras verificar el chat, sondear visión, JSON estructurado y tools: tres peticiones de un token por modelo operativo |

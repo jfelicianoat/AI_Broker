@@ -126,22 +126,36 @@
     const label = panel.querySelector("[data-probe-progress-label]");
     const detail = panel.querySelector("[data-probe-progress-detail]");
     const bar = panel.querySelector("[data-probe-progress-bar]");
+    const title = panel.querySelector("[data-probe-progress-title]");
     const completed = Number(progress.completed || 0);
     const total = Number(progress.total || 0);
     const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 8;
     panel.hidden = false;
-    panel.dataset.phase = progress.phase || "running";
+    // Una tanda que se cortó o que deja cola termina en "stopped", no en el
+    // verde de "completado": el color es lo primero que se lee, y decía que
+    // todo había ido bien cuando quedaban 233 modelos sin analizar.
+    const summary = progress.summary || null;
+    const unfinished = Boolean(summary && (summary.stop_reason || Number(summary.pending || 0) > 0));
+    panel.dataset.phase = progress.phase === "completed" && unfinished ? "stopped" : (progress.phase || "running");
+    if (title) title.textContent = probeTitleText(progress, unfinished);
     // scaleX en vez de width: el ancho es fijo al 100% y solo se escala, así
     // que el avance no fuerza recálculo de layout en cada fotograma.
     if (bar) bar.style.transform = `scaleX(${(percent / 100).toFixed(4)})`;
+    // La tanda no es el catálogo: con 242 modelos y un tope de 50, "50/50"
+    // parecía el final del análisis. El resto de la cola va siempre al lado.
+    const queued = Number(progress.queued || 0);
+    const rest = queued > total ? ` de ${queued} en cola` : "";
     if (label) {
-      if (progress.phase === "completed") label.textContent = `Tanda completada: ${completed}/${total || completed}`;
+      const stopped = Boolean(summary && summary.stop_reason);
+      if (progress.phase === "completed") label.textContent = `${stopped ? "Tanda parada" : "Tanda completada"}: ${completed}/${total || completed}${rest}`;
       else if (progress.phase === "failed") label.textContent = "Análisis detenido";
-      else if (total > 0) label.textContent = `Progreso de tanda: ${completed}/${total}`;
+      else if (total > 0) label.textContent = `Progreso de tanda: ${completed}/${total}${rest}`;
       else label.textContent = "Preparando catálogo...";
     }
     if (detail) {
+      const summaryText = probeSummaryText(progress.summary);
       if (progress.error) detail.textContent = progress.error;
+      else if (progress.phase === "completed" && summaryText) detail.textContent = summaryText;
       else if (progress.current_model) detail.textContent = `Modelo actual: ${progress.current_model}`;
       else if (progress.last_result && progress.last_result.name) {
         detail.textContent = `Ultimo: ${progress.last_result.name} - ${progress.last_result.compatibility || "sin clasificar"}`;
@@ -149,19 +163,55 @@
     }
   }
 
+  // "Detenida" y "queda cola" no son lo mismo: una tanda que recorre entera su
+  // tope y deja 214 por analizar ha funcionado, solo que el catálogo no cabe en
+  // una pulsación. Llamarlas igual hacía leer como avería lo que es normal.
+  function probeTitleText(progress, unfinished) {
+    if (progress.phase === "failed") return "No se pudo analizar";
+    if (progress.phase !== "completed") return "Analizando compatibilidad";
+    if (progress.summary && progress.summary.stop_reason) return "Análisis detenido";
+    return unfinished ? "Tanda completada: queda cola" : "Análisis completado";
+  }
+
+  // Lo que la tanda dejó sin hacer, en una línea. Sin esto el panel anunciaba
+  // "Compatibilidad actualizada" igual cuando no había analizado ni un modelo.
+  function probeSummaryText(summary) {
+    if (!summary) return "";
+    const resolved = Number(summary.resolved || 0);
+    const total = Number(summary.catalog_total || 0);
+    const pending = Number(summary.pending || 0);
+    const limited = Number(summary.rate_limited || 0);
+    const parts = [`${resolved} clasificados de ${total}`];
+    // Un límite de tasa suelto ya no corta la tanda: en una pasarela es una
+    // ruta agotada entre muchas. Se cuenta aparte de la parada, que ahora solo
+    // ocurre cuando ninguna llamada llega a pasar.
+    if (limited > 0) parts.push(`${limited} con límite de tasa (se reintentan)`);
+    if (summary.features_paused) parts.push("sondeo de capacidades aparcado por límite de tasa");
+    if (summary.stop_reason === "rate_limited") parts.push("detenida: el proveedor no atiende ahora mismo");
+    if (pending > 0) parts.push(`quedan ${pending} sin analizar: vuelve a pulsar para seguir`);
+    else parts.push("no queda ninguno pendiente");
+    return parts.join(" · ");
+  }
+
+  async function fetchProbeProgress(providerId, id) {
+    try {
+      const response = await fetch(`/dashboard/actions/providers/${encodeURIComponent(providerId)}/probe/progress?progress_id=${encodeURIComponent(id)}`, {
+        headers: {"Accept": "application/json"}
+      });
+      return response.ok ? await response.json() : null;
+    } catch (_) {
+      // The form submission result will surface the real failure if polling misses once.
+      return null;
+    }
+  }
+
   async function pollProbeProgress(providerId, id, panel, stop) {
     while (!stop.done) {
-      try {
-        const response = await fetch(`/dashboard/actions/providers/${encodeURIComponent(providerId)}/probe/progress?progress_id=${encodeURIComponent(id)}`, {
-          headers: {"Accept": "application/json"}
-        });
-        if (response.ok) {
-          const progress = await response.json();
-          setProbeProgress(panel, progress);
-          if (progress.phase === "completed" || progress.phase === "failed") return;
-        }
-      } catch (_) {
-        // The form submission result will surface the real failure if polling misses once.
+      const progress = await fetchProbeProgress(providerId, id);
+      if (progress) {
+        stop.progress = progress;
+        setProbeProgress(panel, progress);
+        if (progress.phase === "completed" || progress.phase === "failed") return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 850));
     }
@@ -169,6 +219,12 @@
 
   function submitterProviderId(submitter) {
     return submitter ? submitter.getAttribute("data-provider-probe") : null;
+  }
+
+  // Tras reemplazar #config-panel el nodo anterior ya no está en el documento:
+  // hay que volver a buscar la barra de esta misma fila para escribir en ella.
+  function freshProbePanel(index) {
+    return index ? document.querySelector(`[data-probe-progress="${index}"]`) : null;
   }
 
   // El id del proveedor se lee del formulario, no del atributo: una fila
@@ -400,6 +456,14 @@
       });
       stop.done = true;
       await poll;
+      // El sondeo periódico duerme 850 ms: cuando la tanda termina dentro de
+      // esa ventana, el último progreso leído es todavía un "running" sin
+      // resumen y el resultado se anunciaba en blanco. Se lee una vez más,
+      // ya con la tanda cerrada en el servidor.
+      // "unknown" es la entrada ya purgada del servidor: no sustituye a lo que
+      // el sondeo periódico sí llegó a leer.
+      const finalProgress = await fetchProbeProgress(providerId, id);
+      if (finalProgress && finalProgress.phase !== "unknown") stop.progress = finalProgress;
       if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const html = await response.text();
       const next = new DOMParser().parseFromString(html, "text/html");
@@ -416,7 +480,14 @@
       dismissConfigErrors();
       current.outerHTML = nextPanel.outerHTML;
       bind(document);
-      toast("Compatibilidad actualizada");
+      // El panel que vuelve del servidor trae la barra de progreso otra vez
+      // oculta, así que el resultado de la tanda desaparecía en cuanto se
+      // pintaba: solo quedaba el toast, 2,6 s, y el aviso del servidor, que
+      // está arriba del formulario y varias pantallas por encima del botón.
+      // Se repinta sobre el panel nuevo y se queda hasta la próxima pulsación.
+      if (stop.progress) setProbeProgress(freshProbePanel(index), stop.progress);
+      const summaryText = probeSummaryText(stop.progress && stop.progress.summary);
+      toast(summaryText ? `Compatibilidad: ${summaryText}` : "Compatibilidad actualizada");
       return true;
     } catch (error) {
       stop.done = true;

@@ -255,10 +255,12 @@ def create_dashboard_router(
         # quedaba desmentido por su propia cabecera.
         config_error_title: str = "No se ha guardado la configuración",
         config_review: list[dict[str, str]] | None = None,
+        probe_notice: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         return {
             "config": cfg if cfg is not None else config,
             "config_saved": config_saved,
+            "probe_notice": probe_notice,
             "config_errors": config_errors or [],
             "config_error_title": config_error_title,
             "config_review": config_review if config_review is not None else [],
@@ -371,8 +373,30 @@ def create_dashboard_router(
         )
 
     @protected.get("/dashboard/config", response_class=HTMLResponse)
-    async def config_page(request: Request, config_saved: bool = False):
-        return _template_response(request, "config.html", _config_page_context(config_saved=config_saved))
+    async def config_page(
+        request: Request,
+        config_saved: bool = False,
+        probe_provider: str | None = None,
+        probe_analyzed: int | None = None,
+        probe_pending: int | None = None,
+        probe_catalog: int | None = None,
+        probe_stop: str | None = None,
+        probe_detail: str | None = None,
+        probe_rate_limited: int | None = None,
+        probe_features_paused: bool = False,
+    ):
+        return _template_response(
+            request,
+            "config.html",
+            _config_page_context(
+                config_saved=config_saved,
+                probe_notice=_probe_batch_notice(
+                    probe_provider, probe_analyzed, probe_pending,
+                    probe_catalog, probe_stop, probe_detail,
+                    probe_rate_limited, probe_features_paused,
+                ),
+            ),
+        )
 
     def _ready_file_options() -> list[dict[str, Any]]:
         """Ficheros ingeridos listos para adjuntar desde el probador."""
@@ -831,6 +855,7 @@ def create_dashboard_router(
         form = await _read_urlencoded_form(request)
         _verify_dashboard_mutation(request, form)
         errors: list[str] = []
+        probe_query = ""
         progress_id = form.get("probe_progress_id", "").strip()
         if progress_id:
             _purge_stale_probe_progress(_utc_now())
@@ -871,6 +896,7 @@ def create_dashboard_router(
                     }
 
                 results = await probe.probe_all_models(progress_callback=update_probe_progress)
+                summary = probe.last_probe_run
             finally:
                 await probe.close()
             _apply_probe_results(updated, provider_config.id, results, catalog)
@@ -886,8 +912,10 @@ def create_dashboard_router(
                     "total": PROBE_PROGRESS.get(progress_id, {}).get("total", len(results)),
                     "current_model": None,
                     "error": None,
+                    "summary": summary,
                     "updated_at": _utc_now().isoformat(),
                 }
+            probe_query = _probe_summary_query(provider_config.id, summary)
         except PromptTesterError as error:
             errors.append(str(error))
         except ProviderError as error:
@@ -911,7 +939,9 @@ def create_dashboard_router(
                     config_error_title="No se ha podido analizar la compatibilidad",
                 ),
             )
-        return RedirectResponse("/dashboard/config?config_saved=true", status_code=303)
+        return RedirectResponse(
+            f"/dashboard/config?config_saved=true{probe_query}", status_code=303,
+        )
 
     @protected.get("/dashboard/actions/providers/{provider_id}/probe/progress")
     async def probe_provider_progress(request: Request, provider_id: str, progress_id: str) -> dict[str, Any]:
@@ -1588,6 +1618,94 @@ def _probeable_provider_ids(config: BrokerConfig) -> list[str]:
         for item in config.providers.custom
         if item.enabled
     ]
+
+
+def _probe_summary_query(provider_id: str, summary: dict[str, Any] | None) -> str:
+    """El resultado de la tanda viaja en la URL del redirect: sin esto la
+    página solo decía "configuración guardada" y una tanda que no analizó
+    ningún modelo era indistinguible de una que los analizó todos."""
+    if not summary:
+        return ""
+    params = {
+        "probe_provider": provider_id,
+        "probe_analyzed": str(int(summary.get("resolved") or 0)),
+        "probe_pending": str(int(summary.get("pending") or 0)),
+        "probe_catalog": str(int(summary.get("catalog_total") or 0)),
+        "probe_rate_limited": str(int(summary.get("rate_limited") or 0)),
+    }
+    if summary.get("features_paused"):
+        params["probe_features_paused"] = "true"
+    if summary.get("stop_reason"):
+        params["probe_stop"] = str(summary["stop_reason"])
+        detail = str(summary.get("stop_detail") or "")[:300]
+        if detail:
+            params["probe_detail"] = detail
+    return "&" + urlencode(params)
+
+
+def _probe_batch_notice(
+    provider_id: str | None,
+    analyzed: int | None,
+    pending: int | None,
+    catalog_total: int | None,
+    stop_reason: str | None,
+    stop_detail: str | None,
+    rate_limited: int | None = None,
+    features_paused: bool = False,
+) -> dict[str, str] | None:
+    """Qué dejó hecho la tanda y qué queda. Un catálogo grande necesita varias
+    pulsaciones, y el límite de tasa no es un fallo del panel: las dos cosas
+    tienen que decirse, porque desde la pantalla no se deducen.
+
+    Un límite de tasa suelto ya no corta nada —en una pasarela es una ruta
+    agotada entre muchas—, así que se cuenta aparte de la parada: son dos
+    hechos distintos y antes se contaban como uno solo.
+    """
+    if provider_id is None or analyzed is None:
+        return None
+    pendientes = max(int(pending or 0), 0)
+    total = int(catalog_total or 0)
+    limitados = max(int(rate_limited or 0), 0)
+    partes = [
+        f"{analyzed} modelo(s) clasificados de {total} en el catálogo de {provider_id}."
+    ]
+    if limitados:
+        partes.append(
+            f"{limitados} devolvieron límite de tasa y quedan como error temporal: "
+            "en una pasarela con varias cuentas eso es una ruta agotada, no el proveedor entero."
+        )
+    if stop_reason == "rate_limited":
+        partes.append(
+            "La tanda se detuvo al encadenar límites de tasa sin que pasara ninguna "
+            "llamada entre medias: el proveedor no está atendiendo ahora mismo."
+        )
+        if stop_detail:
+            partes.append(f"Última respuesta del proveedor: {stop_detail}.")
+    if features_paused:
+        partes.append(
+            "El sondeo de capacidades (visión, JSON, tools) se aparcó por límite de tasa; "
+            "la compatibilidad de chat sí se siguió comprobando."
+        )
+    if pendientes:
+        partes.append(
+            f"Quedan {pendientes} sin clasificar: vuelve a pulsar «Analizar compatibilidad» "
+            "para seguir por donde se quedó."
+        )
+    else:
+        partes.append("No queda ningún modelo pendiente de clasificar.")
+    # Aparcar el sondeo de capacidades tampoco es un final limpio: deja
+    # modelos clasificados pero con su ficha de capacidades a medias.
+    kind = "warning" if (pendientes or stop_reason or features_paused) else "success"
+    title = (
+        "Análisis detenido: el proveedor no atiende"
+        if stop_reason == "rate_limited"
+        else (
+            "Análisis incompleto: quedan modelos"
+            if pendientes
+            else ("Análisis completado sin las capacidades" if features_paused else "Análisis completado")
+        )
+    )
+    return {"kind": kind, "title": title, "message": " ".join(partes)}
 
 
 def _model_probe_notice(

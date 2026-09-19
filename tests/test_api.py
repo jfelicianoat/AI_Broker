@@ -1243,6 +1243,20 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
                 },
             ]
 
+        last_probe_run = {
+            "catalog_total": 2,
+            "queued": 2,
+            "candidates": 2,
+            "analyzed": 2,
+            "resolved": 2,
+            "pending": 0,
+            "limit": 50,
+            "truncated_by_limit": 0,
+            "limit_capped": False,
+            "stop_reason": None,
+            "stop_detail": None,
+        }
+
         async def probe_all_models(self, progress_callback=None):
             if progress_callback is not None:
                 await progress_callback(
@@ -1335,6 +1349,129 @@ def test_dashboard_provider_probe_persists_model_compatibility(tmp_path: Path, m
     # El estado por modelo ya no se lista en config: se consulta en /dashboard/models.
     assert "model-compat-list" not in response.text
     assert "Modelos declarados a mano (3)" in response.text
+
+
+def test_dashboard_provider_probe_warns_when_batch_leaves_models_unanalyzed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Una tanda cortada por límite de tasa respondía «Configuración guardada»
+    igual que una completa: desde la pantalla no había forma de saber que no
+    se había analizado ni un modelo y que quedaban 200 en cola."""
+
+    class RateLimitedProbeProvider:
+        last_probe_run = {
+            "catalog_total": 242,
+            "queued": 239,
+            "candidates": 50,
+            "analyzed": 8,
+            "resolved": 0,
+            "pending": 239,
+            "limit": 50,
+            "truncated_by_limit": 189,
+            "limit_capped": False,
+            "rate_limited": 8,
+            "features_paused": False,
+            "stop_reason": "rate_limited",
+            "stop_detail": "HTTP 429: All models exhausted",
+        }
+
+        def __init__(self, config):
+            self.config = config
+
+        async def models(self):
+            return [{
+                "name": "kimi-k3",
+                "context_window": 512000,
+                "capabilities": ["completion"],
+                "compatibility": "unknown",
+            }]
+
+        async def probe_all_models(self, progress_callback=None):
+            return [{
+                "name": "kimi-k3",
+                "compatibility": "error",
+                "compatibility_checked_at": "2026-09-18T19:34:51+00:00",
+                "compatibility_error": "Límite de tasa del proveedor: HTTP 429",
+            }]
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(dashboard_web, "OpenAICompatibleProvider", RateLimitedProbeProvider)
+    monkeypatch.setattr(providers_module, "OpenAICompatibleProvider", RateLimitedProbeProvider)
+    config_path = tmp_path / "broker_config.yaml"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-probe-rate.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+    )
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        response = client.post(
+            "/dashboard/actions/providers/freellmapi/probe",
+            data={
+                "csrf_token": token,
+                "task_timeout_seconds": "900",
+                "max_parallel_invocations": "auto",
+                "queue_max_size": "250",
+                "local_vram_budget_gb": "48",
+                "vram_safety_margin_gb": "4",
+                "max_loaded_local_models": "auto",
+                "allow_execution_waves": "on",
+                "custom_provider_1_enabled": "on",
+                "custom_provider_1_id": "freellmapi",
+                "custom_provider_1_display_name": "FreeLLMapi",
+                "custom_provider_1_base_url": "http://127.0.0.1:31415/v1",
+                "custom_provider_1_deployment": "cloud",
+                "custom_provider_1_timeout_seconds": "300",
+                "custom_provider_1_default_context_window": "512000",
+                "custom_provider_1_probe_max_output_tokens": "1",
+                "custom_provider_1_probe_delay_seconds": "0",
+                "custom_provider_1_probe_max_models": "50",
+                "custom_provider_1_probe_skip_compatible": "on",
+                "custom_provider_1_probe_skip_checked": "on",
+                "custom_provider_1_input_cost_per_million": "0",
+                "custom_provider_1_output_cost_per_million": "0",
+                "custom_provider_1_sync_models": "on",
+            },
+        )
+
+    assert response.status_code == 200
+    # El aviso dice lo que pasó de verdad, y no se disfraza de error del panel.
+    # La parada ya no la provoca un 429 suelto —en una pasarela eso es una ruta
+    # agotada entre muchas— sino encadenarlos sin que pase ninguna llamada, así
+    # que el título habla del proveedor y los limitados se cuentan aparte.
+    assert "Análisis detenido: el proveedor no atiende" in response.text
+    assert "8 devolvieron límite de tasa" in response.text
+    assert "Quedan 239 sin clasificar" in response.text
+    assert "0 modelo(s) clasificados de 242" in response.text
+    assert "alert danger config-alert" not in response.text
+
+
+def test_probe_notice_separates_a_rate_limited_route_from_a_downed_provider() -> None:
+    """Una tanda que esquiva rutas agotadas y recorre su tope entera no es una
+    avería: es el caso normal de una pasarela. El aviso tiene que contar los
+    limitados sin acusar al proveedor de no atender, que es lo contrario."""
+    notice = dashboard_web._probe_batch_notice(
+        "FreeLLMapi", 19, 214, 242, None, None, 75, False,
+    )
+    assert notice is not None
+    assert notice["kind"] == "warning"
+    assert notice["title"] == "Análisis incompleto: quedan modelos"
+    assert "75 devolvieron límite de tasa" in notice["message"]
+    assert "no atiende" not in notice["message"]
+    assert "Quedan 214 sin clasificar" in notice["message"]
+
+
+def test_probe_notice_says_when_feature_probing_was_parked() -> None:
+    """Aparcar las capacidades deja fichas a medias: no puede anunciarse con el
+    verde de "completado" sin decir qué falta."""
+    notice = dashboard_web._probe_batch_notice(
+        "nvidia", 40, 0, 40, None, None, 0, True,
+    )
+    assert notice is not None
+    assert notice["kind"] == "warning"
+    assert notice["title"] == "Análisis completado sin las capacidades"
+    assert "El sondeo de capacidades" in notice["message"]
 
 
 def test_new_provider_row_exposes_its_index_for_the_probe_button(tmp_path: Path) -> None:
