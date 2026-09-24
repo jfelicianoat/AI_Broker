@@ -292,12 +292,18 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                     stop_dispatcher,
                 )
             )
+        # En segundo plano: un servidor MCP que tarda en cargar su modelo no
+        # retrasa el arranque del broker, y una tarea que lo pida antes espera
+        # en el mismo cerrojo en vez de lanzar un segundo proceso.
+        mcp_warm_up_task = asyncio.create_task(mcp_registry.warm_up())
         app.state.dispatcher_task = dispatcher_task
         app.state.ingestion_dispatcher_task = ingestion_dispatcher_task
         app.state.idle_unload_task = idle_unload_task
         try:
             yield
         finally:
+            mcp_warm_up_task.cancel()
+            await asyncio.gather(mcp_warm_up_task, return_exceptions=True)
             stop_dispatcher.set()
             pending_loops = [
                 task

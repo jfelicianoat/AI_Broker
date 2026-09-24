@@ -273,6 +273,10 @@ class MCPServerConfig(BaseModel):
     data_boundary: Literal["local", "egress"]
     # Tope por llamada. Un servidor MCP colgado no puede quedarse con el turno.
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    # Arrancarlo al iniciar el broker en vez de con la primera tarea que lo
+    # pida. Para servidores que cargan un modelo: sin esto la primera llamada
+    # paga la carga entera (segundos) dentro del turno del agente.
+    preload: bool = False
 
 
 class MCPConfig(BaseModel):
