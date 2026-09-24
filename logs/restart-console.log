@@ -1,0 +1,51 @@
+==========================================================
+  Panel:
+
+    http://0.0.0.0:8765/dashboard
+
+  Token de administracion (generado para esta sesion):
+
+    yrLnYHoR27txYl-TsuijiuIasOIwj-lV
+
+  Usalo en el login del panel o en la cabecera
+  X-Admin-Token de la API. Cambia en cada arranque.
+==========================================================
+{"timestamp":"2026-09-24T21:50:38.792290+00:00","level":"INFO","logger":"ai_broker","message":"logging.configured","event":"logging.configured"}
+{"timestamp":"2026-09-24T21:50:38.875497+00:00","level":"INFO","logger":"ai_broker.http","message":"admin.session_token_published","event":"admin.session_token_published"}
+{"timestamp":"2026-09-24T21:50:40.065319+00:00","level":"WARNING","logger":"ai_broker.http","message":"providers.cloud_zero_cost","event":"providers.cloud_zero_cost","provider":"nvidia"}
+{"timestamp":"2026-09-24T21:50:40.065635+00:00","level":"WARNING","logger":"ai_broker.http","message":"providers.cloud_zero_cost","event":"providers.cloud_zero_cost","provider":"lemonade"}
+{"timestamp":"2026-09-24T21:50:40.065742+00:00","level":"WARNING","logger":"ai_broker.http","message":"providers.cloud_zero_cost","event":"providers.cloud_zero_cost","provider":"unsloth"}
+{"timestamp":"2026-09-24T21:50:40.065777+00:00","level":"WARNING","logger":"ai_broker.http","message":"providers.cloud_zero_cost","event":"providers.cloud_zero_cost","provider":"FreeLLMapi"}
+{"timestamp":"2026-09-24T21:50:40.324501+00:00","level":"INFO","logger":"ai_broker.http","message":"provider.auto_start_skipped","provider":"lmstudio"}
+{"timestamp":"2026-09-24T21:50:40.324698+00:00","level":"WARNING","logger":"ai_broker.http","message":"provider.auto_start_ignored","provider":"nvidia"}
+{"timestamp":"2026-09-24T21:50:40.324740+00:00","level":"WARNING","logger":"ai_broker.http","message":"provider.auto_start_ignored","provider":"lemonade"}
+{"timestamp":"2026-09-24T21:50:40.324775+00:00","level":"WARNING","logger":"ai_broker.http","message":"provider.auto_start_ignored","provider":"FreeLLMapi"}
+{"timestamp":"2026-09-24T21:50:47.012211+00:00","level":"INFO","logger":"ai_broker.mcp","message":"mcp.server_ready","event":"mcp.server_ready"}
+{"timestamp":"2026-09-24T21:51:05.802783+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":9.104,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:51:05.805455+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.987,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:51:35.943174+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":1.111,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:51:35.945342+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.699,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:52:06.092067+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":1.1,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:52:06.094571+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.694,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:52:36.225669+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.576,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:52:36.228020+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.826,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:53:06.374347+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.638,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:53:06.376338+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.578,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:53:36.505800+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.744,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:53:36.507366+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.455,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:54:06.642930+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.599,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:54:06.644549+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.46,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:54:36.775467+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.751,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:54:36.777092+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.458,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:55:06.924983+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.747,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:55:06.926707+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.528,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:55:37.063176+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.785,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:55:37.064620+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.421,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:56:07.223765+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.806,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:56:07.225353+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.433,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:56:37.348869+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":1.458,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:56:37.350775+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.566,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:57:07.510813+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.891,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:57:07.512280+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":0.4,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:57:37.658638+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/health/live","status_code":200,"duration_ms":0.857,"client":"127.0.0.1","event":"http.request"}
+{"timestamp":"2026-09-24T21:57:37.663722+00:00","level":"INFO","logger":"ai_broker.http","message":"http.request","method":"GET","path":"/api/v1/capabilities","status_code":200,"duration_ms":4.006,"client":"127.0.0.1","event":"http.request"}
