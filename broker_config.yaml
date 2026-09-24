@@ -69,9 +69,21 @@ sandbox:
   max_output_chars: 8000
   work_volume_mb: 256
 mcp:
-  enabled: false
-  servers: []
-  startup_timeout_seconds: 20.0
+  enabled: true
+  servers:
+  - id: laya
+    enabled: true
+    command: C:/Procesos/Laya/.venv/Scripts/laya-mcp-server.exe
+    args: []
+    env:
+      LAYA_PRELOAD: '1'
+      LAYA_MODELS: multilingual
+      LAYA_THREADS: '8'
+      HF_HUB_OFFLINE: '1'
+    data_boundary: local
+    timeout_seconds: 120.0
+    preload: true
+  startup_timeout_seconds: 60.0
 resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0
@@ -603,6 +615,32 @@ providers:
         json_mode: false
         tools: true
       features_checked_at: '2026-09-12T20:01:21.589411+00:00'
+    - name: laya-multilingual
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-24T21:19:13.997069+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":"Engine protocol predict request returned 500: {\"error\":{\"code\":500,\"message\":\"the
+        current context does not logits computation. skipping\",\"type\":\"server_error\"}}"}'
+      features: {}
+      features_checked_at: null
+    - name: laya
+      context_window: 32768
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-24T21:18:50.894232+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:1234/v1/chat/completions:
+        {"error":{"message":"Failed to load model \"laya\". Error: Failed to load
+        model.","type":"invalid_request_error","param":"model","code":null}}'
+      features: {}
+      features_checked_at: null
   - id: nvidia
     enabled: true
     adapter: openai_compatible
@@ -2918,6 +2956,217 @@ providers:
         but not loaded, and ''Switch model by request'' is off, so this server can
         only serve the loaded model. Turn it on in Unsloth Studio under Settings >
         API.","type":"not_found_error","param":"model","code":"model_not_found"}}'
+      features: {}
+      features_checked_at: null
+    - name: Weidows/laya-multilingual-GGUF
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: mys/laya-GGUF
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: incompatible
+      compatibility_checked_at: '2026-09-24T21:19:22.552395+00:00'
+      compatibility_error: 'HTTP 400 en http://127.0.0.1:8888/v1/chat/completions:
+        {"error":{"message":"No model loaded. Call POST /inference/load first. Or
+        enable Model auto-switch (Settings > API) to load a requested model automatically.","type":"invalid_request_error","param":null,"code":null}}'
+      features: {}
+      features_checked_at: null
+    - name: ollama/ornith-1.5:35b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/nemotron-3.5-lightning:30b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/qwen3.8:27b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/muse-glimmer:30b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/muse-glimmer:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/nemotron-3.5-lightning:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/qwen3-coder-next:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/qwen3-coder:30b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/north-mini-code-1.0:q8_0
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/lfm2:24b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/glm-ocr:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - document
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/ornith:35b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/gemma4:12b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/granite4.1:30b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/qwen3.6:35b
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/nemotron:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/nemotron-3-nano:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
   - id: FreeLLMapi

@@ -130,6 +130,33 @@ def test_a_server_that_cannot_start_does_not_break_the_task() -> None:
     _run(scenario())
 
 
+def test_warm_up_starts_only_the_preloaded_servers() -> None:
+    """`preload` arranca el servidor al iniciar el broker; el resto sigue
+    esperando a la primera tarea que lo pida."""
+    async def scenario() -> None:
+        preloaded = _config(preload=True).servers[0]
+        lazy = preloaded.model_copy(update={"id": "perezoso", "preload": False})
+        registry = MCPRegistry(MCPConfig(enabled=True, servers=[preloaded, lazy]))
+        try:
+            await registry.warm_up()
+            assert registry._servers["echo"].started
+            assert registry._servers["perezoso"].process is None
+        finally:
+            await registry.aclose()
+
+    _run(scenario())
+
+
+def test_warm_up_does_nothing_with_mcp_disabled() -> None:
+    async def scenario() -> None:
+        config = _config(preload=True).model_copy(update={"enabled": False})
+        registry = MCPRegistry(config)
+        await registry.warm_up()
+        assert registry._servers["echo"].process is None
+
+    _run(scenario())
+
+
 def test_the_registry_reports_which_servers_send_data_out() -> None:
     config = MCPConfig(enabled=True, servers=[
         MCPServerConfig(id="local-fs", command="x", data_boundary="local"),

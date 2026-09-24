@@ -179,6 +179,18 @@ class MCPRegistry:
         )
         return _render_result(payload)
 
+    async def warm_up(self) -> None:
+        """Arranca ya los servidores marcados con `preload`.
+
+        Mismo camino que `tools_for`, así que un servidor que no arranca queda
+        registrado en el log y la tarea que lo pida después lo reintenta.
+        """
+        if not self.config.enabled:
+            return
+        preload = [server_id for server_id, server in self._servers.items() if server.config.preload]
+        if preload:
+            await self.tools_for(preload)
+
     async def aclose(self) -> None:
         for server in self._servers.values():
             process = server.process
