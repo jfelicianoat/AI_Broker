@@ -1,10 +1,10 @@
 # Especificación para aplicaciones cliente
 
-*Contrato 2.9 · 16 de agosto de 2026*
+*Contrato 2.11 · 2 de octubre de 2026*
 
-Este documento describe **cómo una aplicación envía tareas al broker y recoge el resultado**. Está escrito desde el contrato real (`app/schemas.py`), no desde el histórico de versiones: lo que hay aquí es la forma actual, sin tener que reconstruirla leyendo cinco listas de novedades.
+Este documento describe **cómo una aplicación envía tareas al broker, recoge el resultado y solicita juicios estructurados a modelos System-1**. Está escrito desde el contrato real (`app/schemas.py`), no desde el histórico de versiones: lo que hay aquí es la forma actual, sin tener que reconstruirla leyendo cinco listas de novedades.
 
-Si vienes del contrato 2.5, salta primero a [§11 Qué ha cambiado](#11-qué-ha-cambiado-desde-25).
+Para los cambios de versión, consulta [§12 Qué ha cambiado](#12-qué-ha-cambiado). Para usar System-1 directamente, consulta [§15 System-1](#15-system-1-juicios-estructurados).
 
 ---
 
@@ -15,7 +15,7 @@ Si vienes del contrato 2.5, salta primero a [§11 Qué ha cambiado](#11-qué-ha-
 3. **Consultas el estado** (`GET /api/v1/tasks/{id}`) cada pocos segundos hasta que el estado sea terminal.
 4. **Lees el resultado** del mismo objeto, en `result`.
 
-No hay webhooks ni streaming. El modelo es aceptación asíncrona + sondeo.
+No hay webhooks ni streaming. Las tareas usan aceptación asíncrona + sondeo. Los juicios System-1 usan otro flujo: `POST /api/v1/system1/judge` espera al juicio y devuelve `200`, sin crear una tarea ni requerir sondeo (§15).
 
 ```
 POST /api/v1/tasks       →  202  { task_id, status: "queued", status_url }
@@ -35,7 +35,10 @@ Devuelve, entre otros:
 
 | Campo | Forma | Para qué te sirve |
 |---|---|---|
-| `contract_version` | `string` | `"2.10"`. Si no coincide con lo que esperas, revisa §12 |
+| `contract_version` | `string` | `"2.11"`. Si no coincide con lo que esperas, revisa §12 |
+| `system1_judgments` | `bool` | Si el servicio de juicios System-1 está habilitado (§15) |
+| `system1_semantic_routing` | `bool` | Si System-1 y su enrutado semántico están habilitados. Puede operar en modo sombra (§15.6) |
+| `system1_evaluation` | `bool` | Si el juicio admite `target` y devuelve la nota de cada intento, también la rechazada (§15.8) |
 | `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
 | `work_lanes` | `[string]` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
 | `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
@@ -50,7 +53,7 @@ Devuelve, entre otros:
 | `ingestion_formats` | `{string: [string]}` | Extensiones admitidas **agrupadas por tipo**: la clave es el grupo (`pdf`, `office`, `text`, `image`, `audio`, `video`), el valor su lista de extensiones con punto |
 | `long_context_map_reduce` | `bool` | Si puedes autorizar troceo de documentos largos |
 | `task_artifacts` | `bool` | Si puedes listar y descargar los ficheros que produce una tarea (§8.3) |
-| `auxiliary_invocations` | `bool` | Si este broker **puede** lanzar invocaciones que tú no pediste bajo tu `task_id` (§8.4) |
+| `auxiliary_invocations` | `bool` | Si está habilitado el sondeo auxiliar de modelos (§8.4). Consulta también `system1_semantic_routing` para el clasificador System-1 |
 | `auxiliary_invocations_optout` | `bool` | Si puedes apagarlas con `auxiliary_invocations: false` (§8.4) |
 | `invocation_contract` | `bool` | Si `role`/`status` vienen enumerados y cada invocación declara `contractual` (§8.2) |
 | `prompt_compression_echo` | `bool` | Si cada invocación declara la compresión que se le aplicó de verdad (§8.5) |
@@ -63,7 +66,9 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 ```json
 {
-  "contract_version": "2.10",
+  "contract_version": "2.11",
+  "system1_judgments": true,
+  "system1_semantic_routing": true,
   "strategies": ["single", "mixture_of_agents", "agent"],
   "presets": { "single": ["fast"], "mixture_of_agents": ["fast", "slow"], "agent": ["fast"] },
   "scheduling_by_preset": { "fast": ["sequential"], "slow": ["adaptive", "parallel", "waves", "sequential"] },
@@ -97,6 +102,8 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 **Consúltalo al arrancar tu aplicación, no en cada petición.** Cambia solo cuando cambia la configuración del broker.
 
+Los flags System-1 indican habilitación, no disponibilidad garantizada de sus proveedores. No publican el modelo primario, los umbrales ni el modo sombra; son configuración del operador. Si faltan en un broker anterior, trátalos como `false`.
+
 **El contrato crece de forma aditiva: no rechaces campos desconocidos.** Entre 2.5 y 2.7 aparecieron `derived_data_boundary`, `work_lanes` y el estado `converting`, y seguirán apareciendo otros. Un cliente que trate un campo nuevo como error se romperá en la siguiente versión del broker sin que nada haya cambiado para él. Ignora lo que no conozcas y da valor por defecto a lo que falte.
 
 **Si no puedes leer `capabilities`, no bloquees al usuario.** La respuesta puede fallar por red, por token o por un campo que tu cliente aún no entiende; ninguna de esas tres cosas significa que el broker no sepa hacer lo que le pides. Avisa, deja enviar la tarea igualmente y confía en el `409` (§11): ese sí distingue un sandbox apagado de un parseo roto. Deducir "no hay sandbox" de un fallo de lectura produce mensajes que apuntan al sitio equivocado y esconden la avería real.
@@ -119,7 +126,7 @@ Un puñado de rutas contesta `200` siempre, con token o sin él. Son metadatos �
 
 `/health`, `/health/live`, `/health/ready`, `/api/v1/capabilities`, `/api/v1/models`, `/api/v1/models/availability`, `/api/v1/models/context` y `GET /api/v1/queue` (solo ids, estados y posiciones; reordenar con `PATCH` sí exige credencial).
 
-Todo lo demás bajo `/api/v1/*` pide credencial: crear y leer tareas, artefactos, ficheros, uso, resúmenes del panel y recursos. También `/openapi.json`, `/docs` y `/redoc`: el esquema enumera cada ruta, parámetro y modelo del broker. Swagger UI no puede poner la cabecera `X-Admin-Token` por su cuenta, así que abrir `/docs` en un navegador exige haber pasado antes por `/dashboard/login`; desde código, `GET /openapi.json` con la cabecera funciona igual que cualquier otra ruta.
+Todo lo demás bajo `/api/v1/*` pide credencial, y la credencial se comprueba antes que el cuerpo: sin ella, una petición mal formada recibe `403`, no un `422` con los nombres de los campos. Esas rutas son: crear y leer tareas, artefactos, ficheros, uso, resúmenes del panel y recursos, incluidos `POST /api/v1/system1/judge` y `GET /api/v1/system1/metrics`. También `/openapi.json`, `/docs` y `/redoc`: el esquema enumera cada ruta, parámetro y modelo del broker. Swagger UI no puede poner la cabecera `X-Admin-Token` por su cuenta, así que abrir `/docs` en un navegador exige haber pasado antes por `/dashboard/login`; desde código, `GET /openapi.json` con la cabecera funciona igual que cualquier otra ruta.
 
 ### Cómo validar un token
 
@@ -175,7 +182,7 @@ En Windows es el Administrador de credenciales: cifrado, con ACL del usuario que
 
 ## 4. La decisión más importante: la clasificación de datos
 
-Es el único campo de privacidad. Declara qué es el contenido que envías y el broker deriva de ahí a qué modelos puede ir:
+En las peticiones de tareas, es el campo que determina la frontera de datos. Declara qué es el contenido que envías y el broker deriva de ahí a qué modelos puede ir:
 
 ```json
 { "risk": { "data_classification": "internal" } }
@@ -210,6 +217,8 @@ Puedes seguir enviando los campos de siempre en `model_requirements`, y mandan s
 Con un límite que no se cede: **una clasificación restrictiva no se puede abrir con `cloud_allowed: true`**. Si declaras `confidential`, la tarea se queda en local aunque pidas lo contrario.
 
 Omitirlos es lo normal y lo recomendado: si los envías, tienes dos sitios que mantener coherentes.
+
+**Los juicios directos System-1 tienen su propia petición** (§15.1): no admiten `risk` ni `model_requirements`, y usan `cloud_allowed: false` por defecto. Si tu aplicación parte de datos `confidential` o `local_only`, debe conservar ese `false`. El enrutado System-1 automático de una tarea sí hereda su frontera derivada.
 
 ---
 
@@ -875,7 +884,9 @@ Una tarea con `exclude_from_model_learning: true` (§5.8) tampoco se sondea: el 
 }
 ```
 
-**Antes de encolar, mira `capabilities.auxiliary_invocations`.** Dice si este broker las hace (el operador puede tenerlas apagadas); `capabilities.auxiliary_invocations_optout` dice si acepta que las apagues. Si tus contratos no las toleran y el broker no ofrece el opt-out, rechaza la tarjeta ahí y no al leer la telemetría.
+**Antes de encolar, mira `capabilities.auxiliary_invocations`.** Dice si el sondeo auxiliar está habilitado (el operador puede tenerlo apagado); `capabilities.auxiliary_invocations_optout` dice si acepta que lo apagues. Si tus contratos no lo toleran y el broker no ofrece el opt-out, rechaza la tarjeta ahí y no al leer la telemetría.
+
+**Desde 2.11, consulta también `capabilities.system1_semantic_routing`.** El clasificador System-1 puede leer el prompt antes de elegir el modelo, incluso en modo sombra. `auxiliary_invocations: false` también desactiva esa clasificación automática. Un `target_model` explícito evita el enrutado semántico. Estos juicios se observan en `/api/v1/system1/metrics` (§15.7); no son filas de `/tasks/{id}/invocations`. Una llamada directa a `/system1/judge` es una petición independiente y explícita, y no se controla con el opt-out de otra tarea.
 
 ### 8.5 Eco de la compresión de prompt
 
@@ -980,6 +991,8 @@ Idempotente: cancelar algo ya terminal devuelve su estado sin error. Una tarea e
 
 ## 11. Errores
 
+Para `POST /api/v1/system1/judge`, una petición inválida devuelve `422 CONTRACT_VALIDATION_FAILED` y la autenticación sigue §3. La falta de un juicio aceptable —incluido un servicio apagado, baja confianza o un proveedor caído— se expresa con **`200` y `accepted: false`**, no como tarea fallida. Consulta `reason_code` y `attempts`, y aplica tu alternativa (§15.4).
+
 | HTTP | Código | Qué ha pasado | Qué hacer |
 |---|---|---|---|
 | `422` | `CONTRACT_VALIDATION_FAILED` | El cuerpo no cumple el contrato. Trae `fields` con las rutas exactas | Corregir. No reintentar igual |
@@ -1017,6 +1030,18 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### 2.11 — juicios System-1 y enrutado semántico (2 de octubre de 2026)
+
+Ampliación aditiva: las peticiones y respuestas de tareas siguen siendo compatibles con 2.10. Se añaden rutas independientes y flags de descubrimiento.
+
+- **`POST /api/v1/system1/judge`** (§15): juicio síncrono `binary`, `choice` o `score`, con validación del resultado, umbrales del operador, intentos y fallback. No crea un `task_id`.
+- **`GET /api/v1/system1/metrics`** (§15.7): contadores y eventos recientes del servicio, protegido por la misma credencial admin.
+- **`system1_judgments` y `system1_semantic_routing`** en `/capabilities`: habilitación del servicio y de su uso por el router. El segundo flag también puede estar activo en modo sombra.
+- **Nimble `nimble:latest` mediante Ollama es el primario de esta instalación**; Laya mediante MCP es el siguiente proveedor. Si ninguno entrega un juicio aceptable, el router conserva la selección anterior y el cliente directo recibe `accepted: false`.
+- **`auxiliary_invocations: false` también evita la clasificación semántica automática**. Se mantiene la frontera de datos de la tarea antes de elegir candidatos (§8.4 y §15.6).
+- **La confianza se declara sin calibrar**: `confidence_is_calibrated: false`. El cliente debe comprobar `accepted`, también cuando `decision` sea `false` o `0`.
+- **Ampliación del 3 de octubre, sin cambio de versión** (aditiva, anunciada en `capabilities.system1_evaluation`): `target` fija el juez para evaluarlo y cada intento trae su nota en bruto, también la rechazada (§15.8).
 
 ### 2.10 — ejecución demostrable (septiembre de 2026)
 
@@ -1197,6 +1222,312 @@ Es un endurecimiento deliberado: el nombre prometía una frontera que no se apli
 - **Sondea con backoff** y trata cualquier estado no terminal como "sigue trabajando".
 - **Pon `max_cost_usd`** si usas modelos de pago: es un corte duro, no un aviso.
 - **Respeta `retryable`** del error antes de reintentar.
+- **En System-1, comprueba `accepted` antes de usar `decision`** y prepara tu alternativa cuando no haya un juicio aceptado (§15). No sondees una tarea para recoger este resultado.
+
+---
+
+## 15. System-1: juicios estructurados
+
+System-1 resuelve decisiones acotadas: comprobar si se ha terminado un objetivo, elegir una categoría o asignar un nivel de una rúbrica. Devuelve un valor tipado y la información necesaria para decidir si usarlo. Para generar una respuesta extensa o ejecutar un agente, utiliza las tareas de §5.
+
+| Ruta | Respuesta | Uso |
+|---|---|---|
+| `POST /api/v1/system1/judge` | `200`, objeto de juicio | Evaluar una decisión y esperar el resultado en la misma petición |
+| `GET /api/v1/system1/metrics` | `200`, contadores y eventos | Observar intentos, decisiones, fallbacks y enrutado |
+
+Ambas rutas usan `X-Admin-Token` cuando el broker exige credencial (§3). Comprueba `capabilities.system1_judgments` al arrancar. En versiones anteriores las rutas pueden no existir.
+
+### 15.1 Petición
+
+```http
+POST /api/v1/system1/judge
+Content-Type: application/json
+X-Admin-Token: <token>
+```
+
+| Campo | Tipo / default | Regla |
+|---|---|---|
+| `use_case` | `string`, obligatorio | Entre 1 y 128 caracteres, solo letras ASCII, números, `_` y `-`. Identifica el caso de uso y su perfil configurado |
+| `input` | `object`, obligatorio | Objeto JSON no vacío con los datos que hay que evaluar |
+| `decision_type` | `"binary"`, `"choice"` o `"score"`, obligatorio | Forma del juicio (§15.2) |
+| `options` | `[string]`, `[]` | Solo `choice`: de 2 a 20 etiquetas distintas y no vacías |
+| `criteria` | `{string: string}`, `{}` | Solo `choice`: descripciones opcionales. Si se informa, sus claves deben coincidir exactamente con `options` |
+| `rubric` | `[string]`, `[]` | Solo `score`: de 2 a 20 descripciones no vacías, en orden ordinal |
+| `instructions` | `string \| null`, `null` | Instrucción entre 1 y 4000 caracteres; si falta, se obtiene de la configuración del operador |
+| `threshold_profile` | `string \| null`, `null` | Nombre de perfil, máximo 128 caracteres. Un nombre explícito desconocido produce `UNKNOWN_THRESHOLD_PROFILE`. El nombre reservado `default` pide el umbral por defecto |
+| `cloud_allowed` | `bool`, `false` | Autoriza usar un proveedor que pueda sacar contenido de la máquina |
+| `target` | `{provider, model} \| null`, `null` | Solo para evaluar: fija el juez. `provider` es `ollama_system1` o `laya_mcp`; `model` es opcional (sin él, el configurado). Sin fallback a otro proveedor (§15.8) |
+
+Se rechazan campos desconocidos con `422`. No admite `idempotency_key`, `task_id`, `risk`, `attachments`, `execution`, `generation` ni un timeout por petición. El juez solo se elige con `target`, pensado para evaluar (§15.8). Si necesitas evaluar un documento, pasa en `input` el contenido que tu aplicación haya obtenido; un `file_id` no se resuelve automáticamente.
+
+`use_case` permite casos propios. El operador configura los perfiles y sus instrucciones; si no existe un perfil para ese caso, la petición debe pedir el umbral por defecto con `threshold_profile: "default"`; sin él se devuelve `accepted: false` con `UNKNOWN_USE_CASE`, para que una errata en el nombre no rebaje el umbral en silencio. Las instrucciones se buscan en este orden: las de la petición, las del perfil del caso de uso y las del perfil de umbrales elegido. Si ninguna existe, se devuelve `accepted: false` con `MISSING_INSTRUCTIONS` sin invocar un modelo.
+
+`threshold_profile` selecciona umbrales; no selecciona proveedor ni cambia por sí mismo las instrucciones del caso de uso. En esta instalación existen `goal_completion`, `semantic_routing`, `ranking` y `agora_review_gate`. Para un caso propio, envía `instructions` y `threshold_profile: "default"`, o acuerda un perfil con el operador. Una decisión que se salta una revisión humana debería tener perfil propio con un umbral alto, no el de por defecto.
+
+**Privacidad.** `cloud_allowed: false` impide invocar un servidor MCP declarado `egress` y un despliegue Ollama remoto. Permitir cloud no obliga a usarlo: el primario sigue siendo Nimble local. La frontera de Laya depende de cómo el operador haya declarado su servidor MCP. Para datos `confidential` o `local_only`, mantén `false`; esta ruta no recibe una clasificación de datos que pueda corregir un `true` enviado por tu aplicación.
+
+### 15.2 Tipos de decisión y ejemplos
+
+**`binary`** devuelve un booleano JSON. No admite `options`, `criteria` ni `rubric` informados.
+
+```json
+{
+  "use_case": "goal_completion",
+  "input": {
+    "goal": "Corregir el error y verificar la solución",
+    "evidence": {"fix_applied": true, "tests_passed": true}
+  },
+  "decision_type": "binary",
+  "instructions": "¿La evidencia demuestra que se han completado y verificado todas las partes del objetivo?",
+  "cloud_allowed": false
+}
+```
+
+**`choice`** devuelve exactamente una de las etiquetas de `options`. No admite `rubric`. Este ejemplo clasifica complejidad; no ejecuta una tarea ni selecciona directamente un modelo.
+
+```json
+{
+  "use_case": "semantic_routing",
+  "input": {"request": "Traduce una frase corta del español al inglés"},
+  "decision_type": "choice",
+  "options": ["simple", "medium", "complex"],
+  "criteria": {
+    "simple": "Una consulta, traducción breve o transformación de formato",
+    "medium": "Varios pasos habituales, resumen o programación rutinaria",
+    "complex": "Demostraciones, arquitectura, seguridad o razonamiento especializado"
+  },
+  "instructions": "Elige el nivel mínimo de complejidad suficiente para resolver la petición.",
+  "cloud_allowed": false
+}
+```
+
+**`score`** devuelve el **índice del nivel elegido**, empezando en cero. Para una rúbrica de cuatro niveles los valores válidos son `0`, `1`, `2` y `3` (pueden serializarse como `0.0`, etc.). Es el nivel con mayor puntuación del proveedor, no una media ponderada ni una escala continua. No admite `options` ni `criteria`.
+
+```json
+{
+  "use_case": "ranking",
+  "input": {"answer": "La respuesta explica la solución y aporta una comprobación reproducible."},
+  "decision_type": "score",
+  "rubric": ["Incorrecta", "Parcial", "Correcta", "Correcta y verificada"],
+  "instructions": "Evalúa la calidad de la respuesta usando los niveles de la rúbrica.",
+  "cloud_allowed": false
+}
+```
+
+### 15.3 Respuesta
+
+Ejemplo ilustrativo de un juicio binario aceptado por el primario:
+
+```json
+{
+  "use_case": "goal_completion",
+  "decision": true,
+  "confidence": 0.98,
+  "confidence_is_calibrated": false,
+  "alternatives": [{"value": false, "confidence": 0.02}],
+  "provider": "ollama_system1",
+  "model": "nimble:latest",
+  "latency_ms": 180.0,
+  "fallback_used": false,
+  "reason_code": null,
+  "accepted": true,
+  "attempts": [
+    {
+      "provider": "ollama_system1",
+      "model": "nimble:latest",
+      "latency_ms": 179.0,
+      "reason_code": null,
+      "tokens_input": 152,
+      "tokens_output": 1
+    }
+  ]
+}
+```
+
+| Campo | Tipo | Interpretación |
+|---|---|---|
+| `use_case` | `string` | Eco del caso de uso |
+| `accepted` | `bool` | El resultado pasó la validación y los umbrales del broker |
+| `decision` | `bool \| string \| number \| null` | Valor del tipo solicitado; `null` si no se aceptó ningún juicio |
+| `confidence` | `number \| null` | Puntuación entre 0 y 1 de la decisión elegida; `null` sin juicio aceptado |
+| `confidence_is_calibrated` | `bool` | Actualmente `false`; no interpretes el score como una probabilidad de acierto validada |
+| `alternatives` | `[{value, confidence}]` | Otras decisiones y sus puntuaciones. En `choice` y `score`, incluye todas las restantes |
+| `provider` | `string \| null` | Proveedor aceptado o último intentado: `ollama_system1` o `laya_mcp` |
+| `model` | `string \| null` | Modelo utilizado o último intentado; puede ser `null` |
+| `latency_ms` | `number` | Tiempo total del juicio, incluidos los intentos anteriores |
+| `fallback_used` | `bool` | Se pasó a otro proveedor o se agotó la vía System-1 |
+| `reason_code` | `string \| null` | Causa del fallback; también puede estar informado en un resultado aceptado |
+| `attempts` | `[object]` | Intentos en orden, con `provider`, `model`, `latency_ms`, `reason_code`, `tokens_input`, `tokens_output` y, si el proveedor devolvió un juicio válido, `decision`, `confidence`, `alternatives` y `score_source` en bruto, aunque no se aceptara (§15.8) |
+
+En cada intento, `reason_code: null` indica aceptación; los contadores de tokens pueden ser `null` si el proveedor no los informa. No hay `task_id`, `status_url` ni estado que sondear. Estos juicios no tienen persistencia de tareas ni deduplicación por clave: repetir el POST puede volver a ejecutar proveedores.
+
+La confianza es la puntuación de la decisión mejor clasificada (`top1`). En la integración nativa de Nimble, se usan las puntuaciones de sus candidatos; no se sustituye esta confianza por su medida de concentración basada en entropía. El broker comprueba el tipo, el dominio y las alternativas antes de aceptar. En `choice` y `score` exige también el margen entre la primera y la segunda puntuación. `accepted: true` significa que se cumplió ese contrato, no que el contenido sea infalible.
+
+### 15.4 Fallback y errores de juicio
+
+La configuración actual intenta **Ollama / `nimble:latest` → Laya / MCP → comportamiento anterior**. El orden y la política pertenecen al operador. La única excepción es `target` (§15.8): fija un proveedor y desactiva el paso al otro.
+
+| Resultado | `accepted` | `fallback_used` | Acción del cliente |
+|---|---|---|---|
+| Se acepta el primer proveedor | `true` | `false` | Usar `decision` |
+| Falla el primario y se acepta el siguiente | `true` | `true` | Usar `decision`; revisar los intentos si necesita diagnosticar |
+| Un proveedor responde pero con baja confianza o margen insuficiente | `false` | `true` | Aplicar su alternativa. No se consulta al siguiente proveedor: está para cubrir fallos, no como segunda opinión |
+| No se acepta ningún proveedor, servicio apagado o perfil/instrucciones inválidos | `false` | `true` | Aplicar su alternativa; `decision` y `confidence` son `null` |
+
+En un éxito del segundo proveedor, `reason_code` conserva el fallo del primer intento. En un rechazo final, refleja el último fallo. `attempts` puede estar vacío cuando no se llegó a invocar ningún proveedor. **No deduzcas aceptación de `fallback_used`, de la presencia de `provider` ni de que HTTP sea `200`.**
+
+| `reason_code` habitual | Significado |
+|---|---|
+| `SYSTEM1_DISABLED` | Servicio deshabilitado |
+| `UNKNOWN_THRESHOLD_PROFILE` | Perfil explícito no configurado |
+| `UNKNOWN_USE_CASE` | `use_case` sin perfil configurado y sin `threshold_profile: "default"` |
+| `MISSING_INSTRUCTIONS` | Sin instrucciones en la petición ni en los perfiles |
+| `LOW_CONFIDENCE` | Puntuación por debajo del umbral |
+| `INSUFFICIENT_MARGIN` | Diferencia insuficiente entre las dos mejores opciones o niveles |
+| `TIMEOUT` | El intento agotó su plazo |
+| `INVALID_OUTPUT` | Resultado incompatible con el contrato |
+| `MCP_ERROR` | Error del servidor o herramienta MCP |
+| `PROVIDER_UNAVAILABLE`, `MODEL_UNAVAILABLE`, `MODEL_CAPABILITY_MISMATCH` | Proveedor/modelo ausente o incompatible |
+| `CLOUD_NOT_ALLOWED` | Ese proveedor cruza una frontera de datos no autorizada |
+| `SELF_REPORTED_SCORE` | Juzgó un modelo generativo fijado con `target`: su nota es evidencia, nunca un juicio aceptado (§15.8) |
+| `INPUT_TOO_LARGE` | El `input` supera lo que ese proveedor puede leer entero; no se juzga sobre un recorte |
+| `INTERNAL_PROVIDER_ERROR` | Fallo no clasificado de la infraestructura del proveedor |
+
+La lista es abierta: pueden aparecer otros códigos propagados por un proveedor. Un código desconocido con `accepted: false` sigue requiriendo la alternativa del cliente.
+
+En la ruta directa, el broker **no ejecuta automáticamente una tarea generativa como alternativa**: entrega el rechazo y la aplicación decide qué hacer. En el enrutado automático (§15.6), la alternativa consiste en conservar el router anterior.
+
+### 15.5 Umbrales, tiempos y consumo desde un cliente
+
+Los umbrales actuales de esta instalación son:
+
+| Perfil | Confianza mínima | Margen mínimo (`choice` / `score`) |
+|---|---|---|
+| Por defecto | `0.85` | `0.15` |
+| `goal_completion` | `0.97` | `0.15` |
+| `semantic_routing` | `0.90` | `0.15` |
+| `ranking` | `0.85` | `0.15` |
+| `agora_review_gate` | `0.97` | `0.15` |
+
+Son valores del operador, no constantes de la API ni parámetros modificables por petición. El juicio binario solo aplica el umbral de confianza.
+
+El plazo actual es **30 segundos por proveedor**, y los intentos son secuenciales. Incluye la llamada al proveedor y, si el modelo System-1 no es nativo de decisión, la espera por el turno de inferencia. Un modelo nativo como Nimble no espera a las generaciones en curso. Con dos proveedores, configura el timeout HTTP por encima de 60 segundos más el margen de transporte; por ejemplo, 75 segundos. Si el operador cambia el número de proveedores o su plazo, ajusta ese timeout. Un timeout del cliente no contiene un juicio aceptado.
+
+Ejemplo Python para consumir el resultado del primer ejemplo (§15.2). `base_url`, `admin_token` y `payload` los proporciona tu aplicación:
+
+```python
+import httpx
+
+response = httpx.post(
+    f"{base_url.rstrip('/')}/api/v1/system1/judge",
+    headers={"X-Admin-Token": admin_token},
+    json=payload,
+    timeout=75.0,
+)
+response.raise_for_status()
+judgment = response.json()
+if judgment["accepted"]:
+    decision = judgment["decision"]  # false y 0 también son decisiones válidas
+else:
+    decision = None  # ejecutar aquí la alternativa de la aplicación
+```
+
+Gestiona aparte los errores HTTP y de transporte. No uses `if judgment["decision"]`: confundiría una negativa aceptada con un fallo. No reintentes indefinidamente un rechazo por baja confianza; un nuevo intento también consume inferencia.
+
+### 15.6 Uso automático en el router de tareas
+
+Las tareas de §5 pueden usar System-1 sin cambiar su cuerpo. Se mantiene primero la selección determinista por privacidad, proveedores permitidos, capacidades, contexto y presupuesto. Después, en una selección de un solo modelo para chat con rol `single`, sin modelo objetivo ni preferencia explícita, el clasificador puede proponer `simple`, `medium` o `complex`.
+
+El operador asigna niveles de capacidad a los modelos. Solo se consulta al clasificador si hay candidatos elegibles de al menos dos niveles conocidos. Un juicio aceptado propone el nivel mínimo suficiente, conservando el orden basado en evidencia dentro de cada nivel. Si faltan niveles, no hay modelo suficiente o falla el juicio, se conserva la selección anterior. No se aplica esta clasificación a embeddings ni a selecciones de proponentes, árbitros o agentes.
+
+**Esta instalación mantiene `system1.routing.shadow_mode: true`.** Calcula y registra la propuesta, pero sigue ejecutando la selección anterior. `system1_semantic_routing: true` no garantiza que el router esté aplicando la propuesta: también cubre este modo. No hay un campo por petición para activar o desactivar el modo sombra.
+
+La clasificación hereda `model_requirements.cloud_allowed` de la tarea, sujeto a §4. `auxiliary_invocations: false` la omite incluso en modo sombra. Un `target_model` explícito tampoco pasa por el clasificador. Los modelos nativos de decisión, como Nimble, sirven a System-1 y se excluyen de la selección automática para generar respuestas normales cuando el servicio está habilitado.
+
+### 15.7 Métricas
+
+```http
+GET /api/v1/system1/metrics
+X-Admin-Token: <token>
+```
+
+Ejemplo abreviado; las claves de los contadores y los campos de cada evento dependen de lo ocurrido:
+
+```json
+{
+  "counts": {
+    "system1.call": 1,
+    "system1.attempt": 1,
+    "provider:ollama_system1": 1,
+    "use_case:goal_completion": 1,
+    "system1.decision": 1
+  },
+  "recent": [
+    {"event": "system1.call", "use_case": "goal_completion"},
+    {
+      "event": "system1.decision",
+      "use_case": "goal_completion",
+      "provider": "ollama_system1",
+      "model": "nimble:latest",
+      "latency_ms": 180.0,
+      "confidence": 0.98,
+      "decision": true,
+      "fallback_used": false,
+      "reason_code": null
+    }
+  ],
+  "confidence_is_calibrated": false
+}
+```
+
+Los eventos incluyen `system1.call`, `system1.attempt`, `system1.decision`, `system1.fallback`, `system1.routing` y `system1.routing_skipped`. Los intentos alimentan contadores `provider:<id>`, `use_case:<nombre>` y, cuando fallan, `error:<código>`. En los eventos de enrutado aparecen también `previous_model`, `proposed_model` y `shadow_mode`.
+
+Los contadores son del proceso actual y `recent` conserva como máximo 1000 eventos; se reinician con el broker. La instrumentación no incluye el objeto `input` ni el prompt completo; sí puede incluir la etiqueta de una decisión. También se escriben eventos en el log del servicio. No confundas estos contadores con el uso mensual ni con las invocaciones persistidas de una tarea: la telemetría System-1 se consulta por esta ruta.
+
+
+### 15.8 Evaluar y calibrar un modelo System-1
+
+Para medir un juez concreto —calibrar umbrales, vigilar deriva, comparar Nimble con Laya— hacen falta dos cosas que el uso normal no da: saber qué modelo contestó sin que el broker lo sustituya, y ver también las notas bajas.
+
+**Fijar el juez.** `target` elige proveedor y, opcionalmente, modelo:
+
+```json
+{
+  "use_case": "goal_completion",
+  "decision_type": "binary",
+  "input": {"goal": "…", "evidence": {"tests_passed": true}},
+  "target": {"provider": "laya_mcp", "model": "multilingual"}
+}
+```
+
+Con `target` solo se intenta ese proveedor: si falla, la respuesta es `accepted: false` con su `reason_code` y un único intento, nunca el juicio de otro modelo atribuido al que estás midiendo. Sin `model` se usa el configurado por el operador. Un modelo de Ollama tiene que estar en su catálogo, y ser local (o `cloud_allowed: true`); uno de Laya tiene que estar cargado en su servidor. Si no, `MODEL_UNAVAILABLE`, `MCP_ERROR` o el error que dé el proveedor. Los umbrales y las demás reglas son las mismas que sin `target`.
+
+**Identifica el modelo por lo que devuelve el broker, no por lo que pediste.** `model` en la petición puede ser un alias: con Laya, `multilingual` vuelve como `convaiinnovations/laya/multilingual`. En un informe de calibración usa el `model` de la respuesta y del intento, que es el que juzgó de verdad.
+
+**Modelos System 2 como profesor.** Un modelo generativo (sin la capacidad nativa `decision` de Nimble) puede juzgar **solo si lo fijas con `target`**; como juez automático se rechaza con `MODEL_CAPABILITY_MISMATCH` sin invocarlo. Sirve para destilar: el System 2 da la etiqueta del profesor y el System 1 se mide contra ella. Pero su «confianza» no es una probabilidad medida: es un número que el modelo escribe en su JSON, a menudo un 1,0 plano. Por eso:
+
+- cada intento declara `score_source`: `native` (Nimble, Laya: probabilidades del runtime) o `self_reported` (lo que escribió un System 2);
+- un juicio `self_reported` **nunca** sale `accepted: true`: la respuesta es `accepted: false` con `SELF_REPORTED_SCORE`, y la etiqueta y su número están en el intento.
+
+Usa del profesor la **etiqueta** (`attempts[0].decision`); su `confidence` como mucho para filtrar, nunca para calibrar al alumno. El plazo es el mismo de siempre (`30 s` por intento) e incluye cargar el modelo y esperar el turno de generación: un System 2 grande en frío puede agotarlo (`TIMEOUT`). Si pasa, repite la llamada con el modelo ya cargado o pide al operador más plazo.
+
+**Leer todas las notas.** Cada elemento de `attempts` trae `decision`, `confidence` y `alternatives` cuando el proveedor devolvió un juicio válido, **también si el umbral lo rechazó** (`LOW_CONFIDENCE`, `INSUFFICIENT_MARGIN`). La respuesta de primer nivel no cambia: `decision` y `confidence` siguen a `null` sin `accepted: true`. Una salida que rompe el contrato (`INVALID_OUTPUT`) o un fallo del proveedor dejan esos campos vacíos: no hay nota fiable que dar.
+
+```json
+{
+  "accepted": false,
+  "decision": null,
+  "confidence": null,
+  "reason_code": "LOW_CONFIDENCE",
+  "attempts": [{
+    "provider": "ollama_system1", "model": "nimble:latest", "reason_code": "LOW_CONFIDENCE",
+    "decision": true, "confidence": 0.62, "alternatives": [{"value": false, "confidence": 0.38}],
+    "latency_ms": 140.2, "tokens_input": 151, "tokens_output": 1
+  }]
+}
+```
+
+**No ejecutes lógica de negocio sobre la nota de un intento.** Es evidencia para medir, no una decisión: la única que el broker avala es la de primer nivel con `accepted: true`. Para calibrar, pide el perfil del caso que vas a evaluar (sus umbrales deciden `accepted`, pero no ocultan la nota), o `threshold_profile: "default"` si es un caso propio. La nota sigue sin calibrar (`confidence_is_calibrated: false`): calibrarla es justo lo que harás con ella.
 
 ---
 
