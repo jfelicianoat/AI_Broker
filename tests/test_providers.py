@@ -2882,3 +2882,16 @@ class CatalogFilterTests(unittest.IsolatedAsyncioTestCase):
         names = [entry["name"] for entry in await provider.models()]
         self.assertEqual(names, ["lmstudio-community/gemma-4-31B-it-GGUF"])
         await provider.close()
+
+
+def test_probe_does_not_veto_a_model_the_server_simply_has_not_loaded() -> None:
+    from app.providers.base import classify_probe_http_error
+
+    def failure(body: dict) -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", "http://127.0.0.1:8888/v1/chat/completions")
+        return httpx.HTTPStatusError("400", request=request, response=httpx.Response(400, json=body, request=request))
+
+    state, _ = classify_probe_http_error(failure({"error": {"message": "No model loaded. Call POST /inference/load first."}}))
+    assert state == "error"
+    state, _ = classify_probe_http_error(failure({"error": {"message": "model does not support chat"}}))
+    assert state == "incompatible"

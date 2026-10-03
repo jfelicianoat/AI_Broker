@@ -12,7 +12,7 @@ Tu central privada de inteligencia artificial: un único punto de entrada que re
 
 **Un nivel más abajo:** es un servicio que corre en tu propio ordenador (no depende de ninguna nube para funcionar), expone una API y un panel web local, y gestiona una cola de tareas de inferencia. Cada tarea declara qué necesita (privacidad, coste máximo, formato de salida) y el broker decide qué modelo o modelos la ejecutan, entre los que tengas en Ollama, LM Studio o proveedores de API como DeepSeek o NVIDIA.
 
-**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.9) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto.
+**Técnicamente:** es un gateway de inferencia multi-LLM construido sobre FastAPI y SQLite, con cola durable (las tareas sobreviven a reinicios), aceptación asíncrona (`202 Accepted` + polling), creación idempotente, *event sourcing* de cada mutación, planificación de VRAM para modelos locales, y un contrato Pydantic estricto (versión 2.11) que las aplicaciones cliente consumen sin acoplarse a ningún proveedor de IA concreto. Los juicios System-1 tienen una ruta síncrona propia.
 
 ## 2. Qué sabe hacer
 
@@ -232,7 +232,9 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | `/api/v1/models` | GET | Catálogo con compatibilidad y capacidades sondeadas |
 | `/api/v1/models/availability` | GET | Disponibilidad operativa por modelo |
 | `/api/v1/models/context` | GET | Contexto y matriz de capacidades de un modelo |
-| `/api/v1/capabilities` | GET | Contrato 2.9: estrategias, presets, `derived_data_boundary`, `work_lanes`, `file_ingestion`, `ingestion_formats`, `sandbox_run_code`, `long_context_map_reduce`, `agent_skills`, `mcp_servers`, `task_dependencies`, `generation_determinism`, `invocation_telemetry`, `execution_fingerprint`, flags del router |
+| `/api/v1/capabilities` | GET | Contrato 2.11: estrategias, presets, frontera de datos, carriles, ingesta, herramientas, telemetría, `system1_judgments`, `system1_semantic_routing` y flags del router |
+| `/api/v1/system1/judge` | POST | Juicio síncrono `binary`, `choice` o `score`, con aceptación, confianza e intentos de proveedores |
+| `/api/v1/system1/metrics` | GET | Contadores y eventos recientes System-1 del proceso actual (requiere credencial) |
 | `/api/v1/usage` | GET | Uso mensual por proveedor |
 | `/api/v1/dashboard/*` | GET | Read models: summary (con `lanes`), tasks (filtrable por `kind`), resources |
 | `/api/v1/dispatcher/tick` | POST | Tick manual del carril de inferencia (el dispatcher es autónomo) |
@@ -247,7 +249,7 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 ```
 ├── app/
 │   ├── main.py                # FastAPI app (factory) + endpoints API
-│   ├── schemas.py             # Contrato Pydantic completo (v2.9)
+│   ├── schemas.py             # Contrato Pydantic completo (v2.11)
 │   ├── coordinator.py         # Orquestación: single, mixture, agent, auto
 │   ├── strategy_router.py     # Meta-router: clasificador + aprendizaje
 │   ├── skills.py              # Skills del agente (web, URL, cálculo, código)
@@ -282,7 +284,7 @@ Fíjate en lo que **no** aparece en `model_requirements`: ni `cloud_allowed` ni 
 | [`Deployment_Guide.md`](Deployment_Guide.md) | Despliegue completo en Windows |
 | [`docs/Phase_7_File_Ingestion.md`](docs/Phase_7_File_Ingestion.md) | Ingesta de ficheros adjuntos |
 | [`docs/Phase_8_Sandbox.md`](docs/Phase_8_Sandbox.md) | Sandbox de ejecución de código |
-| [`docs/Client_API.md`](docs/Client_API.md) | **Especificación para aplicaciones cliente** (contrato 2.9, autocontenida) |
+| [`docs/Client_API.md`](docs/Client_API.md) | **Especificación para aplicaciones cliente** (contrato 2.11, autocontenida) |
 | [`docs/Configuration_Reference.md`](docs/Configuration_Reference.md) | **Referencia completa de `broker_config.yaml`**, sección por sección |
 | [`docs/Phase_9_Speed_And_Lanes.md`](docs/Phase_9_Speed_And_Lanes.md) | Tiempo esperado, sondeo en sombra y carriles de trabajo |
 | [`docs/Phase_5_Dashboard.md`](docs/Phase_5_Dashboard.md) | Panel operativo (normativo para las pantallas) |

@@ -11,6 +11,89 @@ class StrictBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class System1Target(StrictBaseModel):
+    """Pins the judge for evaluation: that provider only, no fallback."""
+    provider: Literal["ollama_system1", "laya_mcp"]
+    # None = the model the operator configured for that provider.
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class System1Request(StrictBaseModel):
+    use_case: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    input: dict[str, Any] = Field(min_length=1)
+    decision_type: Literal["binary", "choice", "score"]
+    options: list[str] = Field(default_factory=list, max_length=20)
+    criteria: dict[str, str] = Field(default_factory=dict)
+    rubric: list[str] = Field(default_factory=list, max_length=20)
+    instructions: str | None = Field(default=None, min_length=1, max_length=4000)
+    threshold_profile: str | None = Field(default=None, max_length=128)
+    # Closed by default, including MCP tools declared egress and remote Ollama models.
+    cloud_allowed: bool = False
+    target: System1Target | None = None
+
+    @model_validator(mode="after")
+    def validate_decision_shape(self) -> System1Request:
+        if len(set(self.options)) != len(self.options) or any(not option.strip() for option in self.options):
+            raise ValueError("options must contain distinct nonempty labels")
+        if self.decision_type == "choice":
+            if len(self.options) < 2 or self.rubric:
+                raise ValueError("choice requires at least two options and no rubric")
+            if self.criteria and set(self.criteria) != set(self.options):
+                raise ValueError("criteria must describe exactly the options")
+        elif self.decision_type == "score":
+            if len(self.rubric) < 2 or self.options or self.criteria or any(not level.strip() for level in self.rubric):
+                raise ValueError("score requires at least two ordinal rubric levels and no options/criteria")
+        elif self.options or self.criteria or self.rubric:
+            raise ValueError("binary does not accept options, criteria or rubric")
+        return self
+
+
+class System1Alternative(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    value: bool | str | float
+    confidence: float = Field(strict=True, ge=0, le=1, allow_inf_nan=False)
+
+
+class System1ModelJudgment(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    decision: bool | str | float
+    confidence: float = Field(strict=True, ge=0, le=1, allow_inf_nan=False)
+    alternatives: list[System1Alternative] = Field(default_factory=list, max_length=20)
+
+
+class System1Attempt(StrictBaseModel):
+    provider: str
+    model: str | None = None
+    latency_ms: float
+    reason_code: str | None = None
+    tokens_input: int | None = None
+    tokens_output: int | None = None
+    # Raw scores of a valid judgment, also when the threshold rejected it.
+    # Evidence for calibration, never a decision to act on: that is the
+    # top-level `decision`, set only when `accepted`.
+    decision: bool | str | float | None = None
+    confidence: float | None = None
+    alternatives: list[System1Alternative] = Field(default_factory=list)
+    # native: probabilities measured by the runtime (Nimble, Laya).
+    # self_reported: numbers a generative model wrote itself; never accepted.
+    score_source: Literal["native", "self_reported"] | None = None
+
+
+class System1Response(StrictBaseModel):
+    use_case: str
+    decision: bool | str | float | None = None
+    confidence: float | None = None
+    confidence_is_calibrated: bool = False
+    alternatives: list[System1Alternative] = Field(default_factory=list)
+    provider: str | None = None
+    model: str | None = None
+    latency_ms: float = 0
+    fallback_used: bool = False
+    reason_code: str | None = None
+    accepted: bool = False
+    attempts: list[System1Attempt] = Field(default_factory=list)
+
+
 class TaskStatus(str, Enum):
     queued = "queued"
     routing = "routing"
@@ -1117,6 +1200,10 @@ class MCPServerCapability(StrictBaseModel):
 
 
 class BrokerCapabilitiesResponse(StrictBaseModel):
+    system1_judgments: bool = False
+    system1_semantic_routing: bool = False
+    # The judge accepts `target` and reports raw scores per attempt.
+    system1_evaluation: bool = False
     contract_version: str
     strategies: list[ExecutionStrategy]
     presets: dict[str, list[ExecutionPreset]]

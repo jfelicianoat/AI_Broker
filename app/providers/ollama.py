@@ -27,6 +27,7 @@ from app.providers.base import (
     _CatalogCache,
     _estimation_text,
     content_text,
+    decoded_json,
     effective_generation,
     enforce_context_limit,
     estimate_required_context,
@@ -273,7 +274,7 @@ class OllamaLifecycleManager:
                 else:
                     self._leases.pop(model, None)
                     try:
-                        if self.config.processing.unload_after_task:
+                        if self.config.processing.unload_after_task and model not in self._pinned():
                             await self.unload(model)
                     finally:
                         self._reserved_sizes.pop(model, None)
@@ -303,6 +304,20 @@ class OllamaLifecycleManager:
         vez pasarían las dos el mismo hueco."""
         return {name for name in names | set(self._reserved_sizes) if name}
 
+    def _pinned(self) -> set[str]:
+        """El clasificador System-1 que el operador quiere residente.
+
+        Contesta en décimas de segundo y tarda segundos en cargar: descargarlo
+        por inactividad o por cupo haría que cada tarea pagase esa carga antes
+        de enrutar. No gasta un hueco del cupo de modelos —ese cupo existe para
+        que las generaciones no se peleen por el bus— pero su memoria sí cuenta,
+        y se suelta el último si de verdad hace falta el sitio.
+        """
+        settings = self.config.system1
+        if settings.enabled and settings.ollama.keep_loaded and settings.ollama.model:
+            return {settings.ollama.model}
+        return set()
+
     async def _ensure_capacity(self, model: str, estimated_size: int) -> None:
         running = await self.running()
         budget = local_memory_budget_bytes(self.config)
@@ -323,18 +338,25 @@ class OllamaLifecycleManager:
         # una máquina holgada: cuatro modelos medianos caben y se pelean por el
         # mismo bus, y ejecutarlos a la vez va peor que en serie.
         slots = effective_max_loaded_local_models(self.config)
-        loaded = self._loaded_models(running_names)
-        if occupied + estimated_size <= budget and len(loaded) < slots:
+        pinned = self._pinned()
+        needs_slot = model not in pinned
+        loaded = self._loaded_models(running_names) - pinned
+        if occupied + estimated_size <= budget and (not needs_slot or len(loaded) < slots):
             return
-        for item in running:
-            name = str(item.get("name") or item.get("model") or "")
-            if name and name not in self._leases:
-                await self.unload(name)
-        refreshed = await self.running()
-        refreshed_names = {str(item.get("name") or item.get("model") or "") for item in refreshed}
-        occupied = self._occupied(refreshed, refreshed_names)
-        loaded = self._loaded_models(refreshed_names)
-        if occupied + estimated_size <= budget and len(loaded) >= slots:
+        refreshed, refreshed_names = running, running_names
+        # Primero lo que nadie ha pedido conservar; el residente solo sale si
+        # ni así cabe lo que se va a cargar.
+        for evictable in (running_names - pinned, pinned):
+            for name in sorted(evictable & refreshed_names):
+                if name and name not in self._leases:
+                    await self.unload(name)
+            refreshed = await self.running()
+            refreshed_names = {str(item.get("name") or item.get("model") or "") for item in refreshed}
+            occupied = self._occupied(refreshed, refreshed_names)
+            if occupied + estimated_size <= budget:
+                break
+        loaded = self._loaded_models(refreshed_names) - pinned
+        if occupied + estimated_size <= budget and needs_slot and len(loaded) >= slots:
             # Cabe en memoria, pero no queda sitio en el cupo de modelos y los
             # que lo ocupan tienen lease: son tareas corriendo, no basura. Es
             # exactamente el mismo caso que la falta de memoria —cede el turno
@@ -448,9 +470,10 @@ class OllamaLifecycleManager:
             if self._leases:
                 return []
             unloaded: list[str] = []
+            pinned = self._pinned()
             for item in await self.running():
                 name = str(item.get("name") or item.get("model") or "")
-                if not name:
+                if not name or name in pinned:
                     continue
                 try:
                     await self.unload(name)
@@ -805,6 +828,35 @@ class OllamaProvider:
             }
         except (httpx.HTTPError, TypeError, ValueError):
             return dict(_EMPTY_METADATA)
+
+    async def system_one(self, model: str, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+        """Native typed decisions, sharing the HTTP client and memory leases.
+
+        Capability-based selection lives in the System-1 adapter. Decision
+        models score candidate tokens; they cannot generate judgment JSON.
+        """
+        if not self.config.providers.ollama.enabled:
+            raise ProviderError("PROVIDER_UNAVAILABLE", "Ollama está deshabilitado")
+        entry = next((item for item in await self.models() if item["name"] == model), None)
+        if entry is None or "decision" not in entry.get("capabilities", []):
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", "El modelo no declara capacidad decision")
+        if entry.get("deployment") != "local":
+            raise ProviderError("CLOUD_NOT_ALLOWED", "System One requiere un modelo Ollama local")
+        plan = self._offload_plan(entry)
+        try:
+            async with self.lifecycle.lease(model, plan.gpu_bytes):
+                response = await self.client.post("/v1/systemone", json={
+                    "model": model, "state": state, "questions": questions, "keep_alive": -1,
+                })
+                response.raise_for_status()
+                payload = decoded_json(response, "ollama")
+        except httpx.HTTPStatusError as error:
+            raise provider_error_from_http(error, provider="ollama", model=model) from error
+        except httpx.HTTPError as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        if not isinstance(payload, dict):
+            raise ProviderError("INVALID_PROVIDER_RESPONSE", "System One no devolvió un objeto JSON")
+        return payload
 
     async def generate(
         self, request: TaskCreateRequest, model: str, prompt: str, system: str | None = None
