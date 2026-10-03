@@ -42,6 +42,8 @@ PUBLIC_ROUTES = {
 
 # Rutas que con token configurado exigen credencial.
 AUTHENTICATED_ROUTES = {
+    ("POST", "/api/v1/system1/judge"),
+    ("GET", "/api/v1/system1/metrics"),
     ("POST", "/api/v1/tasks"),
     ("GET", "/api/v1/tasks/{task_id}"),
     ("DELETE", "/api/v1/tasks/{task_id}"),

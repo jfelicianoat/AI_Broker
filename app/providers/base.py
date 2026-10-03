@@ -943,6 +943,11 @@ def classify_probe_http_error(error: httpx.HTTPStatusError) -> tuple[str, str]:
         return "error", f"Credenciales o permisos insuficientes: {message}"
     if status == 408 or status >= 500:
         return "error", message
+    if "no model loaded" in message.lower():
+        # Un servidor que sirve un modelo cada vez (Unsloth Studio) contesta 400
+        # a todo lo que no tenga cargado. Describe su estado de ahora, no el
+        # contrato del modelo: vetarlo lo dejaría fuera hasta un resondeo manual.
+        return "error", message
     return "incompatible", message
 
 

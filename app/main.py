@@ -90,6 +90,8 @@ from app.schemas import (
     QueueResponse,
     ResidencyReport,
     SchedulingPolicy,
+    System1Request,
+    System1Response,
     TaskAcceptedResponse,
     TaskArtifactsResponse,
     TaskCreateRequest,
@@ -113,6 +115,17 @@ from app.startup import (
     vram_budget_mismatch,
     zero_cost_cloud_providers,
 )
+from app.system1 import System1Service
+
+# Las rutas /api/v1 que responden sin credencial (Client_API §3). Una petición
+# mal formada a cualquier otra se contesta primero con la credencial.
+_PUBLIC_API = {
+    ("GET", "/api/v1/queue"),
+    ("GET", "/api/v1/capabilities"),
+    ("GET", "/api/v1/models"),
+    ("GET", "/api/v1/models/availability"),
+    ("GET", "/api/v1/models/context"),
+}
 
 
 def create_app(config: BrokerConfig | None = None, config_path: str | Path = "broker_config.yaml") -> FastAPI:
@@ -156,6 +169,12 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     # de forma perezosa, así que un servidor configurado y nunca usado no cuesta
     # nada, y uno roto no impide arrancar el broker.
     mcp_registry = MCPRegistry(broker_config.mcp)
+    system1 = System1Service(
+        broker_config, mcp_registry, getattr(provider, "ollama", None),
+        getattr(provider, "_serial_inference_slot", None),
+    )
+    if hasattr(provider, "system1"):
+        provider.system1 = system1
     coordinator = ConsensusCoordinator(
         db, scheduler, provider=provider, ingestion=ingestion, sandbox=sandbox,
         mcp=mcp_registry,
@@ -356,6 +375,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     app.state.coordinator = coordinator
     app.state.provider = provider
     app.state.ingestion = ingestion
+    app.state.system1 = system1
 
     def _dispatcher_state() -> str | None:
         if not broker_config.processing.auto_dispatch:
@@ -438,6 +458,14 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        # FastAPI validates the body before the handler checks the token, so an
+        # anonymous caller learnt the contract's field names from a 422. On a
+        # protected route the credential is answered first.
+        if request.url.path.startswith("/api/v1/") and (request.method, request.url.path) not in _PUBLIC_API:
+            try:
+                verify_admin_access(request, broker_config)
+            except HTTPException as denied:
+                return JSONResponse(status_code=denied.status_code, content={"detail": denied.detail})
         return JSONResponse(
             status_code=422,
             content={
@@ -446,6 +474,16 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 "fields": jsonable_encoder(exc.errors(), custom_encoder={ValueError: str}),
             },
         )
+
+    @app.post("/api/v1/system1/judge", response_model=System1Response)
+    async def system1_judge(payload: System1Request, request: Request) -> System1Response:
+        verify_admin_access(request, broker_config)
+        return await system1.judge(payload)
+
+    @app.get("/api/v1/system1/metrics")
+    async def system1_metrics(request: Request):
+        verify_admin_access(request, broker_config)
+        return system1.metrics()
 
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
     def create_task(payload: TaskCreateRequest, response: Response, request: Request) -> TaskAcceptedResponse:
@@ -841,7 +879,10 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
         return BrokerCapabilitiesResponse(
-            contract_version="2.10",
+            system1_judgments=broker_config.system1.enabled,
+            system1_semantic_routing=broker_config.system1.enabled and broker_config.system1.routing.enabled,
+            system1_evaluation=broker_config.system1.enabled,
+            contract_version="2.11",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,

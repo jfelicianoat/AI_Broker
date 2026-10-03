@@ -41,6 +41,17 @@ class JsonLineFormatter(logging.Formatter):
             "model",
             "action",
             "errors",
+            "use_case",
+            "latency_ms",
+            "confidence",
+            "decision",
+            "fallback_used",
+            "reason_code",
+            "shadow_mode",
+            "previous_model",
+            "proposed_model",
+            "tokens_input",
+            "tokens_output",
         ):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)

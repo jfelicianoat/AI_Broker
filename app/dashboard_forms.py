@@ -649,6 +649,7 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     # desde el panel persistía el YAML pero exploration_rate/pesos/etc.
     # seguían con el valor antiguo hasta reiniciar el proceso.
     target.routing = updated.routing
+    target.system1 = updated.system1
     # ShadowProbe.settings lee config.shadow_probe en cada sondeo, así que
     # activarlo o apagarlo desde el panel surte efecto sin reiniciar.
     target.shadow_probe = updated.shadow_probe

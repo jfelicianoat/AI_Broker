@@ -40,6 +40,54 @@ def test_qualified_names_round_trip() -> None:
     assert split_qualified_name("mcp__incompleto") is None
 
 
+def test_structured_calls_do_not_truncate_and_serialize_readers():
+    async def scenario():
+        registry = MCPRegistry(_config())
+        try:
+            results = await asyncio.gather(*[
+                registry.call_structured("echo", "structured", {"index": index, "text": "x" * 9000})
+                for index in range(5)
+            ])
+            assert [item["index"] for item in results] == list(range(5))
+            assert all(len(item["text"]) == 9000 for item in results)
+            with pytest.raises(MCPError):
+                await registry.call_structured("echo", "explota", {})
+            with pytest.raises(MCPError):
+                await registry.call_structured("echo", "echo", {"text": "not JSON"})
+        finally:
+            await registry.aclose()
+    _run(scenario())
+
+
+def test_cancelled_mcp_call_cannot_contaminate_next_judgment():
+    async def scenario():
+        registry = MCPRegistry(_config())
+        try:
+            await registry.tools_for(["echo"])
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(registry.call_structured("echo", "sleep", {"seconds": 1}), timeout=0.02)
+            result = await registry.call_structured("echo", "structured", {"fresh": True})
+            assert result == {"fresh": True}
+        finally:
+            await registry.aclose()
+    _run(scenario())
+
+
+def test_answered_jsonrpc_error_does_not_restart_the_server():
+    async def scenario():
+        registry = MCPRegistry(_config())
+        try:
+            await registry.tools_for(["echo"])
+            process = registry._servers["echo"].process
+            with pytest.raises(MCPError):
+                await registry.call("echo", "no-existe", {})
+            assert await registry.call_structured("echo", "structured", {"fresh": True}) == {"fresh": True}
+            assert registry._servers["echo"].process is process and process.returncode is None
+        finally:
+            await registry.aclose()
+    _run(scenario())
+
+
 def test_discovers_tools_and_calls_one() -> None:
     async def scenario() -> None:
         registry = MCPRegistry(_config())

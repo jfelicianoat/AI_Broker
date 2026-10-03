@@ -63,6 +63,11 @@ class MCPError(RuntimeError):
     """Fallo hablando con un servidor MCP; su mensaje viaja al modelo."""
 
 
+class MCPToolError(MCPError):
+    """El servidor contestó con un error JSON-RPC: la respuesta llegó entera y
+    el canal sigue sincronizado, así que el proceso no hay que reiniciarlo."""
+
+
 def qualified_name(server_id: str, tool: str) -> str:
     return f"{TOOL_PREFIX}{server_id}__{tool}"
 
@@ -107,6 +112,7 @@ class _Server:
     error: str | None = None
     _counter: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _call_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class MCPRegistry:
@@ -169,15 +175,54 @@ class MCPRegistry:
         return tools
 
     async def call(self, server_id: str, tool: str, arguments: dict[str, Any]) -> str:
+        return _render_result(await self._call_payload(server_id, tool, arguments))
+
+    async def call_structured(self, server_id: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Reuse the same MCP transport, rejecting tool errors and ambiguous text."""
+        payload = await self._call_payload(server_id, tool, arguments)
+        if payload.get("isError"):
+            raise MCPError("MCP tool returned an error")
+        result = payload.get("structuredContent")
+        if isinstance(result, dict):
+            return result
+        blocks = payload.get("content") or []
+        if len(blocks) != 1 or not isinstance(blocks[0], dict) or blocks[0].get("type") != "text":
+            raise MCPError("MCP tool did not return one structured JSON object")
+        try:
+            result = json.loads(blocks[0].get("text") or "")
+        except (ValueError, TypeError) as error:
+            raise MCPError("MCP tool returned invalid JSON") from error
+        if not isinstance(result, dict):
+            raise MCPError("MCP tool returned a non-object")
+        return result
+
+    async def _call_payload(self, server_id: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         server = self._servers.get(server_id)
         if server is None:
             raise MCPError(f"El servidor MCP '{server_id}' no está configurado o está desactivado")
-        await self._ensure_started(server)
-        payload = await self._request(
-            server, "tools/call", {"name": tool, "arguments": arguments or {}},
-            timeout=server.config.timeout_seconds,
-        )
-        return _render_result(payload)
+        # One reader per stdio stream; concurrent agent/System-1 calls must not
+        # steal each other's responses. A cancelled call resets the process so
+        # a delayed reply cannot contaminate the next decision.
+        async with server._call_lock:
+            await self._ensure_started(server)
+            try:
+                return await self._request(
+                    server, "tools/call", {"name": tool, "arguments": arguments or {}},
+                    timeout=server.config.timeout_seconds,
+                )
+            except MCPToolError:
+                # An answered request leaves nothing pending: restarting here
+                # would make one bad agent argument cost a full model reload.
+                raise
+            except (asyncio.CancelledError, MCPError):
+                process = server.process
+                server.started = False
+                if process is not None and process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                raise
 
     async def warm_up(self) -> None:
         """Arranca ya los servidores marcados con `preload`.
@@ -217,6 +262,7 @@ class MCPRegistry:
                 return
             server.started = False
             server.tools = []
+            await self._stop_process(server)
             await self._spawn(server)
             try:
                 await asyncio.wait_for(
@@ -224,13 +270,28 @@ class MCPRegistry:
                 )
             except asyncio.TimeoutError as error:
                 server.error = "el servidor no completó el arranque a tiempo"
+                await self._stop_process(server)
                 raise MCPError(f"{server.config.id}: {server.error}") from error
+            except (asyncio.CancelledError, MCPError):
+                await self._stop_process(server)
+                raise
             server.started = True
             server.error = None
             logger.info("mcp.server_ready", extra={
                 "event": "mcp.server_ready", "server": server.config.id,
                 "tools": len(server.tools),
             })
+
+    async def _stop_process(self, server: _Server) -> None:
+        process = server.process
+        server.process = None
+        server.started = False
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except (ProcessLookupError, OSError, asyncio.TimeoutError):
+                pass
 
     async def _spawn(self, server: _Server) -> None:
         command = shutil.which(server.config.command) or server.config.command
@@ -298,7 +359,7 @@ class MCPRegistry:
             ) from error
         if "error" in payload:
             detail = payload.get("error") or {}
-            raise MCPError(
+            raise MCPToolError(
                 f"{server.config.id}: {detail.get('message') or 'error del servidor MCP'}"
             )
         result = payload.get("result")

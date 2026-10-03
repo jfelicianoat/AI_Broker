@@ -194,7 +194,7 @@ def test_capabilities_announce_the_echo(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         body = client.get("/api/v1/capabilities").json()
 
-    assert body["contract_version"] == "2.10"
+    assert body["contract_version"] == "2.11"
     assert body["prompt_compression_echo"] is True
     assert body["invocation_contract"] is True
     assert body["canonical_artifacts"] is True

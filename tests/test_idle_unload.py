@@ -139,6 +139,34 @@ class UnloadIdleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["name"] for item in await provider.lifecycle.running()], ["terco"])
         await provider.close()
 
+    async def test_the_resident_classifier_survives_idleness_and_takes_no_slot(self) -> None:
+        gib = 1_000_000_000
+        provider = _ollama_with_loaded({"nimble": 8 * gib, "qwen": 8 * gib, "llama": 4 * gib})
+        config = provider.config
+        config.system1.enabled = True
+        config.system1.ollama.model = "nimble"
+        config.system1.ollama.keep_loaded = True
+        config.resources.local_vram_budget_gb = 40.0
+        config.resources.max_loaded_local_models = 2
+        lifecycle = provider.lifecycle
+        # Dos generadores llenan el cupo de dos; el clasificador no cuenta, así
+        # que pedirlo no desaloja a nadie.
+        await lifecycle._ensure_capacity("nimble", 8 * gib)
+        self.assertEqual(len(await lifecycle.running()), 3)
+        # Un tercer generador sí necesita hueco: salen los otros, no el residente.
+        await lifecycle._ensure_capacity("gemma", 4 * gib)
+        self.assertEqual([item["name"] for item in await lifecycle.running()], ["nimble"])
+        # Su memoria sí cuenta: si lo nuevo no cabe con él dentro, sale también.
+        await lifecycle._ensure_capacity("enorme", 34 * gib)
+        self.assertEqual(await lifecycle.running(), [])
+        await provider.close()
+
+        provider = _ollama_with_loaded({"nimble": 8 * gib, "llama": 4 * gib})
+        provider.config.system1 = config.system1
+        self.assertEqual(await provider.lifecycle.unload_idle(), ["llama"])
+        self.assertEqual([item["name"] for item in await provider.lifecycle.running()], ["nimble"])
+        await provider.close()
+
 
 class _FakeRepository:
     """Repositorio mínimo: dice si hay trabajo y hace correr el reloj.

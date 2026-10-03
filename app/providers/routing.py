@@ -155,6 +155,7 @@ class RoutedModelProvider:
         # Modelos en VRAM: (expira_en_monotonic, nombres) o None si no se pudo
         # consultar. Alimenta la estimación de tiempo (caliente vs frío).
         self._loaded_models_cache: tuple[float, frozenset[str] | None] | None = None
+        self.system1: Any | None = None
 
     @staticmethod
     def _build_prompt_compressor(config: BrokerConfig) -> PromptCompressor:
@@ -299,6 +300,9 @@ class RoutedModelProvider:
         self.prompt_compressor = self._build_prompt_compressor(config)
         self.model_enrichment.reload_settings(config.model_enrichment)
         self._rebuild_inference_slots(config)
+        if self.system1 is not None:
+            self.system1.config = config
+            self.system1.inference_slot = self._serial_inference_slot
         # El conjunto de proveedores puede haber cambiado: las sondas cacheadas
         # dejan de ser representativas.
         self._health_cache.clear()
@@ -803,6 +807,10 @@ class RoutedModelProvider:
             item for item in catalog
             if required_capability in set(item.get("capabilities") or (["completion"] if required_capability == "completion" else []))
         ]
+        if self.config.system1.enabled and required_capability == "completion":
+            # A native decision model can score choices but cannot write the
+            # user's answer, even if the runtime also lists completion.
+            capability_catalog = [item for item in capability_catalog if "decision" not in item.get("capabilities", [])]
         # Capacidades que la petición EXIGE, no que prefiere. Un modelo
         # solo-texto ante una imagen no falla: contesta a partir del nombre del
         # fichero como si la hubiera visto, y esa respuesta es indistinguible
@@ -819,6 +827,24 @@ class RoutedModelProvider:
             if context_fits_with_capped_output(request, item.get("context_window"))
         ]
         return catalog, capability_catalog, context_catalog
+
+    def _system1_budget_fits(self, entry: dict[str, Any], request: TaskCreateRequest) -> bool:
+        budget = request.model_requirements.max_cost_usd
+        if budget is None:
+            return True
+        if is_local_deployment(entry.get("deployment")):
+            return True
+        provider_id = str(entry["provider"]).lower()
+        if provider_id in self.custom:
+            incoming, outgoing = self.custom[provider_id]._costs(entry["name"])
+        elif provider_id == "deepseek":
+            incoming = self.config.providers.deepseek.input_cost_per_million
+            outgoing = self.config.providers.deepseek.output_cost_per_million
+        else:
+            # A cloud catalog without prices cannot prove that it fits a hard budget.
+            return False
+        maximum = (estimate_input_tokens(request) * incoming + request.generation.max_output_tokens * outgoing) / 1_000_000
+        return maximum <= budget
 
     def _without_quarantined(self, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Aparta los modelos en cuarentena, salvo que no quede ninguno.
@@ -935,6 +961,18 @@ class RoutedModelProvider:
         # preferred mandan sobre cualquier política.
         if all(role == "arbiter" for role in roles) and not preferred:
             ranked_catalog = self._rank_arbiters(ranked_catalog, request)
+        elif self.system1 is not None and not preferred and count == 1 and roles == ["single"]:
+            # Semantic decisions see only deterministically eligible candidates;
+            # explicit models, arbiters and multi-model contracts keep precedence.
+            # The budget narrows only what System-1 may pick: applied to the
+            # shared eligibility it also changed shadow-mode routing and turned
+            # an explicit target into a false CONTEXT_LIMIT_EXCEEDED.
+            affordable = [item for item in ranked_catalog if self._system1_budget_fits(item, request)]
+            routed = await self.system1.route(request, affordable)
+            # route() hands back its own argument whenever the previous router
+            # stands (shadow mode, rejected judgment); keep the full ranking then.
+            if routed is not affordable:
+                ranked_catalog = routed
         return [ModelReference(provider=ranked_catalog[i % len(ranked_catalog)]["provider"],
                                deployment=ranked_catalog[i % len(ranked_catalog)]["deployment"],
                                model=ranked_catalog[i % len(ranked_catalog)]["name"], role=roles[i]) for i in range(count)]
