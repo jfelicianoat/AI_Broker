@@ -1,0 +1,270 @@
+[
+  {
+    "id": "simple_fact",
+    "expected": "simple",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "¿Cuál es la capital de Francia? Responde con una palabra."
+      }
+    }
+  },
+  {
+    "id": "simple_translation",
+    "expected": "simple",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Traduce al inglés: buenos días."
+      }
+    }
+  },
+  {
+    "id": "simple_format",
+    "expected": "simple",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Convierte esta lista a JSON: rojo, azul, verde."
+      }
+    }
+  },
+  {
+    "id": "medium_code",
+    "expected": "medium",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Escribe una función Python que valide un CSV, elimine duplicados y calcule totales por categoría."
+      }
+    }
+  },
+  {
+    "id": "medium_summary",
+    "expected": "medium",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Resume esta reunión y enumera responsables y plazos: Ana entrega el informe el lunes; Luis valida el miércoles; revisión conjunta el viernes."
+      }
+    }
+  },
+  {
+    "id": "medium_plan",
+    "expected": "medium",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Organiza una mudanza en cuatro semanas: inventario, embalaje, transporte y comprobación final. Da dependencias y un calendario."
+      }
+    }
+  },
+  {
+    "id": "complex_proof",
+    "expected": "complex",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Demuestra que todo grupo finito de orden primo es cíclico y justifica cada paso con el teorema de Lagrange."
+      }
+    }
+  },
+  {
+    "id": "complex_security",
+    "expected": "complex",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Diseña una migración de autorización multi-tenant que evite escaladas de privilegios y ataques de confused deputy; incluye invariantes, pruebas y estrategia de rollback."
+      }
+    }
+  },
+  {
+    "id": "complex_architecture",
+    "expected": "complex",
+    "request": {
+      "use_case": "semantic_routing",
+      "decision_type": "choice",
+      "options": [
+        "simple",
+        "medium",
+        "complex"
+      ],
+      "criteria": {
+        "simple": "lookup, short translation, formatting or one-step answer",
+        "medium": "several ordinary steps, routine coding or summarization",
+        "complex": "proofs, specialist knowledge, architecture, security or long multi-step reasoning"
+      },
+      "input": {
+        "request": "Diseña un consenso distribuido tolerante a particiones, demuestra sus límites de seguridad y vivacidad y analiza formalmente el comportamiento ante fallos bizantinos."
+      }
+    }
+  },
+  {
+    "id": "goal_done",
+    "expected": true,
+    "request": {
+      "use_case": "goal_completion",
+      "decision_type": "binary",
+      "input": {
+        "goal": "Create a CSV report and verify its totals",
+        "report_exists": true,
+        "totals_verified": true,
+        "remaining_steps": []
+      }
+    }
+  },
+  {
+    "id": "goal_unverified",
+    "expected": false,
+    "request": {
+      "use_case": "goal_completion",
+      "decision_type": "binary",
+      "input": {
+        "goal": "Create a CSV report and verify its totals",
+        "report_exists": true,
+        "totals_verified": false,
+        "remaining_steps": [
+          "verify totals"
+        ]
+      }
+    }
+  },
+  {
+    "id": "goal_missing",
+    "expected": false,
+    "request": {
+      "use_case": "goal_completion",
+      "decision_type": "binary",
+      "input": {
+        "goal": "Implement and test a function",
+        "implemented": false,
+        "tests_passed": false,
+        "remaining_steps": [
+          "implement",
+          "test"
+        ]
+      }
+    }
+  },
+  {
+    "id": "goal_done_code",
+    "expected": true,
+    "request": {
+      "use_case": "goal_completion",
+      "decision_type": "binary",
+      "input": {
+        "goal": "Implement and test a function",
+        "implemented": true,
+        "tests_passed": true,
+        "remaining_steps": []
+      }
+    }
+  },
+  {
+    "id": "score_neutral",
+    "expected": 0.0,
+    "request": {
+      "use_case": "ranking",
+      "decision_type": "score",
+      "instructions": "How frustrated does the customer sound in message?",
+      "input": {
+        "message": "Hola, me gustaría saber el horario de apertura. Gracias."
+      },
+      "rubric": [
+        "calm and neutral",
+        "concerned but civil",
+        "clearly annoyed",
+        "very angry or using strong language"
+      ]
+    }
+  }
+]

@@ -1,0 +1,43 @@
+{
+  "capabilities": {
+    "system1_semantic_routing": true,
+    "system1_judgments": true
+  },
+  "response": {
+    "use_case": "ranking",
+    "decision": true,
+    "confidence": 0.9992176991620464,
+    "confidence_is_calibrated": false,
+    "alternatives": [
+      {
+        "value": false,
+        "confidence": 0.0007823008379536089
+      }
+    ],
+    "provider": "ollama_system1",
+    "model": "nimble:latest",
+    "latency_ms": 12445.753,
+    "fallback_used": false,
+    "reason_code": null,
+    "accepted": true,
+    "attempts": [
+      {
+        "provider": "ollama_system1",
+        "model": "nimble:latest",
+        "latency_ms": 12440.941,
+        "reason_code": null,
+        "tokens_input": 152,
+        "tokens_output": 1
+      }
+    ]
+  },
+  "request": {
+    "use_case": "ranking",
+    "decision_type": "binary",
+    "input": {
+      "message": "I request a refund."
+    },
+    "instructions": "Does message request money back?"
+  },
+  "session_credential_preserved": true
+}
