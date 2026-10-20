@@ -280,6 +280,9 @@ def describe_image(
     png_bytes: bytes,
     context_text: str,
     timeout_seconds: float,
+    *,
+    cloud_allowed: bool = False,
+    data_classification: str = "local_only",
 ) -> ImageDescription:
     """Describe una figura con el modelo de visión que el broker haya elegido.
 
@@ -291,6 +294,13 @@ def describe_image(
     inventada a partir del texto, que es peor.
     """
     import httpx
+
+    from app.schemas import DataClassification, classification_allows_cloud, is_local_deployment
+
+    if not is_local_deployment(getattr(target, "deployment", None)) and not (
+        cloud_allowed and classification_allows_cloud(DataClassification(data_classification))
+    ):
+        raise ValueError("Este documento no autoriza enviar imágenes ni texto a la nube")
 
     encoded = base64.b64encode(png_bytes).decode("ascii")
     prompt = _DESCRIBE_PROMPT + context_text[:1200]

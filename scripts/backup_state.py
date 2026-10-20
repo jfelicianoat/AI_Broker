@@ -13,6 +13,7 @@ def main() -> int:
     backup = subparsers.add_parser("backup", help="Create an atomic zip backup")
     backup.add_argument("--database", default="state/broker.db")
     backup.add_argument("--artifacts", default="state/tasks")
+    backup.add_argument("--files", default="state/files", help="Carpeta de documentos originales y convertidos")
     backup.add_argument("--output", required=True)
 
     verify = subparsers.add_parser("verify", help="Verify backup manifest and checksums")
@@ -22,6 +23,7 @@ def main() -> int:
     restore.add_argument("--backup", required=True)
     restore.add_argument("--database", default="state/broker.db")
     restore.add_argument("--artifacts", default="state/tasks")
+    restore.add_argument("--files", default="state/files", help="Destino de los documentos recuperados")
     restore.add_argument("--replace", action="store_true", help="Allow replacing existing DB/artifacts")
 
     args = parser.parse_args()
@@ -29,6 +31,7 @@ def main() -> int:
         result = create_state_backup(
             database_path=args.database,
             artifacts_root=args.artifacts,
+            files_root=args.files,
             output_path=args.output,
         )
         print(json.dumps({
@@ -51,6 +54,7 @@ def main() -> int:
             backup_path=args.backup,
             database_path=args.database,
             artifacts_root=args.artifacts,
+            files_root=args.files,
             replace=args.replace,
         )
         print(json.dumps({"restored": True}, ensure_ascii=False, indent=2))

@@ -1858,6 +1858,9 @@ def test_state_backup_verify_and_restore_roundtrip(tmp_path: Path) -> None:
         processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
     )
     with TestClient(create_app(config)) as client:
+        from app.artifacts import ArtifactStore
+
+        client.app.state.coordinator.artifacts = ArtifactStore(artifacts)
         created = client.post(
             "/api/v1/tasks",
             json={"idempotency_key": "backup:task", "content": {"prompt": "Persistir"}},
@@ -1881,7 +1884,7 @@ def test_state_backup_verify_and_restore_roundtrip(tmp_path: Path) -> None:
     )
 
     assert result.files >= 2
-    assert manifest["format"] == "ai-broker-backup-v1"
+    assert manifest["format"] == "ai-broker-backup-v2"
     assert restored_database.exists()
     assert restored_artifacts.joinpath(task_id, "manual.txt").read_text(encoding="utf-8") == "artifact"
 

@@ -507,6 +507,9 @@ def create_dashboard_router(
                 "error": (record.error or {}).get("message"),
                 "error_code": (record.error or {}).get("code"),
                 "created_at": record.created_at,
+                "cloud_allowed": record.cloud_allowed,
+                "data_classification": record.data_classification.value,
+                "privacy_policy_known": record.privacy_policy_version > 0,
                 "markdown_url": (
                     f"/dashboard/files/{record.id}/markdown"
                     if record.status == "ready" and record.markdown_path
@@ -566,7 +569,7 @@ def create_dashboard_router(
         response = PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
         renewal = getattr(request.state, "admin_cookie_renewal", None)
         if renewal:
-            _set_admin_cookie(response, renewal)
+            _set_admin_cookie(response, renewal, secure=is_https(request))
         return response
 
     @protected.get("/dashboard/tasks/{task_id}/artifacts/{artifact_id}")
@@ -589,7 +592,7 @@ def create_dashboard_router(
         response = FileResponse(path, media_type=media_type)
         renewal = getattr(request.state, "admin_cookie_renewal", None)
         if renewal:
-            _set_admin_cookie(response, renewal)
+            _set_admin_cookie(response, renewal, secure=is_https(request))
         return response
 
     @protected.get("/dashboard/files/{file_id}/original")
@@ -609,7 +612,7 @@ def create_dashboard_router(
         response = FileResponse(path, media_type=IMAGE_MEDIA_TYPES.get(record.extension, "application/octet-stream"))
         renewal = getattr(request.state, "admin_cookie_renewal", None)
         if renewal:
-            _set_admin_cookie(response, renewal)
+            _set_admin_cookie(response, renewal, secure=is_https(request))
         return response
 
     @protected.post("/dashboard/actions/files/upload", response_class=HTMLResponse)
@@ -633,13 +636,14 @@ def create_dashboard_router(
                 temp_path,
                 _describe_images_choice(form_fields.get("describe_images")),
                 form_fields.get("ocr") in {"1", "true", "on", "yes"},
+                form_fields.get("data_classification") or "local_only",
+                form_fields.get("cloud_allowed") in {"1", "true", "on", "yes"},
             )
         except ValueError as error:  # IngestionError / UnsupportedFormat
             return _template_response(
                 request, "files.html", _files_page_context(upload_error=str(error)),
             )
-        if created:
-            ingestion.enqueue(repository, record.id)
+        ingestion.enqueue(repository, record.id)
         return RedirectResponse("/dashboard/files", status_code=303)
 
     @protected.post("/dashboard/actions/files/{file_id}/delete", status_code=204)
@@ -1113,7 +1117,9 @@ def create_dashboard_router(
             if payload.content.attachments and ingestion is not None:
                 # Mismo fail-fast que POST /api/v1/tasks: no se encola con
                 # adjuntos que no estén 'ready'.
-                ingestion.check_attachments(payload)
+                payload = ingestion.apply_attachment_policy(
+                    payload, egress_server_ids=coordinator.mcp.egress_server_ids() if coordinator.mcp is not None else [],
+                )
             request_preview = payload.model_dump(mode="json")
             impact_preview = _prompt_tester_impact(payload)
             compression_preview = _compression_preview(config, payload)
@@ -1207,7 +1213,7 @@ def create_dashboard_router(
             return response
         login_throttle.reset(throttle_key)
         response = RedirectResponse("/dashboard", status_code=303)
-        _set_admin_cookie(response, admin_cookie_value(expected))
+        _set_admin_cookie(response, admin_cookie_value(expected), secure=is_https(request))
         return response
 
     @protected.post("/dashboard/actions/tasks/{task_id}/cancel", status_code=204)
@@ -1318,32 +1324,39 @@ def _template_response(request: Request, name: str, context: dict[str, Any]):
     )
     # Se reenvía siempre, aunque el valor no cambie: cada render renueva el
     # max_age (caducidad deslizante) para que una sesión activa no expire.
-    set_csrf_cookie(response, token)
+    set_csrf_cookie(response, token, secure=is_https(request))
     renewal = getattr(request.state, "admin_cookie_renewal", None)
     if renewal:
-        _set_admin_cookie(response, renewal)
+        _set_admin_cookie(response, renewal, secure=is_https(request))
     return response
 
 
-def _set_admin_cookie(response: Any, value: str) -> None:
+def is_https(request: Request) -> bool:
+    # Con server.tls_* la misma app sirve HTTPS en la red y HTTP en loopback:
+    # la cookie solo puede ser Secure en la escucha cifrada, o el navegador
+    # la descartaría en la de loopback.
+    return request.url.scheme == "https"
+
+
+def _set_admin_cookie(response: Any, value: str, *, secure: bool = False) -> None:
     response.set_cookie(
         ADMIN_COOKIE_NAME,
         value,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=secure,
         path="/dashboard",
         max_age=ADMIN_SESSION_SECONDS,
     )
 
 
-def set_csrf_cookie(response: Any, token: str) -> None:
+def set_csrf_cookie(response: Any, token: str, *, secure: bool = False) -> None:
     response.set_cookie(
         CSRF_COOKIE_NAME,
         token,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=secure,
         path="/dashboard",
         max_age=CSRF_COOKIE_MAX_AGE_SECONDS,
     )

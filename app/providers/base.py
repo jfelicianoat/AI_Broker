@@ -548,6 +548,9 @@ class ModelOutput:
     # aquí—. None cuando el adapter no los aporta.
     generation: dict[str, Any] | None = None
     fingerprint_observed: dict[str, dict[str, Any]] | None = None
+    # Extensiones de huella observadas al servir (ver
+    # app.execution_fingerprint.build): la de una lease LARM es la efectiva.
+    fingerprint_extensions: dict[str, dict[str, Any]] | None = None
     # De qué campo de la respuesta salió el texto. None o "content" es lo
     # normal; "reasoning_content" significa que se rescató del razonamiento
     # porque el contenido venía vacío. Viaja hasta la telemetría a propósito:

@@ -217,7 +217,7 @@ def test_pdf_picture_description_failure_is_non_fatal(tmp_path, monkeypatch):
         api_key=None, dialect="openai", evidence="probe",
     )
 
-    async def _fixed_target(self):
+    async def _fixed_target(self, record):
         return target
 
     monkeypatch.setattr(IngestionService, "_resolve_vision_target", _fixed_target)
@@ -270,7 +270,7 @@ def test_picture_descriptions_are_recorded_as_model_invocations(tmp_path, monkey
         api_key=None, dialect="openai", evidence="probe",
     )
 
-    async def _fixed_target(self):
+    async def _fixed_target(self, record):
         return target
 
     monkeypatch.setattr(IngestionService, "_resolve_vision_target", _fixed_target)
@@ -498,7 +498,7 @@ def test_task_with_tabular_attachment_requires_sandbox(tmp_path):
         assert response.json()["detail"]["code"] == "TABULAR_ATTACHMENT_REQUIRES_SANDBOX"
 
         agent_payload = task_payload(attachments=attachments)
-        agent_payload["execution"] = {"strategy": "agent", "agent": {"skills": ["web_search"]}}
+        agent_payload["execution"] = {"strategy": "agent", "agent": {"skills": ["calculator"]}}
         response = client.post("/api/v1/tasks", json=agent_payload)
         assert response.status_code == 409
         assert response.json()["detail"]["code"] == "TABULAR_ATTACHMENT_REQUIRES_SANDBOX"

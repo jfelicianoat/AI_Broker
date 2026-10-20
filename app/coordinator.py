@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +30,12 @@ from app.providers.base import (
     with_output_language,
 )
 from app.repository import _utc_now_iso
-from app.resource_scheduler import ModelFootprint, ResourcePlanningError, ResourceScheduler
+from app.resource_scheduler import (
+    ModelFootprint,
+    ResourcePlan,
+    ResourcePlanningError,
+    ResourceScheduler,
+)
 from app.schemas import (
     ExecutionPreset,
     ExecutionStrategy,
@@ -115,6 +122,46 @@ def _last_assistant_content(messages: list[dict[str, Any]]) -> str | None:
     return None
 
 
+# Campos de ModelOutput que sobreviven a un punto de control del consenso. Las
+# imágenes y el embedding no: un mixture_of_agents produce texto, y las
+# imágenes que sí importan —las de la síntesis— se guardan como artefactos al
+# cerrar, no a mitad de camino.
+_CHECKPOINT_OUTPUT_FIELDS = (
+    "content", "tokens_input", "tokens_output", "cost_usd", "latency_ms", "generation",
+    "fingerprint_observed", "fingerprint_extensions", "content_source", "raw_content",
+)
+
+
+def _output_to_checkpoint(output: ModelOutput) -> dict[str, Any]:
+    return {name: getattr(output, name) for name in _CHECKPOINT_OUTPUT_FIELDS}
+
+
+def _chunks_fingerprint(chunks: list[str]) -> str:
+    """Huella del troceado de un map-reduce. Los fragmentos no se guardan en el
+    punto de control —son el documento entero otra vez—: al retomar se
+    recalculan y esta huella dice si salieron iguales."""
+    digest = hashlib.sha256()
+    for chunk in chunks:
+        digest.update(chunk.encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _output_from_checkpoint(data: dict[str, Any]) -> ModelOutput:
+    return ModelOutput(
+        data.get("content"),
+        int(data.get("tokens_input") or 0),
+        int(data.get("tokens_output") or 0),
+        float(data.get("cost_usd") or 0.0),
+        float(data.get("latency_ms") or 0.0),
+        generation=data.get("generation"),
+        fingerprint_observed=data.get("fingerprint_observed"),
+        fingerprint_extensions=data.get("fingerprint_extensions"),
+        content_source=data.get("content_source"),
+        raw_content=data.get("raw_content"),
+    )
+
+
 @dataclass
 class AgentLoopResult:
     """Resultado de un bucle de tool-calling: la respuesta final del modelo,
@@ -122,7 +169,7 @@ class AgentLoopResult:
     content: str | None
     outputs: list[ModelOutput] = field(default_factory=list)
     # completed | max_iterations | budget_exhausted | context_exhausted |
-    # cancelled | waiting_for_tools
+    # cancelled | waiting_for_tools | yielded
     stop_reason: str = "completed"
     tool_calls: int = 0
     last_invocation_id: str | None = None
@@ -135,6 +182,8 @@ class AgentLoopResult:
     # conversación completa a congelar para reanudar tras resolverlas.
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
+    # Solo en yielded: la tarea más urgente a la que se cedió el turno.
+    yielded_to: str | None = None
 
 
 @dataclass
@@ -147,6 +196,10 @@ class _RoundOutcome:
     # tiene que decidir qué escribe en la tarea, y son dos sitios distintos
     # según la ronda en la que se cancele.
     cancelled: bool = False
+    # Ceder el turno sube igual: la tarea más urgente que espera y cuántas
+    # oleadas quedaron hechas, que es desde donde se retoma.
+    yielded_to: str | None = None
+    waves_done: int = 0
 
 
 @dataclass
@@ -180,6 +233,39 @@ class _Synthesis:
     invocation_id: str | None
     degraded: bool
     failures: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _ConsensusCheckpoint:
+    """Lo que un mixture_of_agents dejó hecho al ceder el turno.
+
+    `synthesis` es None si cedió durante la primera ronda de propuestas; si no,
+    cedió tras la primera síntesis y lo que queda es la segunda ronda.
+    """
+    proposers: list[ModelReference]
+    arbiter: ModelReference
+    resource_plan: ResourcePlan
+    round_one: _RoundOutcome
+    synthesis: _Synthesis | None
+
+
+@dataclass
+class _MapReduceCheckpoint:
+    """Lo que un map-reduce dejó hecho al ceder el turno.
+
+    `phase` es "map" si cedió entre fragmentos y "reduce" si cedió entre
+    reducciones; en ese caso `reduce_input` es la entrada de la ronda en curso
+    y `reduce_merged` los grupos de esa ronda ya reducidos.
+    """
+    model: ModelReference
+    window: int
+    chunks: list[str]
+    phase: str
+    map_partials: list[str]
+    outputs: list[ModelOutput]
+    reduce_rounds: int = 0
+    reduce_input: list[str] = field(default_factory=list)
+    reduce_merged: list[str] = field(default_factory=list)
 
 
 class ConsensusCoordinator:
@@ -390,6 +476,9 @@ class ConsensusCoordinator:
             return
         if self.ingestion is not None and request.content.attachments:
             try:
+                request = self.ingestion.apply_attachment_policy(
+                    request, egress_server_ids=self.mcp.egress_server_ids() if self.mcp is not None else [],
+                )
                 # Con imágenes delante hay que saber si alguien puede mirarlas
                 # ANTES de expandir: de eso depende que la imagen viaje como
                 # imagen o como el texto que se le reconozca.
@@ -919,34 +1008,72 @@ class ConsensusCoordinator:
         parts = split_expanded_prompt(request.content.prompt)
         if parts is None:
             return False
-        try:
-            await self.provider.select(request, 1, ["single"])
-            return False
-        except ProviderError as error:
-            if error.code != "CONTEXT_LIMIT_EXCEEDED":
-                raise
         instruction, documents = parts
-        probe = request.model_copy(update={
-            "content": request.content.model_copy(update={"prompt": instruction, "attachments": []}),
-        })
-        model = (await self.provider.select(probe, 1, ["single"]))[0]
-        window = await self._context_window_for(model)
-        if window is None:
-            raise ProviderError(
-                "CONTEXT_WINDOW_UNKNOWN",
-                "map_reduce requiere conocer la ventana de contexto del modelo seleccionado",
+        should_yield = self._yield_check(repository, task_id, request, ExecutionStrategy.single)
+        # Si cedió el turno antes, se retoma con el mismo modelo y la misma
+        # ventana: con otros, el troceado cambiaría y los parciales ya pagados
+        # no corresponderían a los fragmentos que quedan.
+        checkpoint = self._load_map_reduce_checkpoint(repository, task_id, request, instruction, documents)
+        if checkpoint is not None:
+            model, window, chunks = checkpoint.model, checkpoint.window, checkpoint.chunks
+            repository.add_event(task_id, "chunking.resumed", {
+                "phase": checkpoint.phase,
+                "chunks_done": len(checkpoint.map_partials),
+                "chunks_total": len(chunks),
+            })
+        else:
+            try:
+                await self.provider.select(request, 1, ["single"])
+                return False
+            except ProviderError as error:
+                if error.code != "CONTEXT_LIMIT_EXCEEDED":
+                    raise
+            probe = request.model_copy(update={
+                "content": request.content.model_copy(update={"prompt": instruction, "attachments": []}),
+            })
+            model = (await self.provider.select(probe, 1, ["single"]))[0]
+            resolved_window = await self._context_window_for(model)
+            if resolved_window is None:
+                raise ProviderError(
+                    "CONTEXT_WINDOW_UNKNOWN",
+                    "map_reduce requiere conocer la ventana de contexto del modelo seleccionado",
+                )
+            window = resolved_window
+            chunks = self._split_documents_for_window(
+                documents, instruction, window, request.generation.max_output_tokens,
             )
-        chunks = self._split_documents_for_window(
-            documents, instruction, window, request.generation.max_output_tokens,
-        )
+            repository.add_event(task_id, "chunking.planned", {
+                "chunks": len(chunks),
+                "model": f"{model.provider}/{model.deployment}/{model.model}",
+                "context_window": window,
+                "document_chars": len(documents),
+            })
         total = len(chunks)
-        repository.add_event(task_id, "chunking.planned", {
-            "chunks": total,
-            "model": f"{model.provider}/{model.deployment}/{model.model}",
-            "context_window": window,
-            "document_chars": len(documents),
-        })
-        outputs: list[ModelOutput] = []
+        outputs: list[ModelOutput] = list(checkpoint.outputs) if checkpoint is not None else []
+
+        def yield_turn(phase: str, urgent: str, map_partials: list[str], reduce: dict[str, Any]) -> None:
+            state = {
+                "model": model.model_dump(mode="json"),
+                "context_window": window,
+                "chunks_total": total,
+                "chunks_sha256": _chunks_fingerprint(chunks),
+                "phase": phase,
+                "map_partials": map_partials,
+                "outputs": [_output_to_checkpoint(item) for item in outputs],
+                **reduce,
+            }
+            repository.yield_map_reduce_turn(
+                task_id, state,
+                progress={
+                    **_progress(TaskStatus.queued, len(map_partials), total),
+                    "yielded_to": urgent,
+                },
+                urgent_task_id=urgent,
+            )
+            logger.info("chunking.yielded", extra={
+                "event": "chunking.yielded", "task_id": task_id, "phase": phase,
+                "chunks_done": len(map_partials), "urgent_task_id": urgent,
+            })
 
         def _progress(phase: TaskStatus, completed: int, chunk_total: int) -> dict[str, Any]:
             return {
@@ -960,12 +1087,14 @@ class ConsensusCoordinator:
                 "cost_actual_usd": round(sum(item.cost_usd for item in outputs), 6),
             }
 
+        partials: list[str] = list(checkpoint.map_partials) if checkpoint is not None else []
         repository.update_task(
             task_id, TaskStatus.chunking,
-            progress=_progress(TaskStatus.chunking, 0, total), clear_queue_position=True,
+            progress=_progress(TaskStatus.chunking, len(partials), total), clear_queue_position=True,
         )
-        partials: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
+            if index <= len(partials):
+                continue
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                 return True
@@ -983,10 +1112,25 @@ class ConsensusCoordinator:
                 task_id, TaskStatus.chunking,
                 progress=_progress(TaskStatus.chunking, index, total),
             )
+            # Con el fragmento cobrado; también tras el último, porque lo que
+            # queda —la reducción— son más llamadas.
+            if should_yield is not None:
+                urgent = should_yield()
+                if urgent is not None:
+                    yield_turn("map", urgent, partials, {})
+                    return True
 
+        map_partials = list(partials)
         reduce_rounds = 0
+        # Una ronda de reducción a medias: sus grupos ya reducidos se saltan.
+        resumed_merged: list[str] | None = None
+        if checkpoint is not None and checkpoint.phase == "reduce":
+            reduce_rounds = checkpoint.reduce_rounds
+            partials = list(checkpoint.reduce_input)
+            resumed_merged = list(checkpoint.reduce_merged)
         while True:
-            reduce_rounds += 1
+            if resumed_merged is None:
+                reduce_rounds += 1
             if reduce_rounds > self._MAX_REDUCE_ROUNDS:
                 raise ProviderError(
                     "CONTEXT_LIMIT_EXCEEDED",
@@ -1016,8 +1160,9 @@ class ConsensusCoordinator:
                     outputs=outputs, chunks=total, reduce_rounds=reduce_rounds,
                 )
                 return True
-            merged: list[str] = []
-            for group in groups:
+            merged: list[str] = resumed_merged or []
+            resumed_merged = None
+            for group in groups[len(merged):]:
                 if repository.is_cancel_requested(task_id):
                     repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
                     return True
@@ -1030,7 +1175,63 @@ class ConsensusCoordinator:
                     return True
                 outputs.append(output)
                 merged.append(output.content or "")
+                if should_yield is not None:
+                    urgent = should_yield()
+                    if urgent is not None:
+                        yield_turn("reduce", urgent, map_partials, {
+                            "reduce_rounds": reduce_rounds,
+                            "reduce_input": partials,
+                            "reduce_merged": merged,
+                        })
+                        return True
             partials = merged
+
+    def _load_map_reduce_checkpoint(
+        self, repository, task_id: str, request: TaskCreateRequest,
+        instruction: str, documents: str,
+    ) -> _MapReduceCheckpoint | None:
+        """El punto de control que dejó el map-reduce al ceder el turno, si lo
+        hay y sigue valiendo.
+
+        Se trocea de nuevo con el modelo y la ventana guardados y se compara la
+        huella: si los adjuntos se expandieron distinto esta vez (otro OCR,
+        otra versión del conversor), los parciales ya no corresponderían a los
+        fragmentos y se empieza de cero. Rehacer cuesta tiempo; mezclar
+        parciales de otro troceado costaría una respuesta equivocada.
+        """
+        state = repository.load_map_reduce_state(task_id)
+        if not state:
+            return None
+        try:
+            model = ModelReference.model_validate(state["model"])
+            window = int(state["context_window"])
+            chunks = self._split_documents_for_window(
+                documents, instruction, window, request.generation.max_output_tokens,
+            )
+            if (
+                len(chunks) != int(state["chunks_total"])
+                or _chunks_fingerprint(chunks) != state["chunks_sha256"]
+            ):
+                repository.add_event(task_id, "chunking.checkpoint_discarded", {
+                    "reason": "el troceado de esta vez no coincide con el guardado",
+                })
+                return None
+            return _MapReduceCheckpoint(
+                model=model,
+                window=window,
+                chunks=chunks,
+                phase=str(state["phase"]),
+                map_partials=[str(item) for item in state.get("map_partials") or []],
+                outputs=[_output_from_checkpoint(item) for item in state.get("outputs") or []],
+                reduce_rounds=int(state.get("reduce_rounds") or 0),
+                reduce_input=[str(item) for item in state.get("reduce_input") or []],
+                reduce_merged=[str(item) for item in state.get("reduce_merged") or []],
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning("chunking.checkpoint_unreadable", exc_info=True, extra={
+                "event": "chunking.checkpoint_unreadable", "task_id": task_id,
+            })
+            return None
 
     def _reduce_prompt(self, instruction: str, partials: list[str]) -> str:
         blocks = []
@@ -1347,6 +1548,7 @@ class ConsensusCoordinator:
         iteration_offset: int = 0,
         sandbox_files: dict[str, Path] | None = None,
         mcp_servers: list[str] | None = None,
+        should_yield: Any | None = None,
     ) -> AgentLoopResult:
         """Bucle de tool-calling reutilizable (estrategia agent y proponentes
         de mixture con skills). Persiste una invocación por ronda y un evento
@@ -1357,7 +1559,12 @@ class ConsensusCoordinator:
 
         sandbox_files (solo importa si "run_code" está en skills): adjuntos
         tabulares autorizados de la tarea a stagear en el sandbox (ver
-        IngestionService.tabular_sandbox_files)."""
+        IngestionService.tabular_sandbox_files).
+
+        should_yield: callable sin argumentos que, al cerrar cada iteración,
+        devuelve el id de una tarea más urgente o None. Si devuelve un id, el
+        bucle para con stop_reason=yielded y la conversación lista para
+        congelarse; solo la pasa la estrategia agent, que sabe retomarse."""
         skill_tools = tools if tools is not None else skill_definitions(list(skills))
         client_names = client_tool_names or set()
         mcp_servers = list(mcp_servers or [])
@@ -1479,6 +1686,17 @@ class ConsensusCoordinator:
                     f"{salvaged}\n\n---\n\n{notice}" if salvaged else notice,
                     outputs, "budget_exhausted", tool_calls, last_invocation_id,
                 )
+            # Entre iteraciones, con la vuelta ya pagada y su resultado en la
+            # conversación: es el único punto donde pausar no tira trabajo.
+            if should_yield is not None:
+                urgent = should_yield()
+                if urgent is not None:
+                    result = AgentLoopResult(
+                        None, outputs, "yielded", tool_calls, last_invocation_id, iteration,
+                    )
+                    result.messages = messages
+                    result.yielded_to = urgent
+                    return result
         return await self._final_answer_turn(
             repository, task_id, request, model, run_id=run_id, messages=messages,
             role=role, allow_parallel=allow_parallel, outputs=outputs,
@@ -1676,6 +1894,29 @@ class ConsensusCoordinator:
             for tool in request.execution.agent.client_tools
         ]
 
+    def _yield_check(
+        self, repository, task_id: str, request: TaskCreateRequest, strategy: ExecutionStrategy,
+    ) -> Callable[[], str | None] | None:
+        """Pregunta que hace una tarea larga entre pasos: ¿espera algo más
+        urgente que yo? Devuelve None si esta tarea no debe ceder nunca.
+
+        Solo cede quien pidió su estrategia de forma explícita. Una `auto` se
+        vuelve a enrutar en cada tramo, el aprendizaje puede cambiar la decisión
+        entre uno y otro, y el estado congelado se perdería en una estrategia
+        que no sabe retomarlo.
+        """
+        if not self.scheduler.config.processing.yield_to_urgent_tasks:
+            return None
+        if repository.get_task_request(task_id).execution.strategy != strategy:
+            return None
+
+        def check() -> str | None:
+            if repository.is_cancel_requested(task_id):
+                return None
+            return repository.urgent_task_waiting(request.priority, exclude_id=task_id)
+
+        return check
+
     async def _process_agent(self, repository, task_id: str, request: TaskCreateRequest) -> None:
         model = (await self.provider.select(request, 1, ["agent"]))[0]
         ensure_capable = getattr(self.provider, "ensure_agent_capable", None)
@@ -1697,9 +1938,10 @@ class ConsensusCoordinator:
             else {}
         )
 
-        # Reanudación tras resolver tools del cliente: se restaura la conversación
-        # congelada y la contabilidad acumulada de tramos anteriores.
-        saved_state = repository.load_agent_state(task_id) if client_tool_names else None
+        # Reanudación tras resolver tools del cliente o tras ceder el turno a una
+        # tarea urgente: se restaura la conversación congelada y la
+        # contabilidad acumulada de tramos anteriores.
+        saved_state = repository.load_agent_state(task_id)
         if saved_state and saved_state.get("resumed"):
             # El historial se guardó sin los bytes de las imágenes; vuelven aquí
             # desde la petición, que se expande de nuevo en cada reanudación.
@@ -1747,11 +1989,13 @@ class ConsensusCoordinator:
                 ),
             )
 
+        should_yield = self._yield_check(repository, task_id, request, ExecutionStrategy.agent)
+
         loop = await self._run_agent_loop(
             repository, task_id, request, model, run_id=None, messages=messages,
             skills=skills, max_iterations=max_iterations, role="agent", tools=tools,
             client_tool_names=client_tool_names, on_iteration=on_iteration, iteration_offset=iteration_offset,
-            sandbox_files=sandbox_files, mcp_servers=mcp_servers,
+            sandbox_files=sandbox_files, mcp_servers=mcp_servers, should_yield=should_yield,
         )
         if loop.stop_reason == "cancelled" or repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
@@ -1761,6 +2005,32 @@ class ConsensusCoordinator:
         acc_tokens_out = int(prior.get("tokens_output") or 0) + sum(o.tokens_output for o in loop.outputs)
         acc_cost = prior_cost + sum(o.cost_usd for o in loop.outputs)
         acc_invocations = int(prior.get("invocations") or 0) + len(loop.outputs)
+
+        if loop.stop_reason == "yielded":
+            agent_state = {
+                "messages": flatten_multimodal(loop.messages),
+                "pending_tool_calls": [],
+                "iteration": loop.iteration,
+                "accumulated": {
+                    "tokens_input": acc_tokens_in, "tokens_output": acc_tokens_out,
+                    "cost_usd": acc_cost, "invocations": acc_invocations,
+                },
+                # Lista para retomarse: no espera nada del cliente.
+                "resumed": True,
+            }
+            repository.yield_agent_turn(
+                task_id, agent_state,
+                progress={
+                    **progress_snapshot(TaskStatus.queued.value, loop.iteration, acc_invocations, acc_cost),
+                    "yielded_to": loop.yielded_to,
+                },
+                urgent_task_id=str(loop.yielded_to),
+            )
+            logger.info("agent.yielded", extra={
+                "event": "agent.yielded", "task_id": task_id,
+                "iteration": loop.iteration, "urgent_task_id": loop.yielded_to,
+            })
+            return
 
         if loop.stop_reason == "waiting_for_tools":
             agent_state = {
@@ -1855,56 +2125,117 @@ class ConsensusCoordinator:
         except Exception:
             return request.content.prompt
 
-    async def _process_consensus(self, repository, task_id: str, request: TaskCreateRequest) -> None:
-        run_id = repository.get_consensus_run_id(task_id) or self.initialize_run(task_id, request)
-        assert run_id is not None
-        repository.set_stage_status(task_id, run_id, "resource_planning", "running")
-        proposers = await self._select_proposers(request)
-        arbiter = await self._select_arbiter(request)
-        if request.execution.proposer_skills:
-            ensure_capable = getattr(self.provider, "ensure_agent_capable", None)
-            if ensure_capable is not None:
-                for proposer in proposers:
-                    await ensure_capable(proposer)
-        plan_execution = request.execution.model_copy(update={"max_proposers": len(proposers)})
-        plan_request = request.model_copy(update={"execution": plan_execution})
-        try:
-            resource_plan = self.scheduler.plan(
-                plan_request, await self._proposer_footprints(proposers)
-            )
-        except ResourcePlanningError as error:
-            repository.set_stage_status(task_id, run_id, "resource_planning", "failed")
-            raise ProviderError("PARALLEL_CAPACITY_INSUFFICIENT", str(error)) from error
-        progress = {
-            "phase": TaskStatus.resource_planning.value,
-            "invocations_completed": 0,
-            "invocations_total": len(proposers) + 1,
-            "scheduling_requested": request.execution.scheduling.value,
-            "scheduling_mode": resource_plan.mode.value,
-            "wave_current": 0,
-            "wave_total": len(resource_plan.waves),
-            "active_invocations": [],
-            "max_parallel_invocations_launched": 0,
-            "budget_limit_usd": request.model_requirements.max_cost_usd,
-            "cost_estimated_usd": None,
-            "cost_actual_usd": 0.0,
-        }
-        repository.update_task(task_id, TaskStatus.resource_planning, progress=progress, clear_queue_position=True)
-        self._write_request_artifacts(repository, task_id, run_id, request, resource_plan.model_dump(mode="json"))
+    def _load_consensus_checkpoint(self, repository, task_id: str) -> _ConsensusCheckpoint | None:
+        """El punto de control que dejó la tarea al ceder el turno, si lo hay.
 
-        repository.set_stage_status(task_id, run_id, "resource_planning", "completed")
-        repository.set_stage_status(task_id, run_id, "proposing", "running")
-        repository.update_task(task_id, TaskStatus.proposing, progress={**progress, "phase": TaskStatus.proposing.value})
-        round_one = await self._run_proposal_round(
-            repository, task_id, run_id, request, request, proposers, resource_plan, progress,
+        Uno que no se puede leer se descarta y la tarea empieza de cero: rehacer
+        las propuestas cuesta tiempo, retomar con un estado a medias costaría
+        una respuesta equivocada.
+        """
+        state = repository.load_consensus_state(task_id)
+        if not state:
+            return None
+        try:
+            round_one = _RoundOutcome(
+                proposals=[
+                    (ModelReference.model_validate(item["model"]), _output_from_checkpoint(item["output"]))
+                    for item in state.get("proposals") or []
+                ],
+                skipped=list(state.get("skipped") or []),
+                max_parallel_launched=int(state.get("max_parallel_launched") or 0),
+                waves_done=int(state.get("waves_done") or 0),
+            )
+            synthesis = None
+            saved = state.get("synthesis")
+            if saved:
+                synthesis = _Synthesis(
+                    model=ModelReference.model_validate(saved["model"]),
+                    output=_output_from_checkpoint(saved["output"]),
+                    invocation_id=saved.get("invocation_id"),
+                    degraded=bool(saved.get("degraded")),
+                    failures=list(saved.get("failures") or []),
+                )
+            return _ConsensusCheckpoint(
+                proposers=[ModelReference.model_validate(item) for item in state["proposers"]],
+                arbiter=ModelReference.model_validate(state["arbiter"]),
+                resource_plan=ResourcePlan.model_validate(state["resource_plan"]),
+                round_one=round_one,
+                synthesis=synthesis,
+            )
+        except (KeyError, TypeError, ValueError):
+            logger.warning("consensus.checkpoint_unreadable", exc_info=True, extra={
+                "event": "consensus.checkpoint_unreadable", "task_id": task_id,
+            })
+            return None
+
+    def _yield_consensus(
+        self,
+        repository,
+        task_id: str,
+        checkpoint: _ConsensusCheckpoint,
+        progress: dict[str, Any],
+        urgent_task_id: str,
+    ) -> None:
+        round_one = checkpoint.round_one
+        synthesis = checkpoint.synthesis
+        state = {
+            "proposers": [model.model_dump(mode="json") for model in checkpoint.proposers],
+            "arbiter": checkpoint.arbiter.model_dump(mode="json"),
+            "resource_plan": checkpoint.resource_plan.model_dump(mode="json"),
+            "waves_done": round_one.waves_done,
+            "proposals": [
+                {"model": model.model_dump(mode="json"), "output": _output_to_checkpoint(output)}
+                for model, output in round_one.proposals
+            ],
+            "skipped": round_one.skipped,
+            "max_parallel_launched": round_one.max_parallel_launched,
+            "synthesis": None if synthesis is None else {
+                "model": synthesis.model.model_dump(mode="json"),
+                "output": _output_to_checkpoint(synthesis.output),
+                "invocation_id": synthesis.invocation_id,
+                "degraded": synthesis.degraded,
+                "failures": synthesis.failures,
+            },
+        }
+        paid = [output for _, output in round_one.proposals]
+        if synthesis is not None and not synthesis.degraded:
+            paid.append(synthesis.output)
+        repository.yield_consensus_turn(
+            task_id, state,
+            progress={
+                **progress,
+                "phase": TaskStatus.queued.value,
+                "invocations_completed": len(paid),
+                "wave_current": round_one.waves_done,
+                "active_invocations": [],
+                "skipped_proposers": round_one.skipped,
+                "cost_actual_usd": sum(output.cost_usd for output in paid),
+                "yielded_to": urgent_task_id,
+            },
+            urgent_task_id=urgent_task_id,
         )
-        if round_one.cancelled:
-            repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-            return
+        logger.info("consensus.yielded", extra={
+            "event": "consensus.yielded", "task_id": task_id,
+            "waves_done": round_one.waves_done, "synthesized": synthesis is not None,
+            "urgent_task_id": urgent_task_id,
+        })
+
+    async def _first_synthesis(
+        self,
+        repository,
+        task_id: str,
+        run_id: str,
+        request: TaskCreateRequest,
+        proposers: list[ModelReference],
+        arbiter: ModelReference,
+        resource_plan: ResourcePlan,
+        progress: dict[str, Any],
+        round_one: _RoundOutcome,
+    ) -> _Synthesis | None:
+        """Quorum y síntesis de la primera ronda. None = la tarea ya quedó
+        escrita (fallida por quorum o cancelada) y no hay nada más que hacer."""
         proposals = round_one.proposals
         skipped_proposers = round_one.skipped
-        max_parallel_launched = round_one.max_parallel_launched
-
         quorum = min(2, len(proposers))
         if len(proposals) < quorum:
             repository.set_stage_status(task_id, run_id, "proposing", "failed")
@@ -1922,11 +2253,11 @@ class ConsensusCoordinator:
                     "skipped_proposers": skipped_proposers,
                 },
             )
-            return
+            return None
 
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-            return
+            return None
 
         repository.set_stage_status(task_id, run_id, "proposing", "completed")
         repository.set_stage_status(task_id, run_id, "synthesizing", "running")
@@ -1940,7 +2271,7 @@ class ConsensusCoordinator:
                 "wave_current": len(resource_plan.waves),
                 "active_invocations": [arbiter.model_dump(mode="json")],
                 "skipped_proposers": skipped_proposers,
-                "max_parallel_invocations_launched": max_parallel_launched,
+                "max_parallel_invocations_launched": round_one.max_parallel_launched,
                 "cost_actual_usd": sum(output.cost_usd for _, output in proposals),
             },
         )
@@ -1950,7 +2281,124 @@ class ConsensusCoordinator:
         )
         if repository.is_cancel_requested(task_id):
             repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
-            return
+            return None
+        return synthesis
+
+    async def _process_consensus(self, repository, task_id: str, request: TaskCreateRequest) -> None:
+        run_id = repository.get_consensus_run_id(task_id) or self.initialize_run(task_id, request)
+        assert run_id is not None
+        should_yield = self._yield_check(
+            repository, task_id, request, ExecutionStrategy.mixture_of_agents,
+        )
+        # Si cedió el turno antes, se retoma con LO MISMO que se eligió
+        # entonces: proponentes, árbitro y plan de oleadas. Volver a elegirlos
+        # podría cambiar el reparto y desemparejar las propuestas ya pagadas de
+        # las oleadas que faltan.
+        checkpoint = self._load_consensus_checkpoint(repository, task_id)
+        repository.set_stage_status(task_id, run_id, "resource_planning", "running")
+        if checkpoint is not None:
+            proposers = checkpoint.proposers
+            arbiter = checkpoint.arbiter
+            resource_plan = checkpoint.resource_plan
+            repository.add_event(task_id, "consensus.resumed", {
+                "waves_done": checkpoint.round_one.waves_done,
+                "proposals": len(checkpoint.round_one.proposals),
+                "synthesized": checkpoint.synthesis is not None,
+            })
+        else:
+            proposers = await self._select_proposers(request)
+            arbiter = await self._select_arbiter(request)
+            if request.execution.proposer_skills:
+                ensure_capable = getattr(self.provider, "ensure_agent_capable", None)
+                if ensure_capable is not None:
+                    for proposer in proposers:
+                        await ensure_capable(proposer)
+            plan_execution = request.execution.model_copy(update={"max_proposers": len(proposers)})
+            plan_request = request.model_copy(update={"execution": plan_execution})
+            try:
+                resource_plan = self.scheduler.plan(
+                    plan_request, await self._proposer_footprints(proposers)
+                )
+            except ResourcePlanningError as error:
+                repository.set_stage_status(task_id, run_id, "resource_planning", "failed")
+                raise ProviderError("PARALLEL_CAPACITY_INSUFFICIENT", str(error)) from error
+        progress = {
+            "phase": TaskStatus.resource_planning.value,
+            "invocations_completed": 0,
+            "invocations_total": len(proposers) + 1,
+            "scheduling_requested": request.execution.scheduling.value,
+            "scheduling_mode": resource_plan.mode.value,
+            "wave_current": 0,
+            "wave_total": len(resource_plan.waves),
+            "active_invocations": [],
+            "max_parallel_invocations_launched": 0,
+            "budget_limit_usd": request.model_requirements.max_cost_usd,
+            "cost_estimated_usd": None,
+            "cost_actual_usd": 0.0,
+        }
+        repository.update_task(task_id, TaskStatus.resource_planning, progress=progress, clear_queue_position=True)
+        if checkpoint is None:
+            # Al retomar ya están escritos: son de la petición, no del tramo.
+            self._write_request_artifacts(
+                repository, task_id, run_id, request, resource_plan.model_dump(mode="json"),
+            )
+
+        repository.set_stage_status(task_id, run_id, "resource_planning", "completed")
+        if checkpoint is not None and checkpoint.synthesis is not None:
+            # Cedió tras la primera síntesis: la ronda 1 está entera y
+            # sintetizada, y lo que falta es la segunda.
+            synthesis = checkpoint.synthesis
+            round_one = checkpoint.round_one
+            proposals = round_one.proposals
+            skipped_proposers = round_one.skipped
+            max_parallel_launched = round_one.max_parallel_launched
+            repository.set_stage_status(task_id, run_id, "proposing", "completed")
+            repository.set_stage_status(task_id, run_id, "synthesizing", "running")
+        else:
+            repository.set_stage_status(task_id, run_id, "proposing", "running")
+            repository.update_task(
+                task_id, TaskStatus.proposing, progress={**progress, "phase": TaskStatus.proposing.value},
+            )
+            round_one = await self._run_proposal_round(
+                repository, task_id, run_id, request, request, proposers, resource_plan, progress,
+                resume=checkpoint.round_one if checkpoint is not None else None,
+                should_yield=should_yield,
+            )
+            if round_one.cancelled:
+                repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
+            if round_one.yielded_to is not None:
+                self._yield_consensus(
+                    repository, task_id,
+                    _ConsensusCheckpoint(proposers, arbiter, resource_plan, round_one, None),
+                    progress, round_one.yielded_to,
+                )
+                return
+            proposals = round_one.proposals
+            skipped_proposers = round_one.skipped
+            max_parallel_launched = round_one.max_parallel_launched
+            first = await self._first_synthesis(
+                repository, task_id, run_id, request, proposers, arbiter, resource_plan,
+                progress, round_one,
+            )
+            if first is None:
+                return
+            synthesis = first
+            # Ceder tras la síntesis solo compensa si queda segunda ronda: sin
+            # ella lo que falta es escribir el resultado, no otra inferencia.
+            if (
+                should_yield is not None
+                and request.execution.max_rounds > 1
+                and not synthesis.degraded
+            ):
+                urgent = should_yield()
+                if urgent is not None:
+                    self._yield_consensus(
+                        repository, task_id,
+                        _ConsensusCheckpoint(proposers, arbiter, resource_plan, round_one, synthesis),
+                        progress, urgent,
+                    )
+                    return
 
         # Segunda ronda: los proponentes ven la síntesis anterior y la mejoran.
         # `synthesis`, `proposals` y los acumuladores se reemplazan solo si la
@@ -2254,6 +2702,8 @@ class ConsensusCoordinator:
         round_index: int = 1,
         prior_proposals: list[tuple[ModelReference, ModelOutput]] | None = None,
         completed_offset: int | None = None,
+        resume: _RoundOutcome | None = None,
+        should_yield: Callable[[], str | None] | None = None,
     ) -> _RoundOutcome:
         """Una ronda completa de propuestas, oleada a oleada.
 
@@ -2269,11 +2719,23 @@ class ConsensusCoordinator:
         defecto son las propuestas anteriores, pero en la segunda ronda hay
         además un árbitro y puede haber un juez ya pagados, y sin contarlos la
         barra retrocedería al empezar la ronda.
+
+        `resume` es lo que dejó esta misma ronda antes de ceder el turno: sus
+        oleadas hechas (`waves_done`) se saltan y sus propuestas cuentan como
+        ya cobradas. `should_yield` se consulta al cerrar cada oleada; si
+        devuelve una tarea, la ronda para con `yielded_to` y `waves_done`.
         """
         outcome = _RoundOutcome()
+        start_wave = 0
+        if resume is not None:
+            outcome.proposals = list(resume.proposals)
+            outcome.skipped = list(resume.skipped)
+            outcome.max_parallel_launched = resume.max_parallel_launched
+            start_wave = resume.waves_done
         previous = list(prior_proposals or [])
         prior_cost = sum(output.cost_usd for _, output in previous)
         completed = len(previous) if completed_offset is None else completed_offset
+        completed += len(outcome.proposals)
         attempted = 0
 
         def snapshot(wave_index: int, active: list[ModelReference]) -> dict[str, Any]:
@@ -2292,6 +2754,8 @@ class ConsensusCoordinator:
         for wave_index, labels in enumerate(resource_plan.waves, start=1):
             active_models = proposers[attempted : attempted + len(labels)]
             attempted += len(active_models)
+            if wave_index <= start_wave:
+                continue
             if repository.is_cancel_requested(task_id):
                 outcome.cancelled = True
                 return outcome
@@ -2338,6 +2802,15 @@ class ConsensusCoordinator:
                     request, [item for _, item in previous + outcome.proposals],
                 )
                 repository.update_task(task_id, TaskStatus.proposing, progress=snapshot(wave_index, []))
+            outcome.waves_done = wave_index
+            # Con la oleada cerrada y cobrada, que es donde pausar no tira nada.
+            # También tras la última: lo que queda, la síntesis, es otra llamada.
+            if should_yield is not None:
+                urgent = should_yield()
+                if urgent is not None:
+                    outcome.yielded_to = urgent
+                    return outcome
+        outcome.waves_done = len(resource_plan.waves)
         return outcome
 
     async def _run_proposer_wave(

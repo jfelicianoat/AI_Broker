@@ -52,6 +52,9 @@ Lo que no cambia sin reiniciar el proceso.
 | `allow_unauthenticated_lan` | `false` | Único opt-out del arranque fail-closed |
 | `publish_session_token` | `none` | `keyring` publica el token de cada arranque para los clientes de la misma máquina (ver abajo) |
 | `session_token_keyring_username` | `session_admin_token` | Entrada del keyring donde lo deja. **No** es la que el broker lee |
+| `tls_certfile` | `null` | Certificado PEM del broker. Con él, `host:port` sirve HTTPS (ver abajo). Va junto a `tls_keyfile` |
+| `tls_keyfile` | `null` | Clave privada del mismo par |
+| `tls_loopback_http` | `true` | Con HTTPS, mantiene además HTTP plano en `127.0.0.1:port` para clientes locales sin HTTPS. En el PC IA va a `false`: todo HTTPS |
 
 **CORS.** Activarlo sin orígenes **impide arrancar**, y `*` se rechaza: el API viaja con token de administración, y abrirlo a cualquier origen lo entrega a cualquier web que visite quien lo tenga en marcha. Con orígenes declarados se monta el middleware con `allow_credentials=False` —la autenticación es la cabecera `X-Admin-Token`, que la app cliente pone a mano; permitir cookies expondría además la sesión del panel— y con los métodos y cabeceras que el broker usa. Un origen con ruta (`https://app.local/panel`) también se rechaza: el navegador compara esquema+host+puerto, así que una ruta ahí no restringe nada, solo hace que la entrada no case nunca.
 
@@ -63,6 +66,42 @@ registrado con un warning en cada arranque.
 
 Con token configurado, exigen credencial las mutaciones y las lecturas que
 contienen prompts o resultados, tanto en `/api/v1` como en el panel.
+
+**HTTPS.** Fuera de loopback, `X-Admin-Token` y la cookie del panel viajan en
+claro por HTTP. Con `tls_certfile` y `tls_keyfile`, `host:port` sirve HTTPS y
+el HTTP plano deja de contestar en esa dirección. Las rutas relativas cuentan
+desde el directorio de arranque, como `persistence.database`.
+
+**Despliegue del PC IA: solo HTTPS.** `host: 0.0.0.0` con
+`tls_loopback_http: false`: una sola escucha, HTTPS en todas las interfaces,
+también `https://127.0.0.1:<port>`. El runner de Agora 0.2.16 habla HTTPS con
+el broker (`--broker-ca-cert`) y los scripts locales (`estado_ai_broker.bat`,
+`check_readiness.py`, `check_model_residency.py`) validan con
+`certs\broker-ca.crt`.
+
+`tls_loopback_http` (activo por defecto) existe para clientes locales que solo
+sepan llamar a `http://127.0.0.1:<port>`, como el runner anterior a 0.2.16:
+abre una segunda escucha HTTP en loopback con el mismo puerto. Tiene dos reglas:
+
+- **`host` debe ser una IP concreta** (p. ej. `192.168.1.52`). Con `0.0.0.0`
+  las dos escuchas se solaparían en loopback (Windows lo permite sin avisar de
+  cuál contesta), así que esa combinación **impide arrancar**.
+- **El lifespan corre solo en la escucha HTTPS**: dispatcher, recuperación de
+  tareas y publicación del token van una sola vez. Los dos puertos se abren
+  antes de arrancar nada; si uno está ocupado, el broker sale sin haber
+  tocado la cola.
+
+Las cookies del panel salen con `Secure` solo cuando la petición llega por
+HTTPS; en la escucha de loopback el navegador las descartaría.
+
+En el PC IA, `activar_https_broker.bat` hace toda la puesta en marcha a
+partir de `C:\Agora\broker-https\` (`ca.crt`, `server.crt`, `server.key`),
+emitidos en el PC principal por la CA propia del broker («AI Broker CA», no
+la de Agora). Primero comprueba el par con un handshake real contra esa CA
+para `192.168.1.52` y `127.0.0.1`; después los copia a `certs\`
+(`broker-ca.crt`, `server.crt`, `server.key`), cambia `host`, `tls_*` y
+`tls_loopback_http: false` (con copia de seguridad), reinicia y prueba HTTPS
+en la red y en loopback.
 
 **Publicación del token de sesión.** El token se genera nuevo en cada arranque,
 vive en la variable de entorno del proceso del broker y se imprime en su
@@ -134,6 +173,7 @@ El motor de la cola y la memoria de los modelos locales.
 | `dispatcher_interval_seconds` | `0.1` | >0, ≤60 | Cada cuánto mira el dispatcher si hay trabajo |
 | `provider_mode` | `real` | `real` \| `bootstrap` | `bootstrap` sustituye a los proveedores reales por uno de arranque, para levantar el broker sin ningún runtime instalado |
 | `dependency_wait_seconds` | `2.0` | 0.1–3600 | Cada cuánto reintenta una tarea en `waiting_for_dependencies`. Corto a propósito: lo que la bloquea está en esta misma cola y suele terminar en segundos |
+| `yield_to_urgent_tasks` | `true` | bool | Un agente, un `mixture_of_agents` o un map-reduce (estrategia explícita, no `auto`) cede el turno entre pasos si en la cola espera una tarea con `priority` menor que la suya: el agente entre iteraciones, el consenso entre oleadas y tras la primera síntesis, el map-reduce entre fragmentos y entre reducciones. Guarda lo hecho y lo retoma sin repetir llamadas. `false` = corren hasta el final |
 
 > **El plazo de una tarea es una cadena, no un número.** Se corta por el primero que venza: `execution.timeout_seconds` de la petición (o `processing.default_task_timeout_seconds` si no lo trae), el techo `processing.task_timeout_seconds`, y el `timeout_seconds` del proveedor que atiende la invocación. Subir uno solo no sirve de nada si otro corta antes; el arranque avisa (`config.timeout_incoherent`) y el error `TASK_TIMEOUT` nombra cuál mandó (`timeout_bound_by`).
 
@@ -565,3 +605,26 @@ tests que lo sostienen (`tests/test_operator_settings.py`).
 - [`Phase_9_Speed_And_Lanes.md`](Phase_9_Speed_And_Lanes.md) — ranking por tiempo esperado y carriles.
 - [`Client_API.md`](Client_API.md) — lo que ve una aplicación cliente.
 - [`../Deployment_Guide.md`](../Deployment_Guide.md) — despliegue en Windows.
+
+## `larm` — puente hacia LARM
+
+Provider interno `larm` (`app/larm.py`, `app/providers/larm.py`). Apagado por defecto; con `enabled: false` el broker no consulta LARM, no anuncia `local_runtime_resolver` y no publica modelos `larm`.
+
+| Clave | Default | Notas |
+|---|---|---|
+| `enabled` | `false` | Activa el puente |
+| `endpoint` | `http://127.0.0.1:8790` | API administrativa de LARM. Solo loopback: otra dirección se rechaza al cargar |
+| `api_key_env` | `LARM_BROKER_TOKEN` | Variable con el Bearer del principal broker ante LARM |
+| `keyring_service` / `keyring_username` | `larm` / `ai-broker` | Entrada del Windows Credential Manager si la variable no existe |
+| `owner_id` | `ai-broker` | Propietario de las leases; debe coincidir con el principal autenticado |
+| `discovery_interval_seconds` | `30` | Refresco del catálogo `GET /api/v1/broker/catalog` |
+| `connect_timeout_seconds` / `timeout_seconds` | `5` / `30` | Plazos de la API de LARM |
+| `job_poll_seconds` | `2` | Sondeo de una admisión asíncrona (`202` → `GET /jobs/{id}`) |
+| `lease_acquire_timeout_seconds` | `660` | Plazo para que la lease llegue a `ACTIVE` (incluye la carga del modelo) |
+| `lease_ttl_seconds` | `120` | TTL pedido; se renueva según `renew_after_seconds` de LARM |
+| `launch_profile` / `launch_profile_id` | `BALANCED` / `null` | Perfil de arranque por nombre o por id exacto |
+| `inference_timeout_seconds` | plazo por defecto de tarea | Llamada al endpoint de la lease |
+| `credentials_pipe` | `null` | Named pipe de credenciales de endpoint; `null` lo deriva del SID: `\\.\pipe\LARM-{sha256(SID)[0:16]}-credentials` |
+
+Las leases se apuntan en la tabla `larm_leases` antes de usarse; al arrancar, el broker libera en LARM las que quedaron abiertas.
+

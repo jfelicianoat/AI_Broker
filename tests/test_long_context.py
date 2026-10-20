@@ -231,3 +231,128 @@ def test_map_reduce_respects_budget(tmp_path):
     assert state["error"]["code"] == "BUDGET_EXCEEDED"
     # Cortó tras agotar presupuesto, sin ejecutar los fragmentos restantes.
     assert provider.map_calls <= 2
+
+
+# ------------------------------------------------- ceder el turno a lo urgente
+
+class ArrivingProvider(TinyWindowProvider):
+    """El provider falso de ventana pequeña, con dos añadidos: mete una tarea
+    urgente en la cola en la llamada elegida —como haría una app mientras el
+    map-reduce trabaja— y puede alargar los parciales para que la reducción
+    necesite más de un grupo."""
+
+    def __init__(self, repository: TaskRepository | None = None, *, arrive_on: str = "",
+                 at_call: int = 0, partial_padding: int = 0) -> None:
+        super().__init__()
+        self.repository = repository
+        self.arrive_on = arrive_on
+        self.at_call = at_call
+        self.partial_padding = partial_padding
+        self.arrived: list[str] = []
+
+    async def propose(self, request, model, ordinal):
+        prompt = request.content.prompt
+        output = await super().propose(request, model, ordinal)
+        if "<fragmento" in prompt and "<parcial" not in prompt and self.partial_padding:
+            output = ModelOutput(
+                content=f"{output.content} " + "hallazgo " * self.partial_padding,
+                tokens_input=100, tokens_output=20, cost_usd=self.cost_per_call, latency_ms=5.0,
+            )
+        kind = "reduce" if "<parcial" in prompt else "map" if "<fragmento" in prompt else ""
+        calls = self.reduce_calls if kind == "reduce" else self.map_calls
+        if kind and kind == self.arrive_on and calls == self.at_call and not self.arrived:
+            urgent = TaskCreateRequest.model_validate({
+                "idempotency_key": "lc:urgent", "content": {"prompt": "rápida"},
+                "priority": 10, "execution": {"strategy": "single"},
+            })
+            task, _ = self.repository.create_task(urgent, queue_max_size=100)
+            self.arrived.append(task.task_id)
+        return output
+
+
+def _drain(coordinator: ConsensusCoordinator, repository: TaskRepository) -> list[str]:
+    """Reclama y ejecuta hasta vaciar la cola, como el despachador."""
+    order = []
+    while (task_id := asyncio.run(coordinator.process_next(repository))) is not None:
+        order.append(task_id)
+    return order
+
+
+def _baseline(tmp_path: Path, **provider_options) -> ArrivingProvider:
+    """Lo que cuesta el mismo map-reduce sin ceder el turno: la referencia
+    contra la que se mide que retomar no repite llamadas."""
+    provider = ArrivingProvider(**provider_options)
+    coordinator = _make_coordinator(tmp_path / "baseline", provider)
+    state = _run_task(coordinator, _long_request())
+    assert state["status"] == "completed"
+    return provider
+
+
+def _with_arrival(tmp_path: Path, **provider_options):
+    coordinator = _make_coordinator(tmp_path, ArrivingProvider())
+    repository = TaskRepository(coordinator.db)
+    provider = ArrivingProvider(repository, **provider_options)
+    coordinator.provider = provider
+    task, _ = repository.create_task(_long_request(), queue_max_size=100)
+    return coordinator, repository, provider, task.task_id
+
+
+def _event_types(coordinator: ConsensusCoordinator, task_id: str) -> list[str]:
+    rows = coordinator.db.query_all(
+        "SELECT event_type FROM events WHERE task_id = ? ORDER BY id", (task_id,),
+    )
+    return [row["event_type"] for row in rows]
+
+
+def test_map_reduce_yields_between_chunks_and_resumes_without_repeating(tmp_path):
+    (tmp_path / "baseline").mkdir()
+    baseline = _baseline(tmp_path)
+    coordinator, repository, provider, task_id = _with_arrival(tmp_path, arrive_on="map", at_call=2)
+
+    order = _drain(coordinator, repository)
+
+    # Cedió tras el segundo fragmento, pasó la urgente y retomó.
+    assert order == [task_id, provider.arrived[0], task_id]
+    state = repository.get_task(task_id).model_dump(mode="json")
+    assert state["status"] == "completed"
+    assert (provider.map_calls, provider.reduce_calls) == (baseline.map_calls, baseline.reduce_calls)
+    assert state["result"]["long_context"]["total_invocations"] == baseline.map_calls + baseline.reduce_calls
+    events = _event_types(coordinator, task_id)
+    assert "chunking.yielded" in events and "chunking.resumed" in events
+
+
+def test_map_reduce_yields_between_reductions(tmp_path):
+    (tmp_path / "baseline").mkdir()
+    baseline = _baseline(tmp_path, partial_padding=300)
+    # Con parciales largos la reducción necesita varios grupos: si no, este
+    # test no probaría nada.
+    assert baseline.reduce_calls > 1
+    coordinator, repository, provider, task_id = _with_arrival(
+        tmp_path, arrive_on="reduce", at_call=1, partial_padding=300,
+    )
+
+    order = _drain(coordinator, repository)
+
+    assert order == [task_id, provider.arrived[0], task_id]
+    assert repository.get_task(task_id).status.value == "completed"
+    assert (provider.map_calls, provider.reduce_calls) == (baseline.map_calls, baseline.reduce_calls)
+
+
+def test_map_reduce_starts_over_when_the_chunking_changed(tmp_path):
+    """Si al retomar el troceado no coincide con el guardado, los parciales ya
+    no corresponden a sus fragmentos: se descartan y se empieza de cero."""
+    (tmp_path / "baseline").mkdir()
+    baseline = _baseline(tmp_path)
+    coordinator, repository, provider, task_id = _with_arrival(tmp_path, arrive_on="map", at_call=2)
+    asyncio.run(coordinator.process_next(repository))
+    coordinator.db.execute(
+        "UPDATE tasks SET map_reduce_state_json = json_set(map_reduce_state_json, "
+        "'$.chunks_sha256', 'otra-huella') WHERE id = ?", (task_id,),
+    )
+
+    _drain(coordinator, repository)
+
+    assert repository.get_task(task_id).status.value == "completed"
+    # Los dos fragmentos de antes de ceder se pagan otra vez.
+    assert provider.map_calls == baseline.map_calls + 2
+    assert "chunking.checkpoint_discarded" in _event_types(coordinator, task_id)

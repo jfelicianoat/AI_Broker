@@ -22,6 +22,9 @@ from app.schemas import DEFAULT_TASK_TIMEOUT_SECONDS
 # arranque lo avisa: ver app.startup.timeout_coherence_warnings.
 DEFAULT_TASK_TIMEOUT_CEILING_SECONDS = 3000
 
+# Direcciones que escuchan en todas las interfaces, loopback incluida.
+WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
+
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
@@ -74,6 +77,38 @@ class ServerConfig(BaseModel):
     session_token_keyring_username: str = Field(
         default="session_admin_token", max_length=120,
     )
+    # HTTPS. Con certificado y clave, host:port sirve TLS y la cabecera
+    # X-Admin-Token deja de cruzar la red en claro. Rutas relativas al
+    # directorio desde el que arranca el broker, como persistence.database.
+    #
+    # tls_loopback_http mantiene además HTTP plano en 127.0.0.1 con el mismo
+    # puerto, para clientes locales que no sepan HTTPS (el runner de Agora
+    # anterior a 0.2.16 solo hablaba con http://127.0.0.1:<port>). Con él, el
+    # host tiene que ser una IP concreta: con 0.0.0.0 las dos escuchas se
+    # solaparían en loopback y Windows lo permite sin avisar de cuál contesta.
+    # Con tls_loopback_http: false todo es HTTPS y 0.0.0.0 vale.
+    tls_certfile: str | None = Field(default=None, max_length=500)
+    tls_keyfile: str | None = Field(default=None, max_length=500)
+    tls_loopback_http: bool = True
+
+    @property
+    def tls_enabled(self) -> bool:
+        return self.tls_certfile is not None
+
+    @model_validator(mode="after")
+    def validate_tls(self) -> ServerConfig:
+        if (self.tls_certfile is None) != (self.tls_keyfile is None):
+            raise ValueError(
+                "server.tls_certfile y server.tls_keyfile van juntos: "
+                "con uno solo no hay HTTPS posible"
+            )
+        if self.tls_enabled and self.tls_loopback_http and self.host in WILDCARD_HOSTS:
+            raise ValueError(
+                f"server.host '{self.host}' con HTTPS y tls_loopback_http: pon la IP de red "
+                "concreta (p. ej. 192.168.1.52); con un comodín la escucha HTTP de loopback "
+                "se solaparía con la HTTPS"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_cors_origins(self) -> ServerConfig:
@@ -163,6 +198,11 @@ class ProcessingConfig(BaseModel):
     # en esta misma cola y suele terminar en segundos, así que un intervalo
     # largo añadiría a la respuesta un retraso que no lo causa nada.
     dependency_wait_seconds: float = Field(default=2.0, ge=0.1, le=3600.0)
+    # Un agente en marcha cede el turno entre iteraciones si en la cola espera
+    # una tarea más urgente (priority menor). Con un solo workflow a la vez, es
+    # lo que impide que una investigación larga retenga a una app que necesita
+    # respuesta ya. La conversación se congela y se retoma donde quedó.
+    yield_to_urgent_tasks: bool = True
 
     @model_validator(mode="after")
     def validate_single_workflow(self) -> ProcessingConfig:
@@ -831,6 +871,71 @@ class OpenAICompatibleProviderConfig(BaseModel):
         return self
 
 
+_LARM_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+_UUID7_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+
+
+class LarmConfig(BaseModel):
+    """Puente hacia LARM (Local AI Runtime Manager): provider interno `larm`.
+
+    LARM administra la capacidad local —qué variante, con qué runtime y
+    backend, con cuánta memoria— y el broker sigue siendo quien decide el
+    routing de negocio y quien llama al modelo. Por eso este bloque no es un
+    proveedor más de `providers.custom`: un modelo de LARM solo se sirve con
+    lease (adquirir, renovar, liberar) y solo se elige por target exacto
+    `{provider: larm, deployment: local, model: <variant_id>}`.
+
+    Apagado por defecto (contrato LARM 06): sin `enabled` el broker ni anuncia
+    `local_runtime_resolver` ni publica modelos `larm` en el catálogo.
+    """
+
+    enabled: bool = False
+    # API administrativa de LARM. Solo loopback: abrir LAN exige autorización
+    # del operador y LARM la tiene apagada por defecto (remote_enabled=false).
+    endpoint: str = "http://127.0.0.1:8790"
+    # Referencia de la credencial del principal broker ante LARM. Mismo
+    # mecanismo que los demás proveedores (app.providers.base.CredentialResolver):
+    # variable de entorno y, si no existe, Windows Credential Manager.
+    api_key_env: str | None = "LARM_BROKER_TOKEN"
+    keyring_service: str = "larm"
+    keyring_username: str = "ai-broker"
+    # owner_id de las leases: tiene que coincidir con el principal autenticado
+    # (LARM rechaza con 403 un owner ajeno).
+    owner_id: str = Field(default="ai-broker", min_length=1, max_length=128)
+    discovery_interval_seconds: float = Field(default=30.0, ge=1)
+    connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    # Cada cuánto se consulta un job de admisión (202 → GET /jobs/{id}).
+    job_poll_seconds: float = Field(default=2.0, gt=0)
+    # Plazo para que una lease llegue a ACTIVE: cubre la carga del modelo
+    # (LOAD 600 s en LARM) y la espera de admisión. Pasado el plazo la
+    # invocación falla como PROVIDER_UNAVAILABLE reintentable.
+    lease_acquire_timeout_seconds: float = Field(default=660.0, gt=0)
+    lease_ttl_seconds: int = Field(default=120, ge=30, le=600)
+    # Perfil de arranque: por nombre (lo resuelve GET /launch-profiles) o por
+    # identificador exacto, que manda si se da.
+    launch_profile: Literal["ECO", "BALANCED", "PERFORMANCE", "LONG_CONTEXT", "CUSTOM"] = "BALANCED"
+    launch_profile_id: str | None = Field(default=None, pattern=_UUID7_PATTERN)
+    # Plazo HTTP de la llamada al runtime a través del endpoint de la lease.
+    inference_timeout_seconds: float = Field(default=float(DEFAULT_TASK_TIMEOUT_SECONDS), gt=0)
+    # Canal local de credenciales de endpoint (contrato LARM 04). None deriva el
+    # nombre del SID del usuario actual: \\.\pipe\LARM-{sha256(SID)[0:16]}-credentials.
+    credentials_pipe: str | None = Field(default=None, max_length=256)
+    credentials_pipe_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_loopback_endpoint(self) -> LarmConfig:
+        parsed = urlparse(self.endpoint)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("larm.endpoint must be an http(s) URL")
+        if parsed.hostname.lower() not in _LARM_LOOPBACK_HOSTS:
+            raise ValueError("larm.endpoint must be loopback: LARM does not accept LAN by default")
+        self.endpoint = self.endpoint.rstrip("/")
+        if self.api_key_env is not None and not self.api_key_env.strip():
+            self.api_key_env = None
+        return self
+
+
 class ProvidersConfig(BaseModel):
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
@@ -841,7 +946,7 @@ class ProvidersConfig(BaseModel):
         ids = [item.id.lower() for item in self.custom]
         if len(ids) != len(set(ids)):
             raise ValueError("custom provider ids must be unique")
-        reserved = {"ollama", "deepseek", "bootstrap"}
+        reserved = {"ollama", "deepseek", "bootstrap", "larm"}
         if reserved.intersection(ids):
             raise ValueError("custom provider ids cannot use reserved provider names")
         return self
@@ -903,6 +1008,7 @@ class BrokerConfig(BaseModel):
     health: HealthConfig = Field(default_factory=HealthConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    larm: LarmConfig = Field(default_factory=LarmConfig)
 
 
 def local_memory_pool(config: BrokerConfig) -> Literal["vram", "unified"]:

@@ -11,3 +11,6 @@
 .coverage.*
 /htmlcov/
 /coverage.xml
+
+# Certificado y clave TLS del broker (activar_https_broker.bat)
+/certs/

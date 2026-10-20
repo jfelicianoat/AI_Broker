@@ -10,6 +10,9 @@ server:
   allow_unauthenticated_lan: false
   publish_session_token: keyring
   session_token_keyring_username: session_admin_token
+  tls_certfile: certs/server.crt
+  tls_keyfile: certs/server.key
+  tls_loopback_http: false
 persistence:
   database: state/broker.db
   journal_mode: WAL
@@ -84,6 +87,45 @@ mcp:
     timeout_seconds: 120.0
     preload: true
   startup_timeout_seconds: 60.0
+system1:
+  enabled: true
+  provider_priority: [ollama_system1, laya_mcp]
+  timeout_seconds: 30.0
+  fallback_policy: provider_then_current
+  laya:
+    server_id: laya
+    tool: laya_predict
+    model: multilingual
+    max_input_tokens: 300
+  ollama:
+    model: nimble:latest
+    max_output_tokens: 512
+    keep_loaded: true
+  default_threshold:
+    confidence: 0.85
+    min_margin: 0.15
+  thresholds:
+    goal_completion:
+      confidence: 0.97
+      min_margin: 0.15
+      instructions: Has every required part of the goal been completed and verified?
+    semantic_routing:
+      confidence: 0.90
+      min_margin: 0.15
+    ranking:
+      confidence: 0.85
+      min_margin: 0.15
+    agora_review_gate:
+      confidence: 0.97
+      min_margin: 0.15
+  routing:
+    enabled: true
+    shadow_mode: true
+    # Initial experimental tiers; effective routing requires validation.
+    model_tiers:
+      ollama/local/gemma4:12b: simple
+      ollama/local/qwen3-coder:30b: medium
+      ollama/local/ornith-1.5:35b: complex
 resources:
   local_vram_budget_gb: 64.0
   vram_safety_margin_gb: 2.0
@@ -131,17 +173,6 @@ task_affinity:
   - '*detector*'
   - '*calibration*'
   exclude_by_task_type:
-    code: []
-    long_context:
-    - '*-coder*'
-    - '*_coder*'
-    - '*starcoder*'
-    - '*codestral*'
-    - '*codegemma*'
-    - '*codellama*'
-    - '*-code-*'
-    - '*-code'
-    - '*-code:*'
     prose:
     - '*-coder*'
     - '*_coder*'
@@ -152,6 +183,17 @@ task_affinity:
     - '*-code-*'
     - '*-code'
     - '*-code:*'
+    long_context:
+    - '*-coder*'
+    - '*_coder*'
+    - '*starcoder*'
+    - '*codestral*'
+    - '*codegemma*'
+    - '*codellama*'
+    - '*-code-*'
+    - '*-code'
+    - '*-code:*'
+    code: []
 strategy_router:
   enabled: true
   heuristic_classifier: true
@@ -2300,6 +2342,20 @@ providers:
       compatibility_error: null
       features: {}
       features_checked_at: null
+    - name: deepseek-ai/deepseek-v4.1-flash
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: compatible
+      compatibility_checked_at: '2026-09-30T21:38:58.501780+00:00'
+      compatibility_error: null
+      features:
+        vision: true
+        json_mode: true
+        tools: true
+      features_checked_at: '2026-09-30T21:41:19.878952+00:00'
   - id: HCNSEC
     enabled: true
     adapter: openai_compatible
@@ -2975,11 +3031,9 @@ providers:
       output_cost_per_million: 0.0
       capabilities:
       - completion
-      compatibility: incompatible
-      compatibility_checked_at: '2026-09-24T21:19:22.552395+00:00'
-      compatibility_error: 'HTTP 400 en http://127.0.0.1:8888/v1/chat/completions:
-        {"error":{"message":"No model loaded. Call POST /inference/load first. Or
-        enable Model auto-switch (Settings > API) to load a requested model automatically.","type":"invalid_request_error","param":null,"code":null}}'
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
       features: {}
       features_checked_at: null
     - name: ollama/ornith-1.5:35b
@@ -3159,6 +3213,17 @@ providers:
       features: {}
       features_checked_at: null
     - name: ollama/nemotron-3-nano:latest
+      context_window: 128000
+      input_cost_per_million: 0.0
+      output_cost_per_million: 0.0
+      capabilities:
+      - completion
+      compatibility: unknown
+      compatibility_checked_at: null
+      compatibility_error: null
+      features: {}
+      features_checked_at: null
+    - name: ollama/nimble:latest
       context_window: 128000
       input_cost_per_million: 0.0
       output_cost_per_million: 0.0

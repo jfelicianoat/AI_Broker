@@ -48,6 +48,20 @@
           </select>
           <p class="field-hint">Describirlas es, con diferencia, la parte más lenta de la conversión. Solo afecta a las figuras dentro de un documento.</p>
         </label>
+        <label class="field">
+          <span>Privacidad del fichero</span>
+          <select name="data_classification">
+            <option value="local_only">Solo en este equipo</option>
+            <option value="confidential">Confidencial — solo en este equipo</option>
+            <option value="internal">Uso interno</option>
+            <option value="public">Público</option>
+          </select>
+          <p class="field-hint">Las tareas que usen este fichero respetarán su permiso de privacidad.</p>
+        </label>
+        <div class="field">
+          <label><input type="checkbox" name="cloud_allowed" value="true"> Autorizo usar servicios en la nube con este fichero</label>
+          <p class="field-hint">Sin marcar, el contenido se procesa solo en este equipo. Para autorizar la nube elige «Uso interno» o «Público». El permiso incluye imágenes y texto enviados para describirlas.</p>
+        </div>
         <div class="field">
           <label><input type="checkbox" name="ocr" value="true"> Reconocer el texto de la imagen (OCR)</label>
           <p class="field-hint">Solo para imágenes sueltas. Sin marcar, la imagen se adjunta tal cual y la mira un modelo con visión; marcado, además se extrae el texto que haya dentro y queda disponible como Markdown.</p>

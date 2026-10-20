@@ -209,6 +209,47 @@ _OCR_TERMS_RE = _word_pattern(_OCR_TERMS)
 _OCR_PHRASES_RE = re.compile("|".join(re.escape(_fold(item)) for item in _OCR_PHRASES))
 
 
+# Envoltorios que llevan la petición o sus instrucciones. Cualquier otro bloque
+# etiquetado (<transcripcion>, <fragmento>, <documento>…) es material sobre el
+# que trabajar, y lo que diga no es un encargo: una transcripción de YouTube
+# que menciona "generar vídeos, imágenes" tumbaba los apuntes con
+# IMAGE_GENERATION_UNSUPPORTED (task_23535692…, task_a684676d…).
+_INSTRUCTION_WRAPPERS = frozenset({
+    "user_request", "system_instructions", "instructions", "instrucciones",
+    "request", "peticion", "task", "tarea", "prompt",
+})
+_TAGGED_BLOCK_RE = re.compile(r"<(\w+)(?:\s[^>]*)?>(.*?)</\1>", re.DOTALL)
+
+# "Tiene pinta de ser IA" no le pide a nadie que pinte nada.
+_PINTA_NOUN_RE = re.compile(
+    r"(?<!\w)(?:tiene|tienen|tenia|buena|mala|que|la|una|esa|esta|menuda)\s+pinta(?!\w)"
+)
+
+
+def petition_text(prompt: str) -> str:
+    """Solo las palabras de quien pide: sin contexto, adjuntos ni datos fuente.
+
+    Más estricto que `request_text`, y por eso solo lo usan las intenciones de
+    imagen y OCR: ahí lo que importa es qué se pide que SALGA, y el contenido
+    de un documento o una transcripción no lo decide. Para el tipo de tarea sí
+    cuenta (un .py adjunto hace de la tarea una de código).
+    """
+    # Import diferido por el mismo ciclo que en classify_task_type.
+    from app.ingestion.service import ATTACHED_DOCS_SENTINEL
+
+    text = request_text(prompt).split(ATTACHED_DOCS_SENTINEL, 1)[0]
+
+    def unwrap(match: re.Match[str]) -> str:
+        return match.group(2) if match.group(1).lower() in _INSTRUCTION_WRAPPERS else " "
+
+    # Hasta punto fijo: el bloque de datos que va dentro de <user_request>
+    # solo queda al descubierto cuando una pasada anterior ha abierto el
+    # envoltorio.
+    while (unwrapped := _TAGGED_BLOCK_RE.sub(unwrap, text)) != text:
+        text = unwrapped
+    return text
+
+
 def classify_ocr_intent(request: TaskCreateRequest) -> bool:
     """True si lo que se pide es el texto que hay dentro de la imagen.
 
@@ -216,7 +257,7 @@ def classify_ocr_intent(request: TaskCreateRequest) -> bool:
     positivo solo hace que se intente un OCR de más, mientras que el falso
     negativo deja la tarea sin respuesta cuando no hay modelo con visión.
     """
-    text = _fold(request_text(request.content.prompt))
+    text = _fold(petition_text(request.content.prompt))
     return bool(_OCR_TERMS_RE.search(text) or _OCR_PHRASES_RE.search(text))
 
 
@@ -229,11 +270,11 @@ def classify_image_intent(request: TaskCreateRequest) -> str | None:
     tratarla como generación la tumbaría con un error sobre modelos de imagen
     en vez de dejar que el modelo pida lo que falta.
     """
-    text = _fold(request_text(request.content.prompt))
+    text = _fold(petition_text(request.content.prompt))
     has_image = bool(getattr(request, "inline_images", None))
     if has_image and (_IMAGE_EDIT_RE.search(text) or _IMAGE_EDIT_PHRASE_RE.search(text)):
         return "edit"
-    if _IMAGE_ONLY_VERB_RE.search(text) or _IMAGE_CREATE_RE.search(text):
+    if _IMAGE_ONLY_VERB_RE.search(_PINTA_NOUN_RE.sub(" ", text)) or _IMAGE_CREATE_RE.search(text):
         return "generate"
     return None
 

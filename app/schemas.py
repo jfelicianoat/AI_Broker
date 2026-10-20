@@ -246,6 +246,19 @@ def classification_allows_cloud(classification: DataClassification) -> bool:
     return classification not in LOCAL_ONLY_CLASSIFICATIONS
 
 
+class FilePrivacyPolicy(StrictBaseModel):
+    """Permiso del documento, elegido antes de cualquier conversión."""
+
+    data_classification: DataClassification = DataClassification.local_only
+    cloud_allowed: bool = False
+
+    @model_validator(mode="after")
+    def validate_document_privacy(self) -> FilePrivacyPolicy:
+        if self.cloud_allowed and not classification_allows_cloud(self.data_classification):
+            raise ValueError("Un documento confidencial o solo local no puede autorizar el uso de la nube")
+        return self
+
+
 # Adjuntos de fichero ingeridos por el broker (POST /api/v1/files). El único
 # tipo soportado: referencia por file_id a un fichero ya convertido a Markdown.
 BROKER_FILE_ATTACHMENT_TYPE = "broker_file"
@@ -717,7 +730,10 @@ class TaskCreateRequest(StrictBaseModel):
                 # velocidad: el catálogo cloud entra en la selección.
                 requirements.cloud_allowed = True
         else:
-            local_provider_names = {"ollama", "lmstudio"}
+            # `larm` es local por contrato: su API y el endpoint de cada lease
+            # son loopback, y el provider rechaza cualquier otro endpoint antes
+            # de enviar nada (app.providers.larm).
+            local_provider_names = {"ollama", "lmstudio", "larm"}
             target = requirements.target_model
             if target is not None and (
                 target.provider.lower() not in local_provider_names
@@ -839,6 +855,11 @@ class ExecutionFingerprint(StrictBaseModel):
 
     hash: str
     components: dict[str, ExecutionFingerprintComponent] = Field(default_factory=dict)
+    # Identidad técnica que no cabe en los componentes fijos, bajo una clave
+    # versionada (hoy `larm.v1`: variante, runtime y backend efectivos de una
+    # lease LARM). Ausente en todo lo que no sirve LARM: aditivo, sin cambiar
+    # los componentes que ya leen los clientes 2.11.
+    extensions: dict[str, dict[str, Any]] | None = None
 
 
 # Estado de un parámetro de generación en la petición que llegó al proveedor.
@@ -1304,9 +1325,18 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # El entregable de la tarea se identifica en /artifacts con `final: true`,
     # y esa es la vía canónica para recogerlo (`result` sigue sin contrato).
     canonical_artifacts: bool = False
+    # --- Puente LARM (aditivo; contract_version sigue en 2.11) ----------------
+    # El broker resuelve modelos locales gestionados por LARM: target exacto
+    # {provider: "larm", deployment: "local", model: <variant_id>}, servido con
+    # lease. `false` = puente apagado o LARM sin catálogo ahora mismo; entonces
+    # no hay modelos `larm` en /api/v1/models.
+    local_runtime_resolver: bool = False
+    # Versión del contrato Broker–LARM que habla el catálogo de LARM ("1.0").
+    # None mientras el puente no esté anunciado.
+    larm_contract_version: str | None = None
 
 
-class FileAcceptedResponse(StrictBaseModel):
+class FileAcceptedResponse(FilePrivacyPolicy):
     file_id: str
     status: FileStatus
     filename: str
@@ -1324,9 +1354,10 @@ class FileAcceptedResponse(StrictBaseModel):
     # ya en `ready` (no se convierte); con `true` pasa por el carril y hay que
     # esperar a que termine, como cualquier otra conversión.
     ocr: bool = False
+    privacy_policy_known: bool = True
 
 
-class FileStateResponse(StrictBaseModel):
+class FileStateResponse(FilePrivacyPolicy):
     file_id: str
     status: FileStatus
     filename: str
@@ -1344,6 +1375,7 @@ class FileStateResponse(StrictBaseModel):
     describe_images: bool = False
     # Si el Markdown de esta imagen es el texto que se le reconoció.
     ocr: bool = False
+    privacy_policy_known: bool = True
 
 
 class LaneOccupancy(StrictBaseModel):

@@ -4,9 +4,8 @@ import argparse
 import os
 import secrets
 
-import uvicorn
-
-from app.config import load_config
+from app.config import WILDCARD_HOSTS, load_config
+from app.listeners import ListenerConfigError, plan_listeners, serve
 from app.main import create_app
 
 
@@ -26,6 +25,11 @@ def main() -> int:
     config = load_config(args.config)
     host = args.host or config.server.host
     port = args.port or config.server.port
+    try:
+        listeners = plan_listeners(config.server, host, port)
+    except ListenerConfigError as exc:
+        raise SystemExit(f"No se puede arrancar: {exc}") from exc
+    scheme = "https" if config.server.tls_enabled else "http"
     # Token admin efímero: se genera uno nuevo en cada arranque y se publica en
     # la variable de entorno que resolve_admin_token consulta con máxima
     # prioridad (por encima del keyring). Si la variable ya viene definida
@@ -41,8 +45,15 @@ def main() -> int:
         print("=" * 58)
         print("  Panel:")
         print()
-        print(f"    http://{host}:{port}/dashboard")
+        # 0.0.0.0 no se puede abrir en un navegador: en esta máquina es loopback.
+        panel_host = "127.0.0.1" if host in WILDCARD_HOSTS else host
+        print(f"    {scheme}://{panel_host}:{port}/dashboard")
         print()
+        if len(listeners) > 1:
+            print("  Escuchas:")
+            for listener in listeners:
+                print(f"    {listener.url}")
+            print()
         print(f"  Token de administracion ({origen}):")
         print()
         print(f"    {token}")
@@ -53,12 +64,7 @@ def main() -> int:
     app = create_app(config, config_path=args.config)
     # Al pasar la instancia (no un import string) Uvicorn corre en un único
     # proceso; el broker asume un solo worker por su estado en SQLite.
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level=args.log_level,
-    )
+    serve(app, listeners, config.server, args.log_level)
     return 0
 
 

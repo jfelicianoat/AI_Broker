@@ -19,6 +19,7 @@ from typing import Any
 
 from app.config import BrokerConfig
 from app.model_capabilities import vision_evidence
+from app.schemas import DataClassification, classification_allows_cloud, is_local_deployment
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,9 @@ def select_vision_target(
     config: BrokerConfig,
     catalog: list[dict[str, Any]],
     ranked_names: list[str] | None = None,
+    *,
+    data_classification: DataClassification = DataClassification.local_only,
+    cloud_allowed: bool = False,
 ) -> VisionTarget | None:
     """Mejor modelo de visión disponible, o None si no hay ninguno.
 
@@ -88,11 +92,25 @@ def select_vision_target(
         if endpoint is None:
             continue
         base_url, api_key, dialect = endpoint
+        provider = str(entry.get("provider") or "")
+        configured_deployment = "local" if provider == "ollama" else "cloud"
+        for custom in config.providers.custom:
+            if custom.id == provider:
+                configured_deployment = custom.deployment
+                break
+        deployment = str(entry.get("deployment") or configured_deployment)
+        # El catálogo no puede convertir un proveedor remoto en local.
+        if not is_local_deployment(configured_deployment):
+            deployment = configured_deployment
+        if not is_local_deployment(deployment) and not (
+            cloud_allowed and classification_allows_cloud(data_classification)
+        ):
+            continue
         tiers[evidence].append(
             VisionTarget(
                 provider=str(entry.get("provider") or ""),
                 model=str(entry.get("name") or ""),
-                deployment=str(entry.get("deployment") or "local"),
+                deployment=deployment,
                 base_url=base_url,
                 api_key=api_key,
                 dialect=dialect,
