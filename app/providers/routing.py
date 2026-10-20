@@ -42,6 +42,8 @@ from app.providers.base import (
 )
 from app.providers.bootstrap import BootstrapModelProvider
 from app.providers.deepseek import DeepSeekProvider
+from app.providers.larm import LarmProvider
+from app.providers.larm import provider_error as larm_provider_error
 from app.providers.ollama import OllamaProvider
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.schemas import (
@@ -111,10 +113,24 @@ def _matches_any(entry: dict[str, Any], patterns: list[str]) -> bool:
     )
 
 
+def _declared_capabilities(entry: dict[str, Any], required: str) -> set[str]:
+    """Capacidades con las que cuenta la elegibilidad.
+
+    Una entrada sin lista se trata como `completion` por compatibilidad con
+    catálogos antiguos. Las de LARM no: su lista es la que LARM anuncia y el
+    broker sabe servir, y vacía significa exactamente "ninguna" (por ejemplo,
+    una variante que solo habla un protocolo que el broker no conoce)."""
+    declared = entry.get("capabilities")
+    if entry.get("context_admission") == "larm":
+        return set(declared or [])
+    return set(declared or (["completion"] if required == "completion" else []))
+
+
 class RoutedModelProvider:
     def __init__(self, config: BrokerConfig, *, ollama: OllamaProvider | None = None,
                  deepseek: DeepSeekProvider | None = None,
                  custom: dict[str, OpenAICompatibleProvider] | None = None,
+                 larm: LarmProvider | None = None,
                  stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
                  quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
                  fingerprint_recorder: Callable[[tuple[str, str, str], dict[str, Any]], str] | None = None,
@@ -123,6 +139,8 @@ class RoutedModelProvider:
         self.ollama = ollama or OllamaProvider(config)
         self.deepseek = deepseek or DeepSeekProvider(config.providers.deepseek)
         self.custom = custom if custom is not None else self._build_custom_providers(config)
+        # Puente LARM (app.larm): siempre construido, inerte con larm.enabled=false.
+        self.larm = larm or LarmProvider(config)
         # Evidencia operativa para la selección adaptativa (app.model_stats);
         # sin loader el router mantiene el orden del catálogo.
         self._stats_loader = stats_loader
@@ -297,6 +315,7 @@ class RoutedModelProvider:
         await self.ollama.reload_config(config)
         await self.deepseek.reload_config(config.providers.deepseek)
         self.custom = new_custom
+        self.larm = await self.larm.reload_config(config)
         self.prompt_compressor = self._build_prompt_compressor(config)
         self.model_enrichment.reload_settings(config.model_enrichment)
         self._rebuild_inference_slots(config)
@@ -324,6 +343,7 @@ class RoutedModelProvider:
     async def close(self) -> None:
         await self.ollama.close()
         await self.deepseek.close()
+        await self.larm.close()
         for provider in self.custom.values():
             await provider.close()
 
@@ -335,6 +355,8 @@ class RoutedModelProvider:
         if self.config.providers.deepseek.enabled:
             sources.append(self.deepseek)
         sources.extend(self.custom.values())
+        if self.larm.enabled:
+            sources.append(self.larm)
         for source in sources:
             try:
                 result.extend(await source.models())
@@ -416,6 +438,8 @@ class RoutedModelProvider:
             )
             external = item is None or not is_local_deployment(item.deployment)
             sources.append((provider_id, provider, external))
+        if self.larm.enabled:
+            sources.append(("larm", self.larm, False))
 
         now = asyncio.get_running_loop().time()
         checks: dict[str, dict[str, Any]] = {}
@@ -791,6 +815,20 @@ class RoutedModelProvider:
         """
         declared_providers = request.model_requirements.allowed_providers
         catalog = list(await self.models())
+        target = request.model_requirements.target_model
+        # Las variantes LARM solo se sirven por target exacto: no entran en el
+        # ranking adaptativo, ni en System-1, ni en el sondeo en sombra. Con un
+        # target LARM y fallback permitido, el fallback va a los proveedores
+        # normales, nunca a OTRA variante LARM que nadie pidió.
+        catalog = [
+            item for item in catalog
+            if str(item.get("provider") or "").lower() != "larm"
+            or (
+                target is not None
+                and target.provider.lower() == "larm"
+                and item.get("name") == target.model
+            )
+        ]
         if declared_providers is not None:
             # None = sin restricción: entra todo el catálogo configurado y la
             # frontera la pone la clasificación de datos, no una lista fija.
@@ -805,7 +843,7 @@ class RoutedModelProvider:
         required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
         capability_catalog = [
             item for item in catalog
-            if required_capability in set(item.get("capabilities") or (["completion"] if required_capability == "completion" else []))
+            if required_capability in _declared_capabilities(item, required_capability)
         ]
         if self.config.system1.enabled and required_capability == "completion":
             # A native decision model can score choices but cannot write the
@@ -824,7 +862,10 @@ class RoutedModelProvider:
             ]
         context_catalog = [
             item for item in capability_catalog
-            if context_fits_with_capped_output(request, item.get("context_window"))
+            # LARM admite el contexto con los resource_requirements de la
+            # lease; el broker no tiene ventana que comparar y no la inventa.
+            if item.get("context_admission") == "larm"
+            or context_fits_with_capped_output(request, item.get("context_window"))
         ]
         return catalog, capability_catalog, context_catalog
 
@@ -902,6 +943,8 @@ class RoutedModelProvider:
                 ]
             if not request.model_requirements.fallback_allowed:
                 identity = f"{target.provider}/{target.deployment}/{target.model}"
+                if target.provider.lower() == "larm" and not target_available:
+                    raise self._larm_target_error(identity)
                 if target_capable and target_capable[0].get("context_window") is None:
                     raise ProviderError("CONTEXT_WINDOW_UNKNOWN", f"El modelo exacto {identity} no declara su contexto")
                 if target_capable:
@@ -976,6 +1019,27 @@ class RoutedModelProvider:
         return [ModelReference(provider=ranked_catalog[i % len(ranked_catalog)]["provider"],
                                deployment=ranked_catalog[i % len(ranked_catalog)]["deployment"],
                                model=ranked_catalog[i % len(ranked_catalog)]["name"], role=roles[i]) for i in range(count)]
+
+    def _larm_target_error(self, identity: str) -> ProviderError:
+        """Por qué un target LARM exacto no está en el catálogo.
+
+        Distinguir importa: con el puente apagado no hay nada que esperar; con
+        LARM caído, sí (reintentable); y con LARM vivo, la variante no existe o
+        no es BROKER_ELIGIBLE."""
+        if not self.larm.enabled:
+            return ProviderError(
+                "PROVIDER_UNAVAILABLE",
+                f"Modelo exacto no disponible: {identity} (el puente LARM está deshabilitado)",
+            )
+        error = self.larm.resolver.last_error
+        if error is not None:
+            # Misma traducción que una invocación: LARM caído es reintentable;
+            # un contrato distinto o una credencial rechazada, no.
+            return larm_provider_error(error, identity.rsplit("/", 1)[-1])
+        return ProviderError(
+            "MODEL_UNAVAILABLE",
+            f"Modelo exacto no disponible: {identity} (LARM no lo publica como BROKER_ELIGIBLE)",
+        )
 
     async def has_vision_model(self, request: TaskCreateRequest) -> bool:
         """¿Puede ESTA petición contar con un modelo que mire una imagen?
@@ -1323,6 +1387,15 @@ class RoutedModelProvider:
                     raise ProviderError("CLOUD_NOT_ALLOWED", "DeepSeek requiere cloud_allowed=true")
                 self._resolve_catalog_entry(await self.deepseek.models(), model, "DeepSeek")
                 return await self.deepseek.generate(request, model.model, prompt, system=system)
+            if provider_name == "larm":
+                if model.deployment.lower() != "local":
+                    raise ProviderError(
+                        "MODEL_DEPLOYMENT_MISMATCH",
+                        f"Los modelos LARM son locales: {model.deployment}/{model.model}",
+                    )
+                if embedding:
+                    return await self.larm.embed(request, model.model, prompt)
+                return await self.larm.generate(request, model.model, prompt, system=system)
             if provider_name in self.custom:
                 if not request.model_requirements.cloud_allowed and not is_local_deployment(model.deployment):
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"{model.provider} requiere cloud_allowed=true")

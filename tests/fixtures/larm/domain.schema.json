@@ -1,0 +1,3807 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "domain.schema.json",
+  "title": "Registros públicos completos de LARM",
+  "$defs": {
+    "canonical_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upstream_identity": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "possible_duplicates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "name",
+        "upstream_identity",
+        "capabilities",
+        "possible_duplicates"
+      ]
+    },
+    "model_distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "canonical_model_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "upstream_namespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upstream_model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "license_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "canonical_model_id",
+        "source_id",
+        "upstream_namespace",
+        "upstream_model_id",
+        "license_id"
+      ]
+    },
+    "model_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "distribution_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "revision_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "upstream_commit": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "PROVISIONAL",
+            "CANDIDATE",
+            "CURRENT",
+            "RETIRED",
+            "REJECTED",
+            "SUPERSEDED"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "distribution_id",
+        "revision_key",
+        "upstream_commit",
+        "manifest_hash",
+        "state"
+      ]
+    },
+    "model_variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "revision_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "format": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quantization": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "architecture": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bundle_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "DISCOVERED",
+            "SELECTED",
+            "DOWNLOAD_PLANNED",
+            "DOWNLOADING",
+            "DOWNLOADED",
+            "VERIFIED",
+            "PREPARED",
+            "TECHNICALLY_VALIDATED",
+            "AVAILABLE",
+            "RUNNING",
+            "FAILED",
+            "REJECTED",
+            "CORRUPT"
+          ]
+        },
+        "availability": {
+          "type": "string",
+          "enum": [
+            "UNKNOWN",
+            "OFFLINE",
+            "INCOMPATIBLE",
+            "PREPARING",
+            "AVAILABLE",
+            "DEGRADED",
+            "CORRUPT"
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "LARM_MANAGED",
+            "HOST_MANAGED",
+            "EXTERNAL",
+            "SHARED"
+          ]
+        },
+        "promotion": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "CANDIDATE",
+            "TECHNICALLY_APPROVED",
+            "EVALUATION_APPROVED",
+            "DEFAULT",
+            "PINNED",
+            "REJECTED"
+          ]
+        },
+        "system_role": {
+          "type": "string",
+          "enum": [
+            "GENERAL",
+            "SYSTEM1",
+            "AUXILIARY"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "parameter_count": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "maxLength": 19,
+                  "x-maximum-decimal": "9223372036854775807"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "layers": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kv_heads": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "head_dim": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "context_limit": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kv_bits": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model_max_memory_bytes": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$",
+                  "maxLength": 19,
+                  "x-maximum-decimal": "9223372036854775807"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "architecture_metadata_hash": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "parameter_count",
+            "layers",
+            "kv_heads",
+            "head_dim",
+            "context_limit",
+            "kv_bits",
+            "model_max_memory_bytes",
+            "architecture_metadata_hash"
+          ]
+        },
+        "system1_state": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "SYSTEM1_CANDIDATE",
+                "SYSTEM1_TECHNICALLY_VALID",
+                "SYSTEM1_EVALUATED",
+                "SYSTEM1_CERTIFIED",
+                "SYSTEM1_REJECTED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "update_available": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "DISCOVERED",
+            "SELECTED",
+            "DOWNLOAD_PLANNED",
+            "DOWNLOADING",
+            "DOWNLOADED",
+            "VERIFIED",
+            "PREPARED",
+            "TECHNICALLY_VALIDATED",
+            "AVAILABLE",
+            "RUNNING",
+            "OFFLINE",
+            "CORRUPT",
+            "UPDATE_AVAILABLE",
+            "FAILED",
+            "REJECTED"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "revision_id",
+        "format",
+        "quantization",
+        "architecture",
+        "bundle_hash",
+        "lifecycle",
+        "availability",
+        "ownership",
+        "promotion",
+        "system_role",
+        "capabilities",
+        "model_limits",
+        "system1_state",
+        "update_available",
+        "status"
+      ]
+    },
+    "model_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "required_artifact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        },
+        "optional_artifact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        },
+        "manifest_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "INCOMPLETE",
+            "VERIFIED",
+            "CORRUPT"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "variant_id",
+        "required_artifact_ids",
+        "optional_artifact_ids",
+        "manifest_hash",
+        "state"
+      ]
+    },
+    "model_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quantization": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_size": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 19,
+              "x-maximum-decimal": "9223372036854775807"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actual_size": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 19,
+              "x-maximum-decimal": "9223372036854775807"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "variant_id",
+        "filename",
+        "format",
+        "quantization",
+        "expected_size",
+        "actual_size",
+        "sha256",
+        "source_url",
+        "required"
+      ]
+    },
+    "artifact_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision_key": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        },
+        "tool_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "license_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "license_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trust": {
+          "type": "string",
+          "enum": [
+            "UNTRUSTED",
+            "DECLARED",
+            "VERIFIED",
+            "REVOKED"
+          ]
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "artifact_id",
+        "source_id",
+        "revision_key",
+        "parents",
+        "tool_id",
+        "tool_version",
+        "parameters",
+        "license_id",
+        "license_hash",
+        "trust",
+        "actor_id",
+        "evidence_refs"
+      ]
+    },
+    "artifact_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "storage_location_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "relative_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file_size": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 19,
+              "x-maximum-decimal": "9223372036854775807"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ONLINE",
+            "OFFLINE",
+            "CORRUPT",
+            "MISSING",
+            "COPYING",
+            "UNKNOWN"
+          ]
+        },
+        "verified_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "LARM_MANAGED",
+            "HOST_MANAGED",
+            "EXTERNAL",
+            "SHARED"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "artifact_id",
+        "storage_location_id",
+        "relative_path",
+        "file_size",
+        "sha256",
+        "state",
+        "verified_at",
+        "ownership"
+      ]
+    },
+    "model_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapter_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "auth_mode": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "TOKEN",
+            "BEARER",
+            "API_TOKEN",
+            "OAUTH_DEVICE",
+            "OAUTH_AUTH_CODE_PKCE",
+            "BASIC",
+            "SSH",
+            "COOKIE",
+            "GIT_LFS",
+            "WINDOWS_INTEGRATED"
+          ]
+        },
+        "account_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "name",
+        "adapter_id",
+        "base_url",
+        "priority",
+        "enabled",
+        "auth_mode",
+        "account_id",
+        "policy"
+      ]
+    },
+    "model_source_adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "adapter_installation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "source_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "adapter_installation_id",
+        "source_type",
+        "capabilities"
+      ]
+    },
+    "model_source_account": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "credential_reference_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted_license_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "source_id",
+        "credential_reference_id",
+        "display_name",
+        "accepted_license_hashes"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapter_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_version_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channel_policy": {
+          "$ref": "larm.schema.json#/$defs/RuntimeChannelPolicy"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "name",
+        "adapter_id",
+        "capabilities",
+        "default_version_id",
+        "channel_policy"
+      ]
+    },
+    "runtime_adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "adapter_installation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "runtime_family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "adapter_installation_id",
+        "runtime_family",
+        "capabilities"
+      ]
+    },
+    "runtime_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "version_string": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "build": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "stable",
+            "prerelease",
+            "nightly",
+            "commit",
+            "custom"
+          ]
+        },
+        "released_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "promotion": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "CANDIDATE",
+            "DEFAULT",
+            "PINNED",
+            "REJECTED"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "runtime_id",
+        "version_string",
+        "commit",
+        "build",
+        "channel",
+        "released_at",
+        "artifact_hash",
+        "promotion"
+      ]
+    },
+    "runtime_installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "runtime_version_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "storage_location_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relative_path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "PREBUILT_BINARY",
+            "GITHUB_RELEASE",
+            "SOURCE_BUILD",
+            "WINGET",
+            "PIP",
+            "UV",
+            "CONDA",
+            "MAMBA",
+            "NUGET",
+            "WSL",
+            "CONTAINER",
+            "CUSTOM",
+            "MSI_MANAGED",
+            "PYTHON_VENV",
+            "EXTERNAL_ADOPTION"
+          ]
+        },
+        "external_host_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "DISCOVERED",
+            "INSTALL_PLANNED",
+            "INSTALLING",
+            "INSTALLED",
+            "VALIDATING",
+            "VALIDATED",
+            "ACTIVE",
+            "DEGRADED",
+            "BROKEN",
+            "ROLLED_BACK",
+            "FAILED",
+            "RETIRED"
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "LARM_MANAGED",
+            "EXTERNAL"
+          ]
+        },
+        "lock_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "type": "string",
+          "enum": [
+            "DISCOVERED",
+            "INSTALL_PLANNED",
+            "INSTALLING",
+            "INSTALLED",
+            "VALIDATING",
+            "VALIDATED",
+            "FAILED",
+            "RETIRED"
+          ]
+        },
+        "registration_mode": {
+          "type": "string",
+          "enum": [
+            "MANAGED",
+            "ADOPTED",
+            "EXTERNAL"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "runtime_version_id",
+        "storage_location_id",
+        "relative_path",
+        "strategy",
+        "external_host_id",
+        "state",
+        "ownership",
+        "lock_hash",
+        "stage",
+        "registration_mode"
+      ]
+    },
+    "runtime_backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "runtime_installation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "backend_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "driver_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE",
+            "UNKNOWN"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_instances": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "multi_model_support": {
+              "type": "boolean"
+            },
+            "parallel_requests": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "gpu_sharing": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "max_instances",
+            "multi_model_support",
+            "parallel_requests",
+            "gpu_sharing"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "runtime_installation_id",
+        "backend_type",
+        "device_id",
+        "driver_version",
+        "status",
+        "evidence_refs",
+        "limits"
+      ]
+    },
+    "runtime_instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "runtime_installation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "launch_profile_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "CREATED",
+            "STARTING",
+            "LOADING",
+            "READY",
+            "BUSY",
+            "DEGRADED",
+            "FAILED",
+            "STOPPING",
+            "STOPPED",
+            "CRASHED"
+          ]
+        },
+        "pid": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "process_started_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executable_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "execution_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_used_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "LARM_MANAGED",
+            "EXTERNAL"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "runtime_installation_id",
+        "variant_id",
+        "backend_id",
+        "launch_profile_id",
+        "state",
+        "pid",
+        "process_started_at",
+        "executable_hash",
+        "generation",
+        "execution_fingerprint",
+        "last_used_at",
+        "ownership"
+      ]
+    },
+    "external_host": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "host_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credential_reference_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ONLINE",
+            "OFFLINE",
+            "UNKNOWN"
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "EXTERNAL"
+          ]
+        },
+        "observed_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "registration_mode": {
+          "type": "string",
+          "enum": [
+            "MANAGED",
+            "ADOPTED",
+            "EXTERNAL"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "name",
+        "base_url",
+        "host_type",
+        "credential_reference_id",
+        "state",
+        "ownership",
+        "observed_version",
+        "registration_mode"
+      ]
+    },
+    "hardware_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "hardware_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "os": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "edition": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "build": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "architecture": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "edition",
+                "build",
+                "architecture"
+              ]
+            },
+            "cpu": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "vendor": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "physical_cores": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "logical_cores": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "instruction_sets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "vendor",
+                "model",
+                "physical_cores",
+                "logical_cores",
+                "instruction_sets"
+              ]
+            },
+            "ram": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "physical_bytes": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]*)$",
+                      "maxLength": 19,
+                      "x-maximum-decimal": "9223372036854775807"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "usable_bytes": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]*)$",
+                      "maxLength": 19,
+                      "x-maximum-decimal": "9223372036854775807"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "pool_id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "physical_bytes",
+                "usable_bytes",
+                "pool_id"
+              ]
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "GPU",
+                      "NPU"
+                    ]
+                  },
+                  "vendor": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "device_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "luid": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "driver_version": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "dedicated_memory_bytes": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 19,
+                        "x-maximum-decimal": "9223372036854775807"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "shared_memory_bytes": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 19,
+                        "x-maximum-decimal": "9223372036854775807"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "unified_pool_id": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "backends": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "evidence_refs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "vendor",
+                  "device_id",
+                  "luid",
+                  "name",
+                  "driver_version",
+                  "dedicated_memory_bytes",
+                  "shared_memory_bytes",
+                  "unified_pool_id",
+                  "backends",
+                  "evidence_refs"
+                ]
+              }
+            },
+            "dependencies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "hash": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "version",
+                  "hash"
+                ]
+              }
+            },
+            "observed_metrics": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "available_ram_bytes": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]*)$",
+                      "maxLength": 19,
+                      "x-maximum-decimal": "9223372036854775807"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cpu_usage_percent": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "available_ram_bytes",
+                "cpu_usage_percent"
+              ]
+            }
+          },
+          "required": [
+            "os",
+            "cpu",
+            "ram",
+            "devices",
+            "dependencies",
+            "observed_metrics"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "probed_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "hardware_fingerprint",
+        "snapshot",
+        "evidence_refs",
+        "probed_at"
+      ]
+    },
+    "storage_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "root_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "volume_guid": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "drive_letter": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unc_path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "filesystem": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storage_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capacity_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 19,
+          "x-maximum-decimal": "9223372036854775807"
+        },
+        "free_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 19,
+          "x-maximum-decimal": "9223372036854775807"
+        },
+        "reserved_bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 19,
+          "x-maximum-decimal": "9223372036854775807"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "auto_placement": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ONLINE",
+            "OFFLINE",
+            "READ_ONLY",
+            "LOW_SPACE",
+            "DEGRADED",
+            "MISSING",
+            "ERROR",
+            "UNKNOWN"
+          ]
+        },
+        "last_seen_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "volume_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "performance_class": {
+          "type": "string",
+          "enum": [
+            "NVME",
+            "SSD",
+            "HDD",
+            "NETWORK",
+            "REMOVABLE",
+            "UNKNOWN"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "name",
+        "root_path",
+        "canonical_path",
+        "volume_guid",
+        "drive_letter",
+        "unc_path",
+        "filesystem",
+        "storage_type",
+        "capacity_bytes",
+        "free_bytes",
+        "reserved_bytes",
+        "priority",
+        "auto_placement",
+        "state",
+        "last_seen_at",
+        "volume_key",
+        "performance_class"
+      ]
+    },
+    "compatibility_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "runtime_version_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "hardware_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "launch_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "COMPATIBLE",
+            "COMPATIBLE_WITH_LIMITATIONS",
+            "EXPERIMENTAL",
+            "CONVERSION_REQUIRED",
+            "RUNTIME_REQUIRED",
+            "BACKEND_REQUIRED",
+            "INCOMPATIBLE",
+            "UNKNOWN"
+          ]
+        },
+        "hard_gates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "UNKNOWN"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "status",
+              "reason",
+              "evidence_refs"
+            ]
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "technical_fit": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "variant_id",
+        "runtime_version_id",
+        "backend_id",
+        "hardware_fingerprint",
+        "launch_profile_hash",
+        "status",
+        "hard_gates",
+        "limitations",
+        "technical_fit",
+        "evidence_refs"
+      ]
+    },
+    "launch_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "ECO",
+            "BALANCED",
+            "PERFORMANCE",
+            "LONG_CONTEXT",
+            "CUSTOM"
+          ]
+        },
+        "parameters": {
+          "$ref": "larm.schema.json#/$defs/LaunchParameters"
+        },
+        "profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "backend_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "name",
+        "parameters",
+        "profile_hash",
+        "backend_id"
+      ]
+    },
+    "runtime_lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "owner_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instance_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "REQUESTED",
+            "ADMITTING",
+            "ACTIVE",
+            "EXPIRING",
+            "EXPIRED",
+            "RELEASED",
+            "FAILED"
+          ]
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "constraints": {
+          "$ref": "larm.schema.json#/$defs/Constraints"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "owner_id",
+        "request_id",
+        "instance_id",
+        "generation",
+        "state",
+        "expires_at",
+        "endpoint_id",
+        "constraints"
+      ]
+    },
+    "inference_endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "instance_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "protocol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credential_reference_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "qualification": {
+          "type": "string",
+          "enum": [
+            "UNTESTED",
+            "QUALIFIED",
+            "FAILED"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "instance_id",
+        "protocol",
+        "protocol_profile_hash",
+        "base_url",
+        "credential_reference_id",
+        "capabilities",
+        "qualification",
+        "evidence_refs"
+      ]
+    },
+    "download_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "storage_location_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "plan_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "PLANNED",
+            "QUEUED",
+            "RUNNING",
+            "PAUSING",
+            "PAUSED",
+            "VERIFYING",
+            "COMPLETED",
+            "CANCELLING",
+            "CANCELLED",
+            "FAILED"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "progress": {
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "$ref": "larm.schema.json#/$defs/DownloadPriority"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "variant_id",
+        "storage_location_id",
+        "plan_hash",
+        "state",
+        "attempt",
+        "progress",
+        "error",
+        "priority"
+      ]
+    },
+    "transformation_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "input_variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "output_variant_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adapter_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "tool_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "plan_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "PLANNED",
+            "QUEUED",
+            "RUNNING",
+            "PAUSING",
+            "PAUSED",
+            "VERIFYING",
+            "COMPLETED",
+            "CANCELLING",
+            "CANCELLED",
+            "FAILED",
+            "FAILED_RECOVERABLE"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "input_variant_id",
+        "output_variant_id",
+        "adapter_id",
+        "tool_version",
+        "parameters",
+        "plan_hash",
+        "state",
+        "attempt",
+        "error"
+      ]
+    },
+    "technical_benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "execution_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "suite_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suite_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "fixture_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "settings_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "raw_artifact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "metrics": {
+          "type": "object"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PLANNED",
+            "RUNNING",
+            "PASS",
+            "FAIL",
+            "INCONCLUSIVE",
+            "BLOCKED_REAL"
+          ]
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "variant_id",
+        "execution_fingerprint",
+        "suite_id",
+        "suite_hash",
+        "fixture_hash",
+        "settings_hash",
+        "raw_artifact_refs",
+        "metrics",
+        "status",
+        "started_at",
+        "completed_at"
+      ]
+    },
+    "evaluation_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "source_system": {
+          "type": "string",
+          "minLength": 1
+        },
+        "external_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "experiment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "suite_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dataset_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "execution_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scale": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "HIGHER_BETTER",
+                "LOWER_BETTER"
+              ]
+            },
+            "unit": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "minimum",
+            "maximum",
+            "direction",
+            "unit"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "FAIL",
+            "INCONCLUSIVE",
+            "BLOCKED",
+            "EXPIRED"
+          ]
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "issued_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "source_system",
+        "external_id",
+        "source_version",
+        "experiment_id",
+        "suite_hash",
+        "dataset_hash",
+        "variant_id",
+        "execution_fingerprint",
+        "score",
+        "scale",
+        "status",
+        "artifact_refs",
+        "issued_at",
+        "signature"
+      ]
+    },
+    "certification": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "evaluation_reference_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "variant_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "runtime_version_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "backend_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "hardware_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "launch_profile_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "suite_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "VALID",
+            "EXPIRED",
+            "REVOKED"
+          ]
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "evaluation_reference_id",
+        "variant_id",
+        "runtime_version_id",
+        "backend_id",
+        "hardware_fingerprint",
+        "launch_profile_hash",
+        "suite_hash",
+        "status",
+        "expires_at"
+      ]
+    },
+    "source_watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "query": {
+          "type": "object"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "etag": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy": {
+          "type": "object"
+        },
+        "next_run_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "source_id",
+        "query",
+        "cursor",
+        "etag",
+        "interval_seconds",
+        "policy",
+        "next_run_at",
+        "enabled"
+      ]
+    },
+    "notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "dedupe_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "message_code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "action": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "read_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "dedupe_key",
+        "severity",
+        "message_code",
+        "resource_id",
+        "action",
+        "read_at"
+      ]
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "maxLength": 19,
+          "x-maximum-decimal": "9223372036854775807"
+        },
+        "event_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resource_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resource_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "resource_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correlation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "payload": {
+          "type": "object"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "event_id",
+        "event_type",
+        "actor_id",
+        "resource_type",
+        "resource_id",
+        "resource_version",
+        "correlation_id",
+        "payload",
+        "occurred_at"
+      ]
+    },
+    "credential_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "service": {
+          "type": "string",
+          "minLength": 1
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "WINDOWS_CREDENTIAL_MANAGER"
+          ]
+        },
+        "secret_type": {
+          "type": "string",
+          "enum": [
+            "TOKEN",
+            "PASSWORD",
+            "PRIVATE_KEY",
+            "COOKIE",
+            "OAUTH_REFRESH"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "service",
+        "username",
+        "backend",
+        "secret_type",
+        "scopes",
+        "expires_at"
+      ]
+    },
+    "adapter_installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "row_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "adapter_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "family": {
+          "type": "string",
+          "enum": [
+            "runtime",
+            "source",
+            "protocol",
+            "transformation",
+            "benchmark"
+          ]
+        },
+        "package_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "publisher": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trust": {
+          "type": "string",
+          "enum": [
+            "UNTRUSTED",
+            "VERIFIED",
+            "REVOKED"
+          ]
+        },
+        "manifest": {
+          "type": "object"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "STAGED",
+            "VERIFIED",
+            "INSTALLED",
+            "VALIDATED",
+            "RETIRED",
+            "FAILED"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "updated_at",
+        "row_version",
+        "metadata",
+        "adapter_id",
+        "version",
+        "family",
+        "package_hash",
+        "publisher",
+        "trust",
+        "manifest",
+        "state"
+      ]
+    }
+  }
+}

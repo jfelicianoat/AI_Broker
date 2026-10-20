@@ -59,6 +59,8 @@ Devuelve, entre otros:
 | `prompt_compression_echo` | `bool` | Si cada invocación declara la compresión que se le aplicó de verdad (§8.5) |
 | `canonical_artifacts` | `bool` | Si el entregable viene marcado con `final: true` en `/artifacts` (§8.3) |
 | `max_active_workflows` | `int` | Cuántas inferencias corren a la vez (es 1 por invariante) |
+| `local_runtime_resolver` | `bool` | Si puedes pedir modelos locales gestionados por LARM con target exacto (§16). `false` con el puente apagado o con LARM sin responder |
+| `larm_contract_version` | `string \| null` | Versión del contrato Broker–LARM (`"1.0"`). `null` mientras el puente no esté anunciado |
 
 **Ojo con los tres campos `{string: [string]}`.** Son **objetos**, no listas. Es el error de integración más común: un cliente con tipado estricto que declara `ingestion_formats` como array falla al deserializar la respuesta entera y se queda sin ninguna capacidad — no solo sin la de ficheros. Si lo que necesitas es la lista plana de extensiones para filtrar un selector de ficheros, aplana tú los valores del mapa.
 
@@ -265,7 +267,7 @@ Todo lo demás tiene default. Respuesta `202`:
 | `model_requirements` | objeto | ver §4 y §5.5 | |
 | `execution` | objeto | `single`/`fast` | §6 |
 | `risk` | objeto | `internal` | §4 |
-| `priority` | int 0–1000 | `100` | **Menor valor = antes en la cola** |
+| `priority` | int 0–1000 | `100` | **Menor valor = antes en la cola.** Al encolar, la tarea entra delante de la primera pendiente menos urgente; entre iguales, orden de llegada. Un agente en marcha le cede el turno entre iteraciones. Ver §5.1.1 |
 | `prompt_compression` | `off` \| `light` \| `medium` \| `aggressive` \| null | `null` | `null` = usar la política global del broker |
 | `group` | string \| null | `null` | Etiqueta de esta tarea, para que otras puedan esperarla en bloque. Ver §5.6 |
 | `depends_on` | lista de task_id | `[]` | Tareas que deben terminar antes que esta. Máximo 64 |
@@ -274,6 +276,19 @@ Todo lo demás tiene default. Respuesta `202`:
 | `auxiliary_invocations` | bool | `true` | `false` = solo el modelo que responde ve este contenido. Ver §8.4 |
 
 La validación es estricta (`extra="forbid"`): **un campo que no exista en el contrato hace fallar la petición con `422`**, no se ignora. Es deliberado — un typo en un nombre de campo es un error silencioso caro.
+
+### 5.1.1 Prioridad
+
+El broker ejecuta **una inferencia a la vez**; `priority` decide quién va después. Úsala para las apps que necesitan respuesta rápida (p. ej. `10`) y deja `100` para el trabajo normal, o sube a `500` el trabajo de fondo que puede esperar.
+
+- **Se aplica al encolar.** La tarea se coloca delante de la primera tarea pendiente con número mayor; las de igual prioridad conservan el orden de llegada.
+- **Un agente cede el turno entre iteraciones.** Si la tarea en marcha es `strategy: agent` (explícita, no `auto`), al cerrar cada iteración mira si espera algo más urgente; si lo hay, congela su conversación, vuelve a la cola detrás de lo urgente y luego sigue donde quedó, sin repetir trabajo. Se ve como el evento `agent.yielded`. El operador puede apagarlo con `processing.yield_to_urgent_tasks`.
+- **Un `mixture_of_agents` cede entre oleadas.** Con `strategy: mixture_of_agents` explícita, cede al cerrar cada oleada de proponentes (en `fast`, entre un proponente y el siguiente) y, si le queda segunda ronda, tras la primera síntesis. Guarda las propuestas, los modelos elegidos y el plan, y al retomar no repite ninguna llamada ni vuelve a elegir modelos. Se ve como los eventos `consensus.yielded` y `consensus.resumed`.
+- **Un map-reduce cede entre fragmentos y entre reducciones.** Con `strategy: single` explícita y `long_context: "map_reduce"`, cede al terminar cada fragmento y cada grupo de reducción. Guarda el modelo, la ventana y los resultados parciales; al retomar vuelve a trocear el documento y, si el troceado no coincide con el guardado (por ejemplo, porque el adjunto se convirtió distinto), descarta lo guardado y empieza de cero. Se ve como los eventos `chunking.yielded`, `chunking.resumed` y, si descarta, `chunking.checkpoint_discarded`.
+- **El resto no se interrumpe:** una tarea `single` normal es una sola llamada y corre hasta el final. Tampoco se corta una llamada en curso: la iteración del agente, la oleada, la síntesis, el fragmento o la reducción terminan antes de ceder. La segunda ronda de un consenso y la reducción final de un map-reduce tampoco ceden.
+- **Pasa por delante de una reserva por memoria** cuando es más urgente que la tarea reservada y esta aún no puede reintentar.
+- Al **reanudar** tras `waiting_for_tools`, la tarea vuelve según su prioridad y su hora de llegada.
+- El **reordenado manual** del panel o de la API tiene la última palabra: mover una tarea a mano la deja donde se dijo.
 
 ### 5.2 Idempotencia
 
@@ -527,6 +542,8 @@ Content-Type: multipart/form-data
 file=@informe.pdf
 describe_images=false        # opcional
 ocr=false                    # opcional, solo tiene efecto en imágenes
+data_classification=local_only # predeterminado: solo en este equipo
+cloud_allowed=false          # predeterminado: sin autorización de nube
 ```
 
 ```json
@@ -536,11 +553,37 @@ ocr=false                    # opcional, solo tiene efecto en imágenes
   "created": true,
   "status_url": "/api/v1/files/file_abc123",
   "describe_images": false,
-  "ocr": false
+  "ocr": false,
+  "data_classification": "local_only",
+  "cloud_allowed": false,
+  "privacy_policy_known": true
 }
 ```
 
-`created: false` significa que ese fichero ya estaba ingerido (dedupe por SHA-256) y no se vuelve a convertir.
+`created: false` significa que el registro del fichero ya existía. Si sus archivos
+están íntegros se reutiliza; si faltan o están dañados se repara conservando el
+`file_id` y puede volver a convertirse. Comprueba siempre `status` y espera a
+`ready` antes de adjuntarlo.
+
+#### Permiso de nube del documento
+
+Omitir los campos de privacidad significa procesamiento local. Para autorizar
+la nube, envía **ambos** `data_classification=internal` (o `public`) y
+`cloud_allowed=true`. `confidential` y `local_only` rechazan ese permiso con
+`422 FILE_PRIVACY_INVALID`. El permiso cubre el documento y las figuras y el
+texto enviados para describirlas.
+
+Una tarea también respeta el permiso de sus adjuntos. Un documento local
+impide que la tarea use nube; si pide expresamente un destino o herramienta
+externa incompatible, responde `409 ATTACHED_FILE_PRIVACY_CONFLICT`. Con varios
+documentos se aplica la restricción más fuerte. El permiso de nube de un archivo
+no anula la clasificación local de la tarea.
+
+`privacy_policy_known=false` identifica documentos anteriores al registro de
+esta política. Se restringen a uso local futuro, sin afirmar cómo se convirtieron
+anteriormente. Para cambiar la autorización de una subida, sube otra copia con
+la política deseada: no se modifica el permiso de un registro compartido con
+tareas anteriores.
 
 #### `describe_images` — el interruptor de las figuras
 
@@ -810,6 +853,8 @@ Por eso cada invocación y cada entrada del catálogo (`/api/v1/models/availabil
 
 El conjunto de componentes es fijo: `provider`, `deployment`, `model` (capa declarada); `digest`, `quantization`, `parameter_size`, `family`, `tokenizer`, `chat_template`, `runtime`, `runtime_version` (capa técnica); `system_fingerprint`, `remote_model`, `api_version` (lo que dice de sí mismo un proveedor remoto). Anunciado en `capabilities.execution_fingerprint`.
 
+**Extensiones versionadas.** Una huella puede traer además `extensions`, un objeto cuyas claves llevan versión. Hoy solo existe `larm.v1`, en los modelos servidos por LARM (§16): variante, huella técnica de LARM (`fingerprint_hash`) y sus componentes con el estado que les da LARM (`VERIFIED`, `DECLARED`, `UNAVAILABLE`), entre ellos el backend efectivo. `source: "lease"` indica que es la huella con la que se sirvió de verdad; `"catalog"`, la anunciada. Las extensiones entran en `hash`; una huella sin extensiones conserva exactamente el hash de siempre. Si no conoces una extensión, ignórala.
+
 ### 8.3 Artefactos: los ficheros que produce la tarea
 
 ```http
@@ -1030,6 +1075,14 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### Puente LARM — 10 de octubre de 2026, sin cambio de versión
+
+Ampliación aditiva sobre 2.11; `contract_version` sigue siendo `"2.11"` y ninguna petición existente cambia.
+
+- **`local_runtime_resolver` y `larm_contract_version`** en `/capabilities` (§2).
+- **Modelos `larm`** con target exacto `{provider: "larm", deployment: "local", model: <variant_id>}`, servidos con lease (§16).
+- **`execution_fingerprint.extensions`** con la clave versionada `larm.v1` (§8.2). Solo aparece en invocaciones servidas por LARM.
 
 ### 2.11 — juicios System-1 y enrutado semántico (2 de octubre de 2026)
 
@@ -1528,6 +1581,48 @@ Usa del profesor la **etiqueta** (`attempts[0].decision`); su `confidence` como 
 ```
 
 **No ejecutes lógica de negocio sobre la nota de un intento.** Es evidencia para medir, no una decisión: la única que el broker avala es la de primer nivel con `accepted: true`. Para calibrar, pide el perfil del caso que vas a evaluar (sus umbrales deciden `accepted`, pero no ocultan la nota), o `threshold_profile: "default"` si es un caso propio. La nota sigue sin calibrar (`confidence_is_calibrated: false`): calibrarla es justo lo que harás con ella.
+
+---
+
+## 16. Modelos locales gestionados por LARM
+
+LARM (Local AI Runtime Manager) administra en el PC IA qué variantes de modelo hay, con qué runtime y backend se sirven y si caben en memoria. **Tu aplicación sigue hablando solo con el broker**: no llames a LARM para inferir. El broker pide a LARM una *lease* por cada invocación, llama al modelo por el endpoint de esa lease, la renueva mientras dura y la libera al terminar, también si cancelas.
+
+**Cuándo está disponible.** Solo si `capabilities.local_runtime_resolver` es `true`. Entonces `/api/v1/models` lista las variantes que LARM declara aptas para el broker con `provider: "larm"`, `deployment: "local"` y, como `name`, el identificador de la variante (un UUIDv7).
+
+**Cómo pedirla.** Siempre por target exacto:
+
+```json
+{
+  "idempotency_key": "eval:caso-17",
+  "content": {"prompt": "…"},
+  "model_requirements": {
+    "target_model": {"provider": "larm", "deployment": "local", "model": "0199d7a4-…"},
+    "fallback_allowed": false
+  }
+}
+```
+
+- `model` es el **identificador de la variante**, no un nombre ni un alias: `qwen3:8b` no se resuelve aquí y la tarea falla con `MODEL_UNAVAILABLE`. Resuelve el alias antes con el catálogo.
+- Los modelos `larm` **nunca se eligen por su cuenta**: no entran en el ranking adaptativo, en el router System-1 ni en el sondeo auxiliar. Con `fallback_allowed: true`, el fallback va a los proveedores normales, nunca a otra variante LARM.
+- El contexto y la memoria los admite LARM con los requisitos de tu petición (tokens de entrada estimados y `max_output_tokens`). Por eso estos modelos no publican `context_window`.
+- Sirve `inference_kind: "chat"` y `"embedding"`. Otras capacidades de LARM (imagen, audio, `decision.evaluate`) no se degradan a chat.
+
+**Qué devuelve.** `execution_summary.served_by` es exactamente `larm/local/<variant_id>`, y la huella de la invocación trae la extensión `larm.v1` con la huella efectiva de la lease (§8.2). Si LARM sirviera con un backend distinto del anunciado y no lo permitía, la tarea falla antes de llamar al modelo.
+
+**Errores.**
+
+| Código | Retry | Qué significa |
+|---|---|---|
+| `PROVIDER_UNAVAILABLE` | no | El puente está apagado en este broker |
+| `PROVIDER_UNAVAILABLE` | sí | LARM no responde, no consiguió cargar el modelo a tiempo o la lease se perdió durante la inferencia |
+| `MODEL_UNAVAILABLE` | no | La variante no existe, no es apta para el broker o pediste un alias |
+| `waiting_for_memory` (estado) | — | LARM no puede admitirla **ahora**; la tarea conserva su turno y vuelve a intentarlo |
+| `VRAM_MODEL_TOO_LARGE` | no | No cabe en el presupuesto total de memoria de LARM |
+| `MODEL_CAPABILITY_MISMATCH` | no | La variante no anuncia la capacidad pedida, no habla un protocolo que el broker sepa usar o se sirvió con otro backend |
+| `CREDENTIALS_UNAVAILABLE` | no | LARM rechazó la credencial del broker (configuración del operador) |
+
+El error original de LARM viaja en `error.details.larm_error` (código, mensaje, `correlation_id`, evidencias), sin rutas ni secretos.
 
 ---
 

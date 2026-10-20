@@ -41,7 +41,7 @@ class MemorySchedulingTests(unittest.TestCase):
         self.db.close()
         self._tmp.cleanup()
 
-    def _queue(self, task_id: str, position: int) -> None:
+    def _queue(self, task_id: str, position: int, priority: int = 0) -> None:
         # Petición mínima pero VÁLIDA: `request_cancel` reconstruye el contrato
         # al leer la fila, así que un '{}' no serviría para todos los casos.
         request = dumps_json({
@@ -50,8 +50,8 @@ class MemorySchedulingTests(unittest.TestCase):
         self.db.execute(
             "INSERT INTO tasks (id, request_json, status, priority, queue_position, "
             "kind, created_at, updated_at) "
-            "VALUES (?, ?, 'queued', 0, ?, 'inference', ?, ?)",
-            (task_id, request, position, f"2026-01-01T00:00:0{position}", "2026-01-01"),
+            "VALUES (?, ?, 'queued', ?, ?, 'inference', ?, ?)",
+            (task_id, request, priority, position, f"2026-01-01T00:00:0{position}", "2026-01-01"),
         )
 
     def _defer(self, task_id: str, **overrides) -> dict:
@@ -144,6 +144,28 @@ class MemorySchedulingTests(unittest.TestCase):
         )
         self.assertEqual(row["memory_deferrals"], 0)
         self.assertIsNone(row["memory_reserved_until"])
+
+    def test_an_urgent_task_runs_while_the_reserved_one_cannot(self) -> None:
+        """La reserva frena a sus iguales, no a lo urgente: una app que no
+        puede esperar no se queda detrás de una petición grande que tampoco
+        puede correr todavía."""
+        self._queue("task_a", 1, priority=100)
+        self._queue("task_b", 2, priority=100)
+        self._queue("task_urgent", 3, priority=10)
+        for _ in range(3):
+            self._defer("task_a", reserve_after=3)
+
+        self.assertEqual(self.repository.claim_next_queued_task_id(), "task_urgent")
+
+    def test_the_reserved_task_still_goes_first_once_it_can_retry(self) -> None:
+        self._queue("task_a", 1, priority=100)
+        self._queue("task_urgent", 2, priority=10)
+        for _ in range(3):
+            self._defer("task_a", reserve_after=3)
+        past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        self.db.execute("UPDATE tasks SET not_before = ? WHERE id = ?", (past, "task_a"))
+
+        self.assertEqual(self.repository.claim_next_queued_task_id(), "task_a")
 
     # ------------------------------------------------------- sin romper nada
 

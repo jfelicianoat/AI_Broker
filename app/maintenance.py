@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -13,18 +14,22 @@ from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+from app.state_lock import StateLock
 
 if TYPE_CHECKING:  # Solo para tipar: el grafo de importación en ejecución no cambia.
     from app.config import BrokerConfig
     from app.providers.ollama import OllamaLifecycleManager
     from app.repository import TaskRepository
 
-BACKUP_FORMAT_VERSION = "ai-broker-backup-v1"
+BACKUP_FORMAT_VERSION = "ai-broker-backup-v2"
+LEGACY_BACKUP_FORMAT_VERSION = "ai-broker-backup-v1"
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "broker.db"
 ARTIFACTS_PREFIX = "artifacts/"
+DOCUMENTS_PREFIX = "files/"
 
 
 @dataclass(frozen=True)
@@ -40,68 +45,123 @@ def create_state_backup(
     database_path: str | Path,
     artifacts_root: str | Path,
     output_path: str | Path,
+    files_root: str | Path | None = None,
 ) -> BackupResult:
-    """Create an atomic zip backup containing SQLite state and task artifacts."""
-    database = Path(database_path)
-    artifacts = Path(artifacts_root)
-    output = Path(output_path)
-    if not database.exists():
+    """Copia completa. El servicio debe estar detenido durante la instantánea."""
+    database = Path(database_path).resolve()
+    artifacts = Path(artifacts_root).resolve()
+    documents = Path(files_root).resolve() if files_root is not None else database.parent / "files"
+    _validate_storage_layout(database, artifacts, documents)
+    output = Path(output_path).resolve()
+    if not database.is_file():
         raise FileNotFoundError(f"database not found: {database}")
+    for root in (artifacts, documents):
+        if output.is_relative_to(root):
+            raise ValueError("Guarda la copia fuera de las carpetas que se están copiando")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(dir=output.parent) as temp_dir:
+    with StateLock(database), tempfile.TemporaryDirectory(dir=output.parent) as temp_dir:
         temp_root = Path(temp_dir)
         db_snapshot = temp_root / DATABASE_NAME
         _sqlite_backup(database, db_snapshot)
-
-        records: list[dict[str, Any]] = []
-        records.append(_file_record(db_snapshot, DATABASE_NAME))
-        artifact_files = _artifact_files(artifacts)
-        for source, archive_name in artifact_files:
-            records.append(_file_record(source, archive_name))
-
+        sources = [(db_snapshot, DATABASE_NAME)]
+        sources += _storage_files(artifacts, ARTIFACTS_PREFIX)
+        sources += _storage_files(documents, DOCUMENTS_PREFIX)
+        records = [_file_record(source, name) for source, name in sources]
+        names = {record["path"] for record in records}
+        digests = {record["path"]: record["sha256"] for record in records}
+        references = []
+        for reference in _database_references(db_snapshot):
+            root, prefix = (
+                (artifacts, ARTIFACTS_PREFIX) if reference["table"] == "artifacts" else (documents, DOCUMENTS_PREFIX)
+            )
+            source = Path(reference["source_path"]).resolve()
+            try:
+                archive_path = prefix + source.relative_to(root).as_posix()
+            except ValueError as error:
+                raise ValueError(f"Referencia fuera del almacén configurado: {source}") from error
+            if archive_path not in names:
+                raise ValueError(f"No se puede hacer una copia completa: falta {source}")
+            if reference.get("expected_sha256") and reference["expected_sha256"] != digests[archive_path]:
+                raise ValueError(f"No se puede copiar un archivo dañado: {source}")
+            references.append({**reference, "archive_path": archive_path})
         manifest = {
             "format": BACKUP_FORMAT_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "database": DATABASE_NAME,
             "artifacts_prefix": ARTIFACTS_PREFIX,
+            "documents_prefix": DOCUMENTS_PREFIX,
             "files": records,
+            "references": references,
         }
-
-        temp_zip = temp_root / f".{output.name}.tmp"
+        temp_zip = temp_root / "backup.tmp"
         with zipfile.ZipFile(temp_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(db_snapshot, DATABASE_NAME)
-            for source, archive_name in artifact_files:
+            for source, archive_name in sources:
                 archive.write(source, archive_name)
-            archive.writestr(
-                MANIFEST_NAME,
-                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
-            )
+            archive.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
+        # Verifica también la correspondencia entre la base y los archivos.
+        verify_state_backup(temp_zip)
         os.replace(temp_zip, output)
+    return BackupResult(output, _sha256_file(output), len(records), output.stat().st_size)
 
-    return BackupResult(
-        path=output,
-        sha256=_sha256_file(output),
-        files=len(records),
-        size_bytes=output.stat().st_size,
-    )
+
+def _safe_archive_path(name: str) -> None:
+    path = PurePosixPath(name)
+    if not name or "\\" in name or ":" in name or path.is_absolute() or ".." in path.parts or path.as_posix() != name:
+        raise ValueError(f"Ruta no válida en la copia: {name}")
+    if name != DATABASE_NAME and not name.startswith((ARTIFACTS_PREFIX, DOCUMENTS_PREFIX)):
+        raise ValueError(f"Archivo inesperado en la copia: {name}")
 
 
 def verify_state_backup(backup_path: str | Path) -> dict[str, Any]:
-    backup = Path(backup_path)
-    with zipfile.ZipFile(backup, "r") as archive:
+    with zipfile.ZipFile(backup_path, "r") as archive:
         manifest = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
-        if manifest.get("format") != BACKUP_FORMAT_VERSION:
+        if manifest.get("format") not in {BACKUP_FORMAT_VERSION, LEGACY_BACKUP_FORMAT_VERSION}:
             raise ValueError("unsupported backup format")
-        names = set(archive.namelist())
-        for record in manifest.get("files", []):
-            archive_name = record["path"]
-            if archive_name not in names:
-                raise ValueError(f"missing file in backup: {archive_name}")
-            with archive.open(archive_name) as handle:
-                digest = hashlib.sha256(handle.read()).hexdigest()
-            if digest != record["sha256"]:
-                raise ValueError(f"checksum mismatch: {archive_name}")
+        names = archive.namelist()
+        if len(names) != len(set(names)):
+            raise ValueError("La copia contiene nombres duplicados")
+        records = manifest.get("files", [])
+        listed = [record["path"] for record in records]
+        if (
+            len(listed) != len(set(listed))
+            or set(names) != set(listed) | {MANIFEST_NAME}
+            or DATABASE_NAME not in listed
+        ):
+            raise ValueError("La lista de archivos no coincide con el contenido de la copia")
+        for record in records:
+            name = record["path"]
+            _safe_archive_path(name)
+            if archive.getinfo(name).file_size != record["size_bytes"]:
+                raise ValueError(f"size mismatch: {name}")
+            digest = hashlib.sha256()
+            with archive.open(name) as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != record["sha256"]:
+                raise ValueError(f"checksum mismatch: {name}")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive.extract(DATABASE_NAME, temp_dir)
+            snapshot = Path(temp_dir) / DATABASE_NAME
+            _validate_sqlite(snapshot)
+            if manifest["format"] == BACKUP_FORMAT_VERSION:
+                actual = _database_references(snapshot)
+                references = manifest.get("references", [])
+
+                def identity(reference: dict[str, Any]) -> tuple[Any, ...]:
+                    return (reference["table"], reference["id"], reference["column"], reference["source_path"])
+
+                if len(references) != len(actual) or {identity(r) for r in references} != {identity(r) for r in actual}:
+                    raise ValueError("Las referencias de documentos y artefactos no coinciden con la base")
+                for reference in references:
+                    name = reference["archive_path"]
+                    _safe_archive_path(name)
+                    prefix = ARTIFACTS_PREFIX if reference["table"] == "artifacts" else DOCUMENTS_PREFIX
+                    if name not in listed or not name.startswith(prefix):
+                        raise ValueError(f"Falta un archivo referenciado: {name}")
+                    expected = next(r for r in actual if identity(r) == identity(reference)).get("expected_sha256")
+                    if expected and expected != next(r for r in records if r["path"] == name)["sha256"]:
+                        raise ValueError(f"El contenido no coincide con la base: {name}")
         return manifest
 
 
@@ -110,45 +170,190 @@ def restore_state_backup(
     backup_path: str | Path,
     database_path: str | Path,
     artifacts_root: str | Path,
+    files_root: str | Path | None = None,
     replace: bool = False,
 ) -> None:
-    """Restore a verified backup. Existing targets require replace=True."""
-    backup = Path(backup_path)
-    database = Path(database_path)
-    artifacts = Path(artifacts_root)
-    manifest = verify_state_backup(backup)
-
-    if database.exists() and not replace:
-        raise FileExistsError(f"database exists: {database}")
-    artifact_targets = [
-        artifacts / Path(record["path"]).relative_to(ARTIFACTS_PREFIX)
-        for record in manifest["files"]
-        if str(record["path"]).startswith(ARTIFACTS_PREFIX)
-    ]
-    existing_artifacts = [target for target in artifact_targets if target.exists()]
-    if existing_artifacts and not replace:
-        raise FileExistsError(f"artifact exists: {existing_artifacts[0]}")
-
+    """Valida y prepara todo antes de publicar la base; servicio detenido."""
+    database = Path(database_path).resolve()
+    artifacts = Path(artifacts_root).resolve()
+    documents = Path(files_root).resolve() if files_root is not None else database.parent / "files"
+    _validate_storage_layout(database, artifacts, documents)
+    manifest = verify_state_backup(backup_path)
     database.parent.mkdir(parents=True, exist_ok=True)
-    artifacts.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=database.parent) as temp_dir:
+    with (
+        StateLock(database, allow_incomplete_restore=True) as state_lock,
+        tempfile.TemporaryDirectory(dir=database.parent) as temp_dir,
+    ):
         temp_root = Path(temp_dir)
-        with zipfile.ZipFile(backup, "r") as archive:
-            archive.extract(DATABASE_NAME, temp_root)
-            temp_database = temp_root / DATABASE_NAME
-            _validate_sqlite(temp_database)
-            os.replace(temp_database, database)
-
+        with zipfile.ZipFile(backup_path, "r") as archive:
             for record in manifest["files"]:
-                archive_name = str(record["path"])
-                if not archive_name.startswith(ARTIFACTS_PREFIX):
-                    continue
-                target = artifacts / Path(archive_name).relative_to(ARTIFACTS_PREFIX)
+                archive.extract(record["path"], temp_root)
+        snapshot = temp_root / DATABASE_NAME
+        if manifest["format"] == LEGACY_BACKUP_FORMAT_VERSION:
+            raw = _database_references(snapshot)
+            if any(r["table"] == "ingested_files" for r in raw):
+                raise ValueError(
+                    "Esta copia antigua no contiene los documentos. Recupera sus originales antes de restaurar."
+                )
+            references = []
+            for reference in raw:
+                suffix = f"{reference['task_id']}/{Path(reference['source_path']).name}"
+                matches = [
+                    r["path"]
+                    for r in manifest["files"]
+                    if r["path"].startswith(ARTIFACTS_PREFIX) and r["path"].endswith(suffix)
+                ]
+                if len(matches) != 1:
+                    raise ValueError("No se puede resolver un artefacto de la copia antigua")
+                references.append({**reference, "archive_path": matches[0]})
+        else:
+            references = manifest["references"]
+        targets: list[tuple[Path, Path]] = []
+        for record in manifest["files"]:
+            name = record["path"]
+            if name == DATABASE_NAME:
+                continue
+            prefix, root = (
+                (ARTIFACTS_PREFIX, artifacts) if name.startswith(ARTIFACTS_PREFIX) else (DOCUMENTS_PREFIX, documents)
+            )
+            target = root / PurePosixPath(name).relative_to(prefix)
+            if not target.resolve().is_relative_to(root):
+                raise ValueError("La restauración saldría del almacén de destino")
+            targets.append((temp_root / name, target))
+        for target in [database, *(target for _, target in targets)]:
+            if target.exists() and not replace:
+                raise FileExistsError(f"destination exists: {target}")
+        # Sustituye las rutas de origen por las del nuevo almacén en la base provisional.
+        with closing(sqlite3.connect(snapshot)) as connection:
+            for reference in references:
+                name = reference["archive_path"]
+                prefix, root = (
+                    (ARTIFACTS_PREFIX, artifacts)
+                    if reference["table"] == "artifacts"
+                    else (DOCUMENTS_PREFIX, documents)
+                )
+                target = root / PurePosixPath(name).relative_to(prefix)
+                connection.execute(
+                    f"UPDATE {reference['table']} SET {reference['column']} = ? WHERE id = ?",
+                    (str(target), reference["id"]),
+                )
+            connection.commit()
+        _validate_sqlite(snapshot)
+        # Guarda los destinos anteriores para revertir si falla una escritura.
+        # Cada temporal se crea en su destino: también funciona entre discos.
+        undo: list[tuple[Path, Path | None]] = []
+        previously_incomplete = state_lock.restore_marker.exists()
+        cleanup_previous = False
+        with state_lock.restore_marker.open("w", encoding="utf-8") as handle:
+            handle.write("Repite la restauración antes de arrancar el servicio.\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            for source, target in [*targets, (snapshot, database)]:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                extracted = temp_root / archive_name
-                archive.extract(archive_name, temp_root)
-                os.replace(extracted, target)
-    _cleanup_empty_dirs(artifacts)
+                previous = None
+                if target.exists():
+                    previous = _copy_to_sibling(target, target)
+                undo.append((target, previous))
+                staged = _copy_to_sibling(source, target)
+                try:
+                    os.replace(staged, target)
+                finally:
+                    staged.unlink(missing_ok=True)
+            cleanup_previous = True
+        except BaseException:
+            for target, previous in reversed(undo):
+                if previous is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    os.replace(previous, target)
+            if not previously_incomplete:
+                state_lock.restore_marker.unlink(missing_ok=True)
+            cleanup_previous = True
+            raise
+        finally:
+            if cleanup_previous:
+                for _, previous in undo:
+                    if previous is not None:
+                        previous.unlink(missing_ok=True)
+        # No quedan conexiones anteriores al destino: el broker está detenido.
+        database.with_name(database.name + "-wal").unlink(missing_ok=True)
+        database.with_name(database.name + "-shm").unlink(missing_ok=True)
+        state_lock.restore_marker.unlink(missing_ok=True)
+
+
+def _copy_to_sibling(source: Path, target: Path) -> Path:
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".restore-", delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        shutil.copyfile(source, temporary)
+        return temporary
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _validate_storage_layout(database: Path, artifacts: Path, documents: Path) -> None:
+    if (
+        artifacts.is_relative_to(documents)
+        or documents.is_relative_to(artifacts)
+        or database.is_relative_to(artifacts)
+        or database.is_relative_to(documents)
+    ):
+        raise ValueError("Usa carpetas separadas para documentos y artefactos, y guarda la base fuera de ambas")
+
+
+def _database_references(snapshot: Path) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+    with closing(sqlite3.connect(snapshot)) as connection:
+        connection.row_factory = sqlite3.Row
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "ingested_files" in tables:
+            for row in connection.execute(
+                "SELECT id, original_path, markdown_path, status, engine, meta_json FROM ingested_files"
+            ):
+                if row["status"] == "ready" and row["engine"] != "attach" and not row["markdown_path"]:
+                    raise ValueError(f"Documento listo sin conversión: {row['id']}")
+                for column in ("original_path", "markdown_path"):
+                    if row[column]:
+                        meta = json.loads(row["meta_json"] or "{}")
+                        checksum = meta.get(
+                            "stored_original_sha256" if column == "original_path" else "markdown_sha256"
+                        )
+                        references.append(
+                            {
+                                "table": "ingested_files",
+                                "id": row["id"],
+                                "column": column,
+                                "source_path": row[column],
+                                "expected_sha256": checksum,
+                            }
+                        )
+        if "artifacts" in tables:
+            for row in connection.execute("SELECT id, task_id, path, sha256 FROM artifacts"):
+                references.append(
+                    {
+                        "table": "artifacts",
+                        "id": row["id"],
+                        "task_id": row["task_id"],
+                        "column": "path",
+                        "source_path": row["path"],
+                        "expected_sha256": row["sha256"],
+                    }
+                )
+    return references
+
+
+def _storage_files(root: Path, prefix: str) -> list[tuple[Path, str]]:
+    if not root.exists():
+        return []
+    result = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"El almacén contiene un enlace simbólico: {path}")
+        if path.is_file() and ".incoming" not in path.relative_to(root).parts:
+            result.append((path, prefix + path.relative_to(root).as_posix()))
+    return result
 
 
 def _sqlite_backup(source: Path, destination: Path) -> None:
@@ -350,10 +555,12 @@ def backfill_invocation_task_type(db: Any, *, dry_run: bool = False) -> Backfill
                 skipped += 1
                 continue
             try:
-                request = TaskCreateRequest.model_validate({
-                    "idempotency_key": f"backfill:{row['invocation_id']}",
-                    "content": {"prompt": prompt},
-                })
+                request = TaskCreateRequest.model_validate(
+                    {
+                        "idempotency_key": f"backfill:{row['invocation_id']}",
+                        "content": {"prompt": prompt},
+                    }
+                )
             except Exception:
                 skipped += 1
                 continue
@@ -366,8 +573,10 @@ def backfill_invocation_task_type(db: Any, *, dry_run: bool = False) -> Backfill
         classified += 1
         reconstructed += int(was_reconstructed)
     return BackfillResult(
-        pending=len(rows), classified=classified,
-        reconstructed=reconstructed, skipped=skipped,
+        pending=len(rows),
+        classified=classified,
+        reconstructed=reconstructed,
+        skipped=skipped,
     )
 
 

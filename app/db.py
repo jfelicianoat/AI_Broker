@@ -8,25 +8,61 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+# Diario de leases LARM (app.larm.LarmLeaseJournal). Vive aquí y no en
+# app.larm para que init_schema cree todo el esquema en un solo sitio.
+LARM_LEASES_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS larm_leases (
+        idempotency_key TEXT PRIMARY KEY,
+        task_id TEXT,
+        invocation_id TEXT,
+        variant_id TEXT NOT NULL,
+        lease_id TEXT,
+        generation INTEGER,
+        row_version INTEGER,
+        state TEXT NOT NULL,
+        detail_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_larm_leases_state ON larm_leases(state, updated_at)",
+)
+
 
 class Database:
-    def __init__(self, path: str | Path, journal_mode: str = "WAL") -> None:
+    def __init__(self, path: str | Path, journal_mode: str = "WAL", *, defer_open: bool = False) -> None:
         self.path = Path(path)
         self.journal_mode = journal_mode
         self._lock = threading.RLock()
         self._in_transaction = False
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.execute(f"PRAGMA journal_mode = {journal_mode}")
-        # Procesos externos (backups, herramientas) pueden mantener locks breves:
-        # mejor esperar unos segundos que fallar con "database is locked".
-        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._connection: sqlite3.Connection | None = None
+        if not defer_open:
+            self._open()
+
+    def _open(self) -> sqlite3.Connection:
+        with self._lock:
+            if self._connection is not None:
+                return self._connection
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.path, check_same_thread=False)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(f"PRAGMA journal_mode = {self.journal_mode}")
+            # Procesos externos pueden mantener locks breves: esperar antes
+            # de fallar con "database is locked".
+            connection.execute("PRAGMA busy_timeout = 5000")
+            self._connection = connection
+            return connection
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._open()
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._connection is not None:
+                self._connection.close()
 
     def init_schema(self) -> None:
         statements = [
@@ -137,6 +173,7 @@ class Database:
                 created_at TEXT NOT NULL
             )
             """,
+            *LARM_LEASES_DDL,
             """
             CREATE TABLE IF NOT EXISTS routing_cases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,6 +246,16 @@ class Database:
             if "agent_state_json" not in task_columns:
                 # Conversación del agente persistida al pausar por tools del cliente.
                 self._conn.execute("ALTER TABLE tasks ADD COLUMN agent_state_json TEXT")
+            if "consensus_state_json" not in task_columns:
+                # Punto de control de un mixture_of_agents que cedió el turno a
+                # una tarea urgente: propuestas ya pagadas, modelos elegidos y
+                # plan de oleadas, para retomarlo sin rehacer nada.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN consensus_state_json TEXT")
+            if "map_reduce_state_json" not in task_columns:
+                # Punto de control de un map-reduce que cedió el turno: modelo,
+                # ventana, huella del troceado y parciales ya pagados. Los
+                # fragmentos no se guardan: se recalculan y se comparan.
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN map_reduce_state_json TEXT")
             if "kind" not in task_columns:
                 # Carril de trabajo (app.schemas.TaskKind). Todo lo anterior a
                 # los carriles es inferencia, de ahí el default: la migración
@@ -341,6 +388,14 @@ class Database:
                 # deduplicación por sha256: reutilizar una subida sin texto
                 # reconocido cuando se pide con él devolvería otra cosa.
                 self._conn.execute("ALTER TABLE ingested_files ADD COLUMN ocr INTEGER")
+            # Las filas antiguas quedan locales y con procedencia desconocida.
+            for column, declaration in (
+                ("data_classification", "TEXT NOT NULL DEFAULT 'local_only'"),
+                ("cloud_allowed", "INTEGER NOT NULL DEFAULT 0"),
+                ("privacy_policy_version", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in file_columns:
+                    self._conn.execute(f"ALTER TABLE ingested_files ADD COLUMN {column} {declaration}")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"

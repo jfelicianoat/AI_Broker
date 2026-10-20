@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app import execution_fingerprint
+from app import execution_fingerprint, invocation_context
 from app.artifacts import ArtifactRecord
 from app.db import Database, dumps_json, loads_json
 from app.providers import ModelOutput, ProviderError
@@ -63,6 +63,42 @@ ACTIVE_INFERENCE_STATUSES = tuple(
 # verdad: el reclamo respeta `not_before`, así que solo cambia su sitio para
 # cuando le toque.
 PENDING_QUEUE_STATUSES = ("queued", "waiting_for_memory", "waiting_for_dependencies")
+
+
+def _make_room_in_queue(
+    connection: Any, priority: int, created_at: str, *, exclude_id: str | None = None,
+) -> int:
+    """Posición donde entra una tarea de inferencia según su prioridad.
+
+    El reclamo ordena antes por `queue_position` que por `priority`, así que la
+    prioridad solo tiene efecto si se traduce en posición al encolar: la tarea
+    se coloca delante de la primera pendiente que deba ir detrás de ella —peor
+    prioridad (número mayor) o la misma y llegada después— y las de detrás
+    corren un puesto. Con prioridades iguales queda el FIFO de siempre.
+
+    Se decide al encolar y no al reclamar para que el reordenado manual del
+    panel siga mandando: mover una tarea a mano es la última palabra.
+    """
+    marks = ",".join("?" for _ in PENDING_QUEUE_STATUSES)
+    row = connection.execute(
+        f"SELECT MIN(queue_position) AS pos FROM tasks "
+        f"WHERE kind = 'inference' AND status IN ({marks}) AND queue_position IS NOT NULL "
+        f"AND id <> ? AND (priority > ? OR (priority = ? AND created_at > ?))",
+        (*PENDING_QUEUE_STATUSES, exclude_id or "", priority, priority, created_at),
+    ).fetchone()
+    if row is None or row["pos"] is None:
+        tail = connection.execute(
+            "SELECT COALESCE(MAX(queue_position), 0) + 1 AS pos FROM tasks"
+        ).fetchone()
+        return int(tail["pos"])
+    position = int(row["pos"])
+    # Se corre todo lo que está detrás, ingestas incluidas: su orden relativo
+    # no cambia y así ninguna posición se repite.
+    connection.execute(
+        "UPDATE tasks SET queue_position = queue_position + 1 WHERE queue_position >= ?",
+        (position,),
+    )
+    return position
 
 
 class IdempotencyConflict(ValueError):
@@ -124,8 +160,7 @@ class TaskRepository:
             queued = connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'queued'").fetchone()[0]
             if int(queued) >= queue_max_size:
                 raise QueueFull("QUEUE_FULL")
-            row = connection.execute("SELECT COALESCE(MAX(queue_position), 0) AS pos FROM tasks").fetchone()
-            queue_position = int(row["pos"]) + 1 if row else 1
+            queue_position = _make_room_in_queue(connection, request.priority, now)
             connection.execute(
                 """
                 INSERT INTO tasks (
@@ -214,7 +249,10 @@ class TaskRepository:
         2. **Salvo que alguien tenga reserva.** Tras `memory_reserve_after`
            turnos cedidos, la tarea aplazada reserva el suyo y nadie la
            adelanta hasta que la ventana expire. Sin esto, una petición grande
-           no correría jamás mientras siguieran llegando pequeñas.
+           no correría jamás mientras siguieran llegando pequeñas. La reserva
+           frena a sus iguales, no a lo urgente: una tarea de prioridad mejor
+           (número menor) que la reservada puede correr mientras esta aún no
+           puede reintentar.
         """
         active = ACTIVE_INFERENCE_STATUSES
         marks = ",".join("?" for _ in active)
@@ -237,19 +275,27 @@ class TaskRepository:
             )
             order = "ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1"
             reserved = connection.execute(
-                f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
+                f"SELECT id, priority, progress_json FROM tasks WHERE status IN ({claim_marks}) "
                 f"AND kind = 'inference' AND memory_reserved_until > ? {order}",
                 (*claimable, now),
             ).fetchone()
             if reserved is not None:
-                # Con reserva en pie solo corre la reservada, y solo cuando le
-                # toca reintentar. Si aún no le toca, nadie corre: eso es
-                # exactamente lo que la reserva significa.
+                # Con reserva en pie corre la reservada en cuanto le toca
+                # reintentar. Si aún no le toca, solo pasa lo más urgente que
+                # ella; sus iguales y las menos urgentes esperan: eso es lo que
+                # la reserva significa.
                 row = connection.execute(
                     "SELECT id, progress_json FROM tasks WHERE id = ? "
                     "AND (not_before IS NULL OR not_before <= ?)",
                     (reserved["id"], now),
                 ).fetchone()
+                if row is None:
+                    row = connection.execute(
+                        f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
+                        f"AND kind = 'inference' AND (not_before IS NULL OR not_before <= ?) "
+                        f"AND priority < ? {order}",
+                        (*claimable, now, int(reserved["priority"])),
+                    ).fetchone()
             else:
                 row = connection.execute(
                     f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
@@ -674,6 +720,9 @@ class TaskRepository:
                     now,
                 ),
             )
+        # La llamada al proveedor que sigue a este checkpoint corre en este
+        # mismo contexto: así sabe a qué invocación pertenece (app.larm).
+        invocation_context.bind(task_id, invocation_id)
         return invocation_id
 
     @staticmethod
@@ -691,12 +740,14 @@ class TaskRepository:
         if output.generation:
             assignments.append("generation_json = ?")
             params.append(dumps_json(output.generation))
-        if output.fingerprint_observed:
+        if output.fingerprint_observed or output.fingerprint_extensions:
             row = connection.execute(
                 "SELECT fingerprint_json FROM model_invocations WHERE id = ?", (invocation_id,),
             ).fetchone()
             stored = loads_json(row["fingerprint_json"], None) if row is not None else None
-            merged = execution_fingerprint.merge(stored, output.fingerprint_observed)
+            merged = execution_fingerprint.merge(
+                stored, output.fingerprint_observed, output.fingerprint_extensions,
+            )
             if merged is not None:
                 assignments.extend(["fingerprint_hash = ?", "fingerprint_json = ?"])
                 params.extend([merged["hash"], dumps_json(merged)])
@@ -1181,6 +1232,127 @@ class TaskRepository:
                 (task_id, "agent.paused", dumps_json({"pending_tool_calls": pending_tool_calls}), now),
             )
 
+    def urgent_task_waiting(self, priority: int, *, exclude_id: str) -> str | None:
+        """Tarea en cola, lista para correr y más urgente que `priority`.
+
+        Solo cuenta `queued`: una que espera memoria o dependencias no correría
+        aunque se le cediera el turno, y cederlo en balde haría que el agente
+        se pausara y retomara en bucle cada pocos segundos."""
+        row = self.db.query_one(
+            "SELECT id FROM tasks WHERE kind = 'inference' AND status = 'queued' "
+            "AND (not_before IS NULL OR not_before <= ?) AND priority < ? AND id <> ? "
+            "ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1",
+            (_utc_now_iso(), priority, exclude_id),
+        )
+        return str(row["id"]) if row is not None else None
+
+    def yield_agent_turn(
+        self,
+        task_id: str,
+        agent_state: dict[str, Any],
+        progress: dict[str, Any],
+        *,
+        urgent_task_id: str,
+    ) -> None:
+        """Congela al agente entre iteraciones y lo devuelve a la cola para que
+        pase una tarea más urgente."""
+        self._yield_turn(
+            task_id, "agent_state_json", agent_state, progress,
+            event_type="agent.yielded", urgent_task_id=urgent_task_id,
+            event_payload={"iteration": agent_state.get("iteration")},
+        )
+
+    def yield_consensus_turn(
+        self,
+        task_id: str,
+        consensus_state: dict[str, Any],
+        progress: dict[str, Any],
+        *,
+        urgent_task_id: str,
+    ) -> None:
+        """Congela un mixture_of_agents entre oleadas (o tras la primera
+        síntesis) y lo devuelve a la cola para que pase una tarea más urgente."""
+        self._yield_turn(
+            task_id, "consensus_state_json", consensus_state, progress,
+            event_type="consensus.yielded", urgent_task_id=urgent_task_id,
+            event_payload={
+                "waves_done": consensus_state.get("waves_done"),
+                "proposals": len(consensus_state.get("proposals") or []),
+                "synthesized": consensus_state.get("synthesis") is not None,
+            },
+        )
+
+    def yield_map_reduce_turn(
+        self,
+        task_id: str,
+        map_reduce_state: dict[str, Any],
+        progress: dict[str, Any],
+        *,
+        urgent_task_id: str,
+    ) -> None:
+        """Congela un map-reduce entre fragmentos (o entre reducciones) y lo
+        devuelve a la cola para que pase una tarea más urgente."""
+        self._yield_turn(
+            task_id, "map_reduce_state_json", map_reduce_state, progress,
+            event_type="chunking.yielded", urgent_task_id=urgent_task_id,
+            event_payload={
+                "phase": map_reduce_state.get("phase"),
+                "chunks_done": len(map_reduce_state.get("map_partials") or []),
+                "chunks_total": map_reduce_state.get("chunks_total"),
+            },
+        )
+
+    def load_consensus_state(self, task_id: str) -> dict[str, Any] | None:
+        return self._load_state(task_id, "consensus_state_json")
+
+    def load_map_reduce_state(self, task_id: str) -> dict[str, Any] | None:
+        return self._load_state(task_id, "map_reduce_state_json")
+
+    def _load_state(self, task_id: str, state_column: str) -> dict[str, Any] | None:
+        assert state_column in {"consensus_state_json", "map_reduce_state_json"}
+        row = self.db.query_one(f"SELECT {state_column} FROM tasks WHERE id = ?", (task_id,))
+        if row is None or row[state_column] is None:
+            return None
+        state = loads_json(row[state_column], None)
+        return state if isinstance(state, dict) else None
+
+    def _yield_turn(
+        self,
+        task_id: str,
+        state_column: str,
+        state: dict[str, Any],
+        progress: dict[str, Any],
+        *,
+        event_type: str,
+        urgent_task_id: str,
+        event_payload: dict[str, Any],
+    ) -> None:
+        """Devuelve a la cola una tarea que cede el turno con su estado
+        congelado. Vuelve por su prioridad y su hora de llegada: detrás de lo
+        urgente, delante de lo que entró después."""
+        assert state_column in {"agent_state_json", "consensus_state_json", "map_reduce_state_json"}
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            own = connection.execute(
+                "SELECT priority, created_at FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if own is None:
+                raise KeyError(task_id)
+            position = _make_room_in_queue(
+                connection, int(own["priority"]), str(own["created_at"]), exclude_id=task_id,
+            )
+            connection.execute(
+                f"UPDATE tasks SET status = 'queued', {state_column} = ?, progress_json = ?, "
+                f"result_json = NULL, queue_position = ?, updated_at = ? WHERE id = ?",
+                (dumps_json(state), dumps_json(progress), position, now, task_id),
+            )
+            connection.execute(
+                "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, event_type, dumps_json({
+                    **event_payload, "urgent_task_id": urgent_task_id,
+                }), now),
+            )
+
     def load_agent_state(self, task_id: str) -> dict[str, Any] | None:
         row = self.db.query_one("SELECT agent_state_json FROM tasks WHERE id = ?", (task_id,))
         if row is None or row["agent_state_json"] is None:
@@ -1228,19 +1400,14 @@ class TaskRepository:
             # porque `queue_position` manda sobre `priority` en el reclamo.
             # Se cuela delante de lo que llegó después de ella; los empates los
             # rompe `created_at`, que es el desempate final del ORDER BY.
-            newer = connection.execute(
-                "SELECT MIN(queue_position) AS pos FROM tasks "
-                "WHERE status = 'queued' AND queue_position IS NOT NULL "
-                "AND created_at > (SELECT created_at FROM tasks WHERE id = ?)",
-                (task_id,),
+            # La prioridad también cuenta aquí: lo urgente que entró después
+            # sigue por delante, y la reanudada no adelanta a nadie más urgente.
+            own = connection.execute(
+                "SELECT priority, created_at FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()
-            if newer is not None and newer["pos"] is not None:
-                position = int(newer["pos"]) - 1
-            else:
-                queue_row = connection.execute(
-                    "SELECT COALESCE(MAX(queue_position), -1) + 1 AS pos FROM tasks WHERE status = 'queued'"
-                ).fetchone()
-                position = int(queue_row["pos"])
+            position = _make_room_in_queue(
+                connection, int(own["priority"]), str(own["created_at"]), exclude_id=task_id,
+            )
             connection.execute(
                 "UPDATE tasks SET status = 'queued', agent_state_json = ?, result_json = NULL, "
                 "queue_position = ?, updated_at = ? WHERE id = ?",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import sys
 import unicodedata
 import urllib.error
@@ -32,8 +33,15 @@ from app.residency import GIB, build_report  # noqa: E402
 # El script habla con el broker por HTTP en vez de cargar su configuracion: asi
 # refleja el estado del proceso que esta corriendo de verdad, con sus reservas
 # vivas, y no el de una instancia recien construida sin leases.
-DEFAULT_BROKER = "http://127.0.0.1:8765"
+# Con HTTPS activado el broker solo contesta por https, tambien en loopback, con
+# el certificado de su propia CA (certs/broker-ca.crt, lo deja activar_https.py).
+BROKER_CA = Path(__file__).resolve().parent.parent / "certs" / "broker-ca.crt"
+DEFAULT_BROKER = "https://127.0.0.1:8765" if BROKER_CA.is_file() else "http://127.0.0.1:8765"
 DEFAULT_LMSTUDIO = "http://127.0.0.1:1234"
+
+
+def broker_ssl_context() -> ssl.SSLContext | None:
+    return ssl.create_default_context(cafile=str(BROKER_CA)) if BROKER_CA.is_file() else None
 
 
 def broker_token() -> str:
@@ -55,7 +63,7 @@ def read_resources(base_url: str) -> tuple[dict[str, Any] | None, str | None]:
     headers = {"X-Admin-Token": token} if token else {}
     request = urllib.request.Request(f"{base_url}/api/v1/dashboard/resources", headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=10.0) as response:
+        with urllib.request.urlopen(request, timeout=10.0, context=broker_ssl_context()) as response:
             return json.loads(response.read().decode("utf-8")), None
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):

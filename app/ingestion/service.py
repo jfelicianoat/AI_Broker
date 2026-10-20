@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,11 +43,15 @@ from app.ingestion.detection import (
 from app.ingestion.vision import VisionTarget, select_vision_target
 from app.providers.base import ModelOutput, estimate_tokens_upper_bound
 from app.schemas import (
+    DataClassification,
+    FilePrivacyPolicy,
     InlineImage,
     ModelReference,
     TaskCreateRequest,
     TaskStatus,
     attachment_file_id,
+    classification_allows_cloud,
+    is_local_deployment,
 )
 from app.task_classifier import classify_ocr_intent
 
@@ -211,6 +216,9 @@ class FileRecord:
     # El que subió la imagen pidió que se le reconociera el texto. Solo
     # entonces una imagen pasa por conversión.
     ocr: bool = False
+    data_classification: DataClassification = DataClassification.local_only
+    cloud_allowed: bool = False
+    privacy_policy_version: int = 0
 
 
 def staged_attachment_name(record: FileRecord) -> str:
@@ -247,6 +255,9 @@ def _record_from_row(row: Any) -> FileRecord:
         updated_at=row["updated_at"],
         describe_images=bool(_row_value(row, "describe_images") or False),
         ocr=bool(_row_value(row, "ocr") or False),
+        data_classification=DataClassification(_row_value(row, "data_classification") or "local_only"),
+        cloud_allowed=bool(_row_value(row, "cloud_allowed") or False),
+        privacy_policy_version=int(_row_value(row, "privacy_policy_version") or 0),
     )
 
 
@@ -268,8 +279,9 @@ class IngestionService:
         self.provider = provider
         self.root = Path(config.ingestion.storage_dir)
         self._jobs: set[asyncio.Task] = set()
+        self._upload_lock = threading.RLock()
 
-    async def _resolve_vision_target(self) -> VisionTarget | None:
+    async def _resolve_vision_target(self, record: FileRecord) -> VisionTarget | None:
         """Elige el modelo de visión antes de entrar al hilo de conversión.
 
         La selección es asíncrona (consulta el catálogo) y `_convert` es
@@ -290,7 +302,10 @@ class IngestionService:
                 extra={"event": "ingestion.vision_catalog_failed"},
             )
             return None
-        return select_vision_target(self.config, catalog)
+        return select_vision_target(
+            self.config, catalog, data_classification=record.data_classification,
+            cloud_allowed=record.cloud_allowed and record.privacy_policy_version > 0,
+        )
 
     # ------------------------------------------------------------------ subida
 
@@ -310,13 +325,19 @@ class IngestionService:
             except OSError:
                 pass
 
-    def store_upload(self, filename: str, data: bytes) -> tuple[FileRecord, bool]:
+    def store_upload(
+        self, filename: str, data: bytes, *,
+        data_classification: DataClassification | str = DataClassification.local_only,
+        cloud_allowed: bool = False,
+    ) -> tuple[FileRecord, bool]:
         """Variante en memoria (subidas pequeñas y tests): delega en la ruta
         basada en fichero, que es la única que valida y persiste."""
         self.incoming_dir.mkdir(parents=True, exist_ok=True)
         temp_path = self.incoming_dir / f".upload-{uuid4().hex}.tmp"
         temp_path.write_bytes(data)
-        return self.store_upload_from_file(filename, temp_path)
+        return self.store_upload_from_file(
+            filename, temp_path, data_classification=data_classification, cloud_allowed=cloud_allowed,
+        )
 
     def resolve_describe_images(self, requested: bool | None) -> bool:
         """Política efectiva de imágenes para una subida.
@@ -332,7 +353,7 @@ class IngestionService:
             return self.config.ingestion.images.enabled
         return requested
 
-    def _reusable_row(self, sha256: str, describe_images: bool, ocr: bool = False) -> Any:
+    def _reusable_row(self, sha256: str, describe_images: bool, ocr: bool, policy: FilePrivacyPolicy) -> Any:
         """Conversión previa que sirve para lo que se pide ahora.
 
         Una conversión CON descripciones sirve para quien las pide sin ellas
@@ -344,18 +365,30 @@ class IngestionService:
         # El OCR entra en la identidad por la misma razón y con el mismo `>=`:
         # una imagen que ya trae su texto reconocido sirve para quien la pide
         # sin él, pero no al revés.
-        return self.db.query_one(
-            "SELECT * FROM ingested_files WHERE sha256 = ? AND status != ? "
+        rows = self.db.query_all(
+            "SELECT * FROM ingested_files WHERE sha256 = ? "
             "AND COALESCE(describe_images, ?) >= ? AND COALESCE(ocr, 0) >= ? "
-            "ORDER BY created_at DESC LIMIT 1",
+            "AND data_classification = ? AND cloud_allowed = ? "
+            "ORDER BY created_at DESC",
             (
                 sha256,
-                FAILED,
                 int(self.config.ingestion.images.enabled),
                 int(describe_images),
                 int(ocr),
+                policy.data_classification.value,
+                int(policy.cloud_allowed),
             ),
         )
+        for row in rows:
+            record = _record_from_row(row)
+            if record.privacy_policy_version == 1 and record.status != FAILED:
+                return row
+            # Una fila antigua intacta no demuestra cómo se convirtió. Si
+            # está rota, sí se puede reparar con los bytes recién subidos y
+            # generar una nueva conversión local, conservando sus referencias.
+            if not self._storage_healthy(record):
+                return row
+        return None
 
     def store_upload_from_file(
         self,
@@ -363,6 +396,17 @@ class IngestionService:
         temp_path: Path,
         describe_images: bool | None = None,
         ocr: bool = False,
+        data_classification: DataClassification | str = DataClassification.local_only,
+        cloud_allowed: bool = False,
+    ) -> tuple[FileRecord, bool]:
+        with self._upload_lock:
+            return self._store_upload_from_file(
+                filename, temp_path, describe_images, ocr, data_classification, cloud_allowed,
+            )
+
+    def _store_upload_from_file(
+        self, filename: str, temp_path: Path, describe_images: bool | None,
+        ocr: bool, data_classification: DataClassification | str, cloud_allowed: bool,
     ) -> tuple[FileRecord, bool]:
         """Valida, deduplica y persiste una subida ya volcada a disco.
 
@@ -381,6 +425,7 @@ class IngestionService:
         settings = self.config.ingestion
         max_bytes = settings.max_file_mb * 1024 * 1024
         try:
+            policy = FilePrivacyPolicy(data_classification=DataClassification(data_classification), cloud_allowed=cloud_allowed)
             size = temp_path.stat().st_size
             if size == 0:
                 raise IngestionError("INGEST_EMPTY_FILE", "El fichero está vacío")
@@ -403,9 +448,12 @@ class IngestionService:
             # El OCR solo tiene sentido sobre una imagen: un PDF ya lo lleva en
             # su conversión y un .docx no tiene nada que reconocer.
             wants_ocr = bool(ocr) and detection.kind == "image"
-            existing = self._reusable_row(sha256, describe, wants_ocr)
+            existing = self._reusable_row(sha256, describe, wants_ocr, policy)
             if existing is not None:
-                return _record_from_row(existing), False
+                reused = _record_from_row(existing)
+                if self._storage_healthy(reused):
+                    return reused, False
+                return self._repair_upload(reused, temp_path), False
 
             file_id = f"file_{uuid4().hex}"
             file_root = self.root / file_id
@@ -433,6 +481,7 @@ class IngestionService:
             else:
                 original_path = file_root / f"original{extension}"
                 os.replace(temp_path, original_path)
+            meta_fields["stored_original_sha256"] = self._file_hash(original_path)
         finally:
             temp_path.unlink(missing_ok=True)
 
@@ -452,18 +501,76 @@ class IngestionService:
             INSERT INTO ingested_files (
                 id, sha256, filename, extension, kind, engine, size_bytes, status,
                 error_json, original_path, markdown_path, meta_json, created_at, updated_at,
-                describe_images, ocr
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?)
+                describe_images, ocr, data_classification, cloud_allowed, privacy_policy_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 file_id, sha256, name, extension, detection.kind,
                 engine, size, status, str(original_path), dumps_json(meta_fields), now, now,
                 int(describe), int(wants_ocr),
+                policy.data_classification.value, int(policy.cloud_allowed),
             ),
         )
         record = self.get(file_id)
         assert record is not None
         return record, True
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _storage_healthy(self, record: FileRecord) -> bool:
+        paths = [(record.original_path, record.meta.get("stored_original_sha256"))]
+        if record.status == READY and record.engine != ATTACH_ENGINE:
+            if not record.markdown_path:
+                return False
+            paths.append((record.markdown_path, record.meta.get("markdown_sha256")))
+        try:
+            return all(
+                Path(path).is_file() and (not digest or self._file_hash(Path(path)) == digest)
+                for path, digest in paths
+            )
+        except OSError:
+            return False
+
+    def _repair_upload(self, record: FileRecord, source: Path) -> FileRecord:
+        """Una resubida repara el mismo id para conservar sus adjuntos."""
+        root = self.root / record.id
+        root.mkdir(parents=True, exist_ok=True)
+        original = root / f"original{record.extension}"
+        temporary = root / ".repair-original.tmp"
+        try:
+            if record.meta.get("transcoded_from"):
+                temporary.write_bytes(engines.transcode_to_png(source.read_bytes()))
+            else:
+                import shutil
+
+                shutil.copyfile(source, temporary)
+            os.replace(temporary, original)
+        finally:
+            temporary.unlink(missing_ok=True)
+        meta: dict[str, Any] = {
+            "stored_original_sha256": self._file_hash(original),
+            "repairs": int(record.meta.get("repairs", 0)) + 1,
+        }
+        if record.meta.get("transcoded_from"):
+            meta["transcoded_from"] = record.meta["transcoded_from"]
+        attached = record.engine == ATTACH_ENGINE
+        if attached:
+            meta.update({"engine": ATTACH_ENGINE, "converted": False})
+        self.db.execute(
+            "UPDATE ingested_files SET status = ?, original_path = ?, markdown_path = NULL, "
+            "size_bytes = ?, error_json = NULL, meta_json = ?, privacy_policy_version = 1, updated_at = ? WHERE id = ?",
+            (READY if attached else RECEIVED, str(original), original.stat().st_size,
+             dumps_json(meta), _utc_now_iso(), record.id),
+        )
+        repaired = self.get(record.id)
+        assert repaired is not None
+        return repaired
 
     # --------------------------------------------------------------- consultas
 
@@ -480,7 +587,10 @@ class IngestionService:
                 "ATTACHED_FILE_NOT_READY",
                 f"El fichero {file_id} está en estado '{record.status}'",
             )
-        return Path(record.markdown_path).read_text(encoding="utf-8")
+        try:
+            return Path(record.markdown_path).read_text(encoding="utf-8")
+        except FileNotFoundError as error:
+            raise AttachmentError("ATTACHED_FILE_MISSING", "Falta la conversión del documento; vuelve a subirlo para repararlo") from error
 
     def list_files(self, limit: int = 200) -> list[FileRecord]:
         rows = self.db.query_all(
@@ -530,7 +640,9 @@ class IngestionService:
             # historial de trabajo que no existe.
             return None
         existing = repository.ingestion_task_for_file(file_id)
-        if existing is not None:
+        if existing is not None and repository.get_task(existing).status not in {
+            TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled,
+        }:
             return str(existing)
         return str(repository.create_ingestion_task(file_id, record.filename, record.size_bytes))
 
@@ -616,7 +728,7 @@ class IngestionService:
         # Sin descripción de imágenes no hace falta buscar modelo de visión: la
         # resolución sondea el catálogo y es trabajo tirado si nadie va a mirar
         # una figura.
-        vision = await self._resolve_vision_target() if record.describe_images else None
+        vision = await self._resolve_vision_target(record) if record.describe_images else None
         try:
             # Fase 1, la pesada y matable: fichero → Markdown con marcadores.
             result = await self._run_conversion(record, timeout)
@@ -654,6 +766,7 @@ class IngestionService:
         # Cota superior conservadora (misma fórmula que el enrutado por contexto):
         # el cliente puede elegir modelo/estrategia sin descargar el Markdown.
         meta["tokens_estimate"] = estimate_tokens_upper_bound(markdown) if markdown else 0
+        meta["markdown_sha256"] = self._file_hash(markdown_path)
         self.db.execute(
             "UPDATE ingested_files SET status = ?, markdown_path = ?, meta_json = ?, "
             "error_json = NULL, updated_at = ? WHERE id = ?",
@@ -806,7 +919,7 @@ class IngestionService:
         queda en el padre: el hijo no tiene proveedor, ni credenciales, ni
         debe escribir en la base de datos."""
         markdown = result.markdown
-        meta = dict(result.meta)
+        meta = {**record.meta, **result.meta}
         if not record.describe_images:
             # Se deja constancia en el meta: un Markdown sin descripciones no
             # es lo mismo que un documento sin figuras, y quien lea el
@@ -820,7 +933,7 @@ class IngestionService:
         try:
             if record.kind == "pdf" and result.figures:
                 markdown, described, errors = self._describe_pictures(
-                    markdown, self._read_figures(result.figures), vision, recorder,
+                    markdown, self._read_figures(result.figures), vision, recorder, record,
                 )
                 meta["pictures_described"] = described
                 meta["pictures_describe_errors"] = errors
@@ -831,6 +944,9 @@ class IngestionService:
         if vision is not None and described:
             meta["vision_model"] = f"{vision.provider}/{vision.model}"
             meta["vision_evidence"] = vision.evidence
+            meta["vision_deployment"] = vision.deployment
+        meta["images_described"] = bool(described)
+        meta["privacy_policy_known"] = record.privacy_policy_version > 0
         return markdown, meta
 
     @staticmethod
@@ -878,6 +994,7 @@ class IngestionService:
         pictures: list[bytes | None],
         vision: VisionTarget | None = None,
         recorder: _VisionRecorder | None = None,
+        record: FileRecord | None = None,
     ) -> tuple[str, int, int]:
         """Sustituye los placeholders de figura por descripciones del LLM de visión.
 
@@ -905,11 +1022,20 @@ class IngestionService:
             if settings.enabled and vision is not None and png is not None and described < settings.max_images:
                 context = rebuilt[-1][-800:] + "\n[FIGURA AQUÍ]\n" + segment_after[:400]
                 try:
+                    current = self.get(record.id) if record is not None else None
+                    if current is None:
+                        raise ValueError("No se puede comprobar el permiso del documento")
+                    allowed = current.cloud_allowed and current.privacy_policy_version > 0
+                    if not is_local_deployment(vision.deployment) and not (
+                        allowed and classification_allows_cloud(current.data_classification)
+                    ):
+                        raise ValueError("El documento solo permite procesar imágenes en este equipo")
                     # Cada figura es una invocación contabilizada: un PDF de
                     # cuarenta páginas con ilustraciones no es "una conversión",
                     # son decenas de llamadas a un modelo.
-                    description = recorder.invoke(lambda png=png, context=context: engines.describe_image(
+                    description = recorder.invoke(lambda png=png, context=context, allowed=allowed, current=current: engines.describe_image(
                         vision, png, context, settings.timeout_seconds,
+                        cloud_allowed=allowed, data_classification=current.data_classification.value,
                     )).content
                     if description:
                         replacement = (
@@ -930,6 +1056,45 @@ class IngestionService:
 
     # ------------------------------------------------- integración con tareas
 
+    def apply_attachment_policy(
+        self, request: TaskCreateRequest, *, egress_server_ids: list[str] | None = None,
+    ) -> TaskCreateRequest:
+        """La tarea respeta la restricción más fuerte de todos sus adjuntos."""
+        self.check_attachments(request)
+        records = [self.get(file_id) for item in request.content.attachments if (file_id := attachment_file_id(item))]
+        restricted = any(
+            record is not None and (
+                not record.cloud_allowed or record.privacy_policy_version == 0
+                or not classification_allows_cloud(record.data_classification)
+            ) for record in records
+        )
+        if not restricted and classification_allows_cloud(request.risk.data_classification):
+            return request
+        effective = request.model_copy(deep=True)
+        if classification_allows_cloud(effective.risk.data_classification):
+            classification = (
+                DataClassification.confidential
+                if any(r is not None and r.data_classification == DataClassification.confidential for r in records)
+                else DataClassification.local_only
+            )
+            effective.risk = effective.risk.model_copy(update={"data_classification": classification})
+        # exclude_unset conserva qué skills eligió el cliente y cuáles eran
+        # defaults; la clasificación efectiva sí debe viajar a la validación.
+        try:
+            effective = TaskCreateRequest.model_validate(effective.model_dump(mode="python", exclude_unset=True))
+        except ValueError as error:
+            raise AttachmentError(
+                "ATTACHED_FILE_PRIVACY_CONFLICT",
+                "Un adjunto exige procesamiento local y la tarea pide un destino o herramienta externa: " + str(error),
+            ) from error
+        external = set(effective.execution.agent.mcp_servers) & set(egress_server_ids or [])
+        if external:
+            raise AttachmentError(
+                "ATTACHED_FILE_PRIVACY_CONFLICT",
+                "El documento no autoriza enviar datos a estos servidores: " + ", ".join(sorted(external)),
+            )
+        return effective
+
     def check_attachments(self, request: TaskCreateRequest) -> None:
         """Falla rápido en la creación de la tarea si algún adjunto no está listo."""
         for attachment in request.content.attachments:
@@ -946,6 +1111,14 @@ class IngestionService:
                 raise AttachmentError(
                     "ATTACHED_FILE_NOT_READY",
                     f"El fichero {file_id} sigue en '{record.status}'; espera a que esté 'ready'",
+                )
+            if not Path(record.original_path).is_file() or (
+                record.engine != ATTACH_ENGINE and (
+                    not record.markdown_path or not Path(record.markdown_path).is_file()
+                )
+            ):
+                raise AttachmentError(
+                    "ATTACHED_FILE_MISSING", f"Faltan archivos de {file_id}; vuelve a subir el documento para repararlo",
                 )
 
     def has_tabular_attachments(self, request: TaskCreateRequest) -> bool:

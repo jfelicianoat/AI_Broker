@@ -21,6 +21,8 @@ rem session_admin_token) porque cuando arranca desatendido nadie ve su consola.
 
 echo.
 echo Cabecera para el API:  X-Admin-Token: ^<token^>
-echo Panel:                 http://127.0.0.1:8765/dashboard
+set "BROKER_SCHEME=http"
+findstr /r /c:"^  tls_certfile:" broker_config.yaml >nul && set "BROKER_SCHEME=https"
+echo Panel:                 %BROKER_SCHEME%://127.0.0.1:8765/dashboard
 echo.
 pause

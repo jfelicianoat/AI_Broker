@@ -162,6 +162,43 @@ def test_talking_about_an_image_is_not_asking_for_one(prompt: str) -> None:
     assert classify_image_intent(_task(prompt)) is None
 
 
+@pytest.mark.parametrize("source", [
+    "[01:56:31] uso de preferencia para generar videos, imágenes, todas las cosas",
+    "[00:06:01] a cloud design, pego la imagen y le",
+    "[00:03:51] el número de velas que tú puedes pintar en el gráfico",
+])
+def test_source_material_does_not_ask_for_an_image(source: str) -> None:
+    """Casos reales: apuntes de transcripciones de YouTube tumbados con
+    IMAGE_GENERATION_UNSUPPORTED porque la transcripción hablaba de imágenes."""
+    prompt = (
+        "<system_instructions>Convierte la fuente en apuntes.</system_instructions>\n"
+        f"<user_request>Haz los apuntes.\n<transcripcion>\n{source}\n</transcripcion>\n</user_request>"
+    )
+    assert classify_image_intent(_task(prompt)) is None
+
+
+def test_attached_documents_do_not_ask_for_an_image(service: IngestionService) -> None:
+    record, _ = service.store_upload("notas.md", "Para generar imágenes uso otra herramienta.".encode())
+    service.db.execute(
+        "UPDATE ingested_files SET status = 'ready', markdown_path = ? WHERE id = ?",
+        (str(Path(record.original_path)), record.id),
+    )
+    expanded = service.expand_request(_task("que sabes sobre el trading?", [record.id]))
+    assert "generar imágenes" in expanded.content.prompt
+    assert classify_image_intent(expanded) is None
+
+
+def test_the_request_wrapper_still_counts() -> None:
+    prompt = "<user_request>genera una imagen de un gato<fragmento>texto</fragmento></user_request>"
+    assert classify_image_intent(_task(prompt)) == "generate"
+
+
+@pytest.mark.parametrize("prompt", ["dime si tiene pinta de ser IA", "¿qué pinta tiene esto?"])
+def test_pinta_as_a_noun_is_not_painting(prompt: str) -> None:
+    assert classify_image_intent(_task(prompt)) is None
+    assert classify_image_intent(_task("píntame un atardecer")) == "generate"
+
+
 def test_editing_needs_an_image_to_edit(service: IngestionService) -> None:
     record, _ = service.store_upload("foto.png", PIXEL_PNG)
     expanded = service.expand_request(_task("recorta la foto y quita el fondo", [record.id]))

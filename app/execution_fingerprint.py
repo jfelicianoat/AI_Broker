@@ -91,17 +91,38 @@ def digest_of(text: str | None, *, length: int = 32) -> str | None:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
 
 
-def build(components: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build(
+    components: dict[str, dict[str, Any]],
+    extensions: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Huella completa: todos los componentes más su hash canónico.
 
     Los que el llamante no aporte quedan como `no_disponible`, de forma que dos
     proveedores distintos producen huellas con la misma forma y se pueden
-    comparar componente a componente."""
+    comparar componente a componente.
+
+    `extensions` lleva identidad técnica que no cabe en el conjunto fijo de
+    componentes —hoy, la huella de LARM bajo la clave versionada `larm.v1`—.
+    No se inyecta en `components`: el esquema conocido de los clientes no
+    cambia. Sí entra en el hash, porque describe con qué se sirvió; una huella
+    sin extensiones conserva exactamente el hash de siempre."""
     normalized = {
         name: components.get(name) or missing()
         for name in COMPONENT_NAMES
     }
-    return {"components": normalized, "hash": canonical_hash(normalized)}
+    result: dict[str, Any] = {"components": normalized, "hash": canonical_hash(normalized)}
+    if extensions:
+        result["extensions"] = extensions
+        result["hash"] = _extended_hash(result["hash"], extensions)
+    return result
+
+
+def _extended_hash(components_hash: str, extensions: dict[str, dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        {"components": components_hash, "extensions": extensions},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def canonical_hash(components: dict[str, dict[str, Any]]) -> str:
@@ -125,19 +146,29 @@ def canonical_hash(components: dict[str, dict[str, Any]]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def merge(base: dict[str, Any] | None, extra: dict[str, dict[str, Any]] | None) -> dict[str, Any] | None:
+def merge(
+    base: dict[str, Any] | None,
+    extra: dict[str, dict[str, Any]] | None,
+    extensions: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     """Añade a una huella los componentes observados al servir la respuesta.
 
     Es el caso de la capa C: `system_fingerprint` y el identificador de modelo
     devuelto no están en el catálogo, solo en la respuesta concreta. Un
-    componente ya presente y disponible no se pisa con uno vacío."""
-    if base is None and not extra:
+    componente ya presente y disponible no se pisa con uno vacío.
+
+    Las extensiones observadas sustituyen a las del catálogo con la misma
+    clave: la de la respuesta es la efectiva (LARM pudo servir con otra huella
+    distinta de la anunciada, y eso es justo lo que hay que ver)."""
+    if base is None and not extra and not extensions:
         return None
     components = dict((base or {}).get("components") or {})
     for name, value in (extra or {}).items():
         if value and value.get("value") is not None:
             components[name] = value
-    return build(components)
+    merged_extensions = dict((base or {}).get("extensions") or {})
+    merged_extensions.update(extensions or {})
+    return build(components, merged_extensions or None)
 
 
 def changed_components(previous: dict[str, Any], current: dict[str, Any]) -> list[str]:
@@ -159,4 +190,9 @@ def changed_components(previous: dict[str, Any], current: dict[str, Any]) -> lis
     for name in sorted(set(before) | set(after)):
         if name not in COMPONENT_NAMES and (before.get(name) != after.get(name)):
             changed.append(name)
+    before_ext = previous.get("extensions") or {}
+    after_ext = current.get("extensions") or {}
+    for key in sorted(set(before_ext) | set(after_ext)):
+        if before_ext.get(key) != after_ext.get(key):
+            changed.append(f"extensions.{key}")
     return changed

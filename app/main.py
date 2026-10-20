@@ -6,6 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated, Any
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -31,6 +32,7 @@ from app.dashboard import DashboardQueryRepository, lane_capacities
 from app.dashboard_web import (
     CSRF_COOKIE_NAME,
     create_dashboard_router,
+    is_https,
     load_dashboard_residency,
     load_dashboard_resources,
     set_csrf_cookie,
@@ -47,6 +49,7 @@ from app.ingestion import (
     UnsupportedFormat,
 )
 from app.ingestion.service import stream_upload_to_temp
+from app.larm import LarmLeaseJournal
 from app.logging_config import configure_logging
 from app.maintenance import (
     idle_unload_loop,
@@ -77,6 +80,7 @@ from app.schemas import (
     DashboardSummaryResponse,
     DashboardTaskDetail,
     DashboardTaskPage,
+    DataClassification,
     ExecutionPreset,
     ExecutionStrategy,
     FileAcceptedResponse,
@@ -115,6 +119,7 @@ from app.startup import (
     vram_budget_mismatch,
     zero_cost_cloud_providers,
 )
+from app.state_lock import StateLock
 from app.system1 import System1Service
 
 # Las rutas /api/v1 que responden sin credencial (Client_API §3). Una petición
@@ -126,6 +131,39 @@ _PUBLIC_API = {
     ("GET", "/api/v1/models/availability"),
     ("GET", "/api/v1/models/context"),
 }
+
+
+async def larm_bridge_capabilities(provider: Any) -> dict[str, Any]:
+    """Capacidades del puente LARM: solo se anuncia con catálogo vivo.
+
+    Con el puente apagado, o con LARM sin responder, el broker no promete
+    modelos `larm`: un cliente que lea `local_runtime_resolver: true` tiene que
+    poder pedir un target y que exista."""
+    bridge = getattr(provider, "larm", None)
+    if bridge is None or not bridge.enabled:
+        return {"local_runtime_resolver": False, "larm_contract_version": None}
+    await bridge.resolver.refresh_catalog()
+    return dict(bridge.capabilities())
+
+
+async def reconcile_larm_leases(provider: Any, logger: logging.Logger) -> None:
+    """Libera en LARM las leases que el diario dejó abiertas en el último cierre.
+
+    Nunca impide arrancar: con LARM caído las filas siguen abiertas y se
+    vuelven a intentar en el siguiente arranque; mientras, LARM las caduca
+    por TTL."""
+    bridge = getattr(provider, "larm", None)
+    if bridge is None or not bridge.enabled or bridge.resolver.journal is None:
+        return
+    try:
+        result = await asyncio.wait_for(bridge.resolver.reconcile(), timeout=60)
+    except Exception as error:  # noqa: BLE001 - el arranque no depende de LARM
+        logger.warning("larm.reconcile_skipped", extra={
+            "event": "larm.reconcile_skipped", "error": type(error).__name__,
+        })
+        return
+    if result["released"] or result["failed"]:
+        logger.info("larm.reconciled", extra={"event": "larm.reconciled", **result})
 
 
 def create_app(config: BrokerConfig | None = None, config_path: str | Path = "broker_config.yaml") -> FastAPI:
@@ -142,7 +180,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     configure_logging(broker_config.logging)
     logger = logging.getLogger("ai_broker.http")
     publish_admin_credential_for_local_clients(broker_config, logger)
-    db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode)
+    db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode, defer_open=True)
     repository = TaskRepository(db)
     dashboard_queries = DashboardQueryRepository(db)
     scheduler = ResourceScheduler(broker_config)
@@ -175,13 +213,18 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     )
     if hasattr(provider, "system1"):
         provider.system1 = system1
+    larm_bridge = getattr(provider, "larm", None)
+    if larm_bridge is not None:
+        # Diario durable de leases: lo que permite liberar al arrancar las que
+        # quedaron abiertas si el broker murió sirviendo un modelo LARM.
+        larm_bridge.resolver.journal = LarmLeaseJournal(db)
     coordinator = ConsensusCoordinator(
         db, scheduler, provider=provider, ingestion=ingestion, sandbox=sandbox,
         mcp=mcp_registry,
     )
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def running_lifespan(app: FastAPI):
         if broker_config.server.host not in LOOPBACK_HOSTS:
             try:
                 exposed_token = resolve_admin_token(broker_config)
@@ -234,6 +277,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         await auto_start_local_provider_servers(broker_config, logger)
         db.init_schema()
         repository.recover_interrupted_tasks(max_attempts=broker_config.processing.max_task_attempts)
+        await reconcile_larm_leases(provider, logger)
         ingestion.cleanup_incoming()
         if broker_config.ingestion.enabled:
             # Conversiones interrumpidas por un reinicio: vuelven a la cola del
@@ -342,6 +386,15 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             await provider.close()
             db.close()
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            with StateLock(db.path):
+                async with running_lifespan(app):
+                    yield
+        finally:
+            db.close()
+
     app = FastAPI(
         title="AI Broker",
         version="0.1.0",
@@ -420,7 +473,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         if request.url.path.startswith("/dashboard") and "set-cookie" not in response.headers:
             token = request.cookies.get(CSRF_COOKIE_NAME)
             if valid_csrf_token_shape(token):
-                set_csrf_cookie(response, token)
+                set_csrf_cookie(response, token, secure=is_https(request))
         return response
 
     @app.middleware("http")
@@ -494,6 +547,12 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         payload = apply_default_timeout(
             payload, broker_config.processing.default_task_timeout_seconds
         )
+        if payload.content.attachments and broker_config.ingestion.enabled:
+            try:
+                payload = ingestion.apply_attachment_policy(payload, egress_server_ids=mcp_registry.egress_server_ids())
+            except AttachmentError as exc:
+                status = 404 if exc.code == "ATTACHED_FILE_NOT_FOUND" else 409
+                raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
         if not broker_config.sandbox.enabled and (
             "run_code" in payload.execution.agent.skills
             or "run_code" in payload.execution.proposer_skills
@@ -694,6 +753,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             ),
             describe_images=record.describe_images,
             ocr=record.ocr,
+            data_classification=record.data_classification,
+            cloud_allowed=record.cloud_allowed,
+            privacy_policy_known=record.privacy_policy_version > 0,
         )
 
     @app.post("/api/v1/files", response_model=FileAcceptedResponse, status_code=202)
@@ -702,6 +764,8 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         file: UploadFile,
         describe_images: bool | None = Form(default=None),
         ocr: bool = Form(default=False),
+        data_classification: Annotated[DataClassification, Form()] = DataClassification.local_only,
+        cloud_allowed: bool = Form(default=False),
     ) -> FileAcceptedResponse:
         """Sube un fichero y lo pone en cola de conversión a Markdown.
 
@@ -729,14 +793,17 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 temp_path,
                 describe_images,
                 ocr,
+                data_classification,
+                cloud_allowed,
             )
         except (IngestionError, UnsupportedFormat) as exc:
             status = 415 if exc.code in {"INGEST_UNSUPPORTED_FORMAT", "INGEST_CONTENT_MISMATCH"} else 422
             raise HTTPException(
                 status_code=status, detail={"code": exc.code, "message": str(exc)},
             ) from exc
-        if created:
-            ingestion.enqueue(repository, record.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "FILE_PRIVACY_INVALID", "message": str(exc)}) from exc
+        ingestion.enqueue(repository, record.id)
         return FileAcceptedResponse(
             file_id=record.id,
             status=FileStatus(record.status),
@@ -747,6 +814,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             status_url=f"/api/v1/files/{record.id}",
             describe_images=record.describe_images,
             ocr=record.ocr,
+            data_classification=record.data_classification,
+            cloud_allowed=record.cloud_allowed,
+            privacy_policy_known=record.privacy_policy_version > 0,
         )
 
     @app.get("/api/v1/files/{file_id}", response_model=FileStateResponse)
@@ -878,7 +948,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/api/v1/capabilities", response_model=BrokerCapabilitiesResponse)
     async def capabilities() -> BrokerCapabilitiesResponse:
+        larm_capabilities = await larm_bridge_capabilities(provider)
         return BrokerCapabilitiesResponse(
+            **larm_capabilities,
             system1_judgments=broker_config.system1.enabled,
             system1_semantic_routing=broker_config.system1.enabled and broker_config.system1.routing.enabled,
             system1_evaluation=broker_config.system1.enabled,

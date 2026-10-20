@@ -31,6 +31,7 @@
               <td>
                 <strong>{{ file.filename }}</strong>
                 <small>{{ file.id }}</small>
+                <small>{{ 'Nube autorizada' if file.cloud_allowed else 'Solo en este equipo' }}{% if not file.privacy_policy_known %} · permiso anterior desconocido{% endif %}</small>
               </td>
               <td>
                 <span>{{ file.kind }}</span>

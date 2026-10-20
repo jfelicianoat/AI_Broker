@@ -37,6 +37,46 @@ POST /api/v1/files  (multipart)          POST /api/v1/tasks
 5. Con adjuntos, la compresión de prompt pasa a `off` salvo override explícito
    de la tarea: la compresión caveman corrompería tablas y código.
 
+## Privacidad desde la subida (R4, octubre de 2026)
+
+La subida recibe `data_classification` y `cloud_allowed`. Si se omiten, el
+documento queda como `local_only` y `cloud_allowed=false`: solo se procesa en
+este equipo. No hereda un permiso de nube de la configuración global.
+
+Para permitir servicios externos, el cliente debe declarar `internal` o
+`public` y enviar expresamente `cloud_allowed=true`. `confidential` y
+`local_only` no permiten esa combinación. En el panel hay un desplegable de
+privacidad y una casilla de autorización, desmarcada al abrir el formulario.
+
+El permiso se guarda antes de convertir. Se aplica al seleccionar visión y
+se revisa antes de enviar cada figura y su texto de contexto. Si no hay visión
+local autorizada, se convierte el texto y se indican las figuras sin describir.
+La respuesta de subida y el estado del fichero exponen la clasificación,
+`cloud_allowed` y `privacy_policy_known`.
+
+Las tareas heredan las restricciones de sus adjuntos. Un solo documento sin
+permiso de nube fuerza procesamiento local. Pedir expresamente un modelo o
+una herramienta externa incompatible produce `ATTACHED_FILE_PRIVACY_CONFLICT`.
+Se vuelve a comprobar al ejecutar, también después de reinicios. Un permiso
+documental de nube nunca elimina una restricción local de la tarea.
+
+Los documentos anteriores quedan restringidos localmente para usos futuros,
+con `privacy_policy_known=false`: no se inventa una autorización ni se afirma
+que sus conversiones anteriores nunca fueran remotas. Dos subidas iguales con
+permisos distintos tienen registros distintos.
+
+## Reparación al volver a subir (R2)
+
+La deduplicación comprueba que los archivos necesarios sigan presentes y,
+cuando hay comprobaciones guardadas, que no estén dañados. Una resubida
+compatible repara el mismo `file_id` si faltan el original o su conversión.
+`created=false` sigue significando que el registro ya existía; no significa
+que el fichero esté listo. Si se reconstruye la conversión, su estado vuelve
+a `received` y hay que esperar otra vez a `ready`.
+
+Las copias nuevas incluyen originales y conversiones. Consulta
+`Phase_6_Operations.md` para recuperar en otra carpeta y comprobar las rutas.
+
 ## Formatos y motores
 
 | Tipo | Extensiones | Motor |

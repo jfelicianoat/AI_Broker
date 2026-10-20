@@ -10,33 +10,60 @@ Tercer bloque implementado: artefactos de despliegue como servicio Windows y che
 
 El backup incluye:
 
-- snapshot consistente de SQLite mediante la API `sqlite3.backup`;
+- snapshot consistente de SQLite mediante la API `sqlite3.backup`, con el servicio detenido;
 - artefactos bajo `state/tasks`;
+- originales y conversiones bajo `state/files` (o el almacén indicado con `--files`);
 - `manifest.json` con formato, fecha, lista de archivos, tamaño y SHA-256;
 - escritura atomica del zip final.
+
+Desde la corrección R2 del 3 de octubre de 2026, el formato es
+`ai-broker-backup-v2`. El manifiesto relaciona los documentos y artefactos de
+la base con los archivos de la copia. Si falta alguno o está dañado según su
+comprobación guardada, la copia falla y explica qué falta.
 
 La restauracion:
 
 - verifica manifest y checksums antes de escribir;
 - valida SQLite con `PRAGMA integrity_check`;
-- exige `--replace` para sobrescribir base o artefactos existentes;
-- restaura DB y artefactos con `os.replace`.
+- exige `--replace` para sobrescribir base, documentos o artefactos existentes;
+- prepara y valida todo antes de publicar la base;
+- adapta las rutas guardadas a las carpetas de destino;
+- conserva los archivos anteriores durante la escritura para revertir un error;
+- marca una restauración interrumpida e impide arrancar hasta repetirla.
+
+El servicio y estas operaciones utilizan el mismo bloqueo del sistema operativo.
+Detén el broker antes de hacer una copia o restaurar. Reinicia las instalaciones
+anteriores al cambio para que también utilicen esa protección. No borres el
+archivo `.state.lock`: su existencia no significa que el bloqueo siga ocupado.
 
 ## Comandos
 
 ```powershell
-python scripts/backup_state.py backup --database state/broker.db --artifacts state/tasks --output backups/ai-broker-state.zip
+python scripts/backup_state.py backup --database state/broker.db --artifacts state/tasks --files state/files --output backups/ai-broker-state.zip
 python scripts/backup_state.py verify --backup backups/ai-broker-state.zip
-python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --database state/broker.db --artifacts state/tasks --replace
+python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --database state/broker.db --artifacts state/tasks --files state/files --replace
 ```
+
+Para comprobar una recuperación sin tocar el almacén de trabajo, restaura a
+carpetas nuevas:
+
+```powershell
+python scripts/backup_state.py restore --backup backups/ai-broker-state.zip --database recuperacion/broker.db --artifacts recuperacion/tasks --files recuperacion/files
+```
+
+Usa las rutas reales de tu configuración si difieren de las predeterminadas.
+`--replace` es necesario solo si quieres sobrescribir destinos existentes.
+Si la restauración se interrumpe, repítela con los mismos destinos y `--replace`;
+no elimines la marca `.restore-in-progress` para forzar el arranque.
 
 ## Limites actuales
 
 - No cifra backups.
 - No sube backups a almacenamiento externo.
 - No rota backups antiguos.
-- No coordina parada del servicio Windows; para restaurar en produccion se debe detener el servicio antes del restore.
-- No incluye `state/files` (ficheros ingeridos, fase 7): tras un restore, las filas `ingested_files` de la BD pueden apuntar a ficheros ausentes; re-subir el documento (dedupe por SHA-256) lo regenera.
+- No detiene automáticamente el servicio Windows; el operador debe detenerlo para copiar o restaurar.
+- Una copia antigua `v1` no recupera documentos que nunca guardó. Si contiene filas de documentos, su restauración se rechaza con una explicación. Las copias antiguas sin documentos siguen admitidas.
+- Volver a subir un documento cuyos archivos faltan o están dañados repara el mismo identificador cuando su política de privacidad es compatible; si necesita conversión se encola otra vez. Esto no recupera documentos sin disponer del original.
 
 ## Logging operativo
 

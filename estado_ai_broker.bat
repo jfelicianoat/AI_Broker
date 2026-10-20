@@ -21,12 +21,19 @@ if %ERRORLEVEL% NEQ 0 (
   exit /b 0
 )
 
+rem Con server.tls_* el broker habla HTTPS, tambien en loopback, con el
+rem certificado de la CA del broker (certs\broker-ca.crt).
+set "BROKER_SCHEME=http"
+findstr /r /c:"^  tls_certfile:" broker_config.yaml >nul && set "BROKER_SCHEME=https"
+if "%BROKER_HOST%"=="0.0.0.0" set "BROKER_HOST=127.0.0.1"
+
 echo.
-echo Probando /health en %BROKER_HOST%...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-RestMethod -Uri 'http://%BROKER_HOST%:8765/health' | ConvertTo-Json -Depth 6 } catch { Write-Host 'No se pudo consultar /health:' $_.Exception.Message; exit 1 }"
+echo Probando /health en 127.0.0.1...
+".venv\Scripts\python.exe" -c "import json, os, httpx; ca = r'certs\broker-ca.crt'; r = httpx.get('%BROKER_SCHEME%://127.0.0.1:8765/health', verify=ca if os.path.isfile(ca) else True, timeout=10); print(json.dumps(r.json(), indent=2, ensure_ascii=True))"
+if %ERRORLEVEL% NEQ 0 echo No se pudo consultar /health.
 
 echo.
 echo Panel:
-echo   http://%BROKER_HOST%:8765/dashboard
+echo   %BROKER_SCHEME%://%BROKER_HOST%:8765/dashboard
 echo.
 pause

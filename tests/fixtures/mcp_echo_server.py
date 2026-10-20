@@ -10,6 +10,7 @@ a eso en vez de romper el handshake.
 """
 import json
 import sys
+import time
 
 TOOLS = [
     {
@@ -65,6 +66,18 @@ def main() -> None:
             params = request.get("params") or {}
             name = params.get("name")
             arguments = params.get("arguments") or {}
+            if name == "structured":
+                send({"jsonrpc": "2.0", "id": request_id, "result": {
+                    "structuredContent": arguments,
+                    "content": [{"type": "text", "text": "ignored rendered text"}],
+                }})
+                continue
+            if name == "sleep":
+                time.sleep(float(arguments.get("seconds", 0)))
+                send({"jsonrpc": "2.0", "id": request_id, "result": {
+                    "content": [{"type": "text", "text": json.dumps({"done": True})}],
+                }})
+                continue
             if name == "echo":
                 send({"jsonrpc": "2.0", "id": request_id, "result": {
                     "content": [{"type": "text", "text": f"eco: {arguments.get('text', '')}"}],
