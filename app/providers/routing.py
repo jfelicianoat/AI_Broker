@@ -18,7 +18,16 @@ from app.config import (
 )
 from app.model_capabilities import supports_image_output, supports_vision
 from app.model_enrichment import ModelEnrichment
-from app.model_quarantine import QuarantineEntry, QuarantineKey, quarantine_key
+from app.model_quarantine import (
+    ArbiterRecord,
+    ArbiterRecordKey,
+    QuarantineEntry,
+    QuarantineKey,
+    RoleKey,
+    RoleUnfitness,
+    quarantine_key,
+    role_group,
+)
 from app.model_stats import ModelKey, ModelStats
 from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
@@ -56,7 +65,7 @@ from app.schemas import (
     requires_vision,
     uses_tool_loop,
 )
-from app.task_classifier import classify_image_intent, classify_task_type
+from app.task_classifier import classify_image_intent, classify_task_type, invocation_task_type
 
 logger = logging.getLogger("ai_broker.routing")
 
@@ -133,6 +142,8 @@ class RoutedModelProvider:
                  larm: LarmProvider | None = None,
                  stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
                  quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
+                 role_fitness_loader: Callable[[], dict[RoleKey, RoleUnfitness]] | None = None,
+                 arbiter_record_loader: Callable[[], dict[ArbiterRecordKey, ArbiterRecord]] | None = None,
                  fingerprint_recorder: Callable[[tuple[str, str, str], dict[str, Any]], str] | None = None,
                  ) -> None:
         self.config = config
@@ -148,6 +159,11 @@ class RoutedModelProvider:
         # (app.model_quarantine). Se consulta en cada selección: la cuarentena
         # caduca sola y un modelo reinstalado debe volver sin reiniciar nada.
         self._quarantine_loader = quarantine_loader
+        # Modelos que no sirven para un rol de consenso concreto aunque sirvan
+        # para `single` (app.model_quarantine.load_role_unfitness).
+        self._role_fitness_loader = role_fitness_loader
+        # Historial como árbitro por tipo de tarea (load_arbiter_record).
+        self._arbiter_record_loader = arbiter_record_loader
         # Registra la huella de ejecución de cada modelo y deja constancia
         # cuando cambia (app.model_fingerprints). Sin recorder el catálogo sigue
         # publicando la huella; lo único que se pierde es la señal de cambio.
@@ -163,6 +179,12 @@ class RoutedModelProvider:
         # nunca compite por los slots que sirven respuestas, y de uno en uno
         # porque solo se mide a un aspirante a la vez.
         self._background_inference_slot = asyncio.Semaphore(1)
+        # Carril de embeddings (contrato 2.12): no compite con el slot serie
+        # que sirve el chat. Si lo hiciera, el carril propio del despachador no
+        # serviría de nada: el vector seguiría esperando a que acabase la
+        # generación en curso, solo que un piso más abajo.
+        self._embedding_parallel = config.processing.embedding_lane.max_parallel
+        self._embedding_inference_slot = asyncio.Semaphore(self._embedding_parallel)
         self.prompt_compressor = self._build_prompt_compressor(config)
         self.model_enrichment = ModelEnrichment(
             config.model_enrichment,
@@ -332,6 +354,10 @@ class RoutedModelProvider:
             await provider.close()
 
     def _rebuild_inference_slots(self, config: BrokerConfig) -> None:
+        embedding_parallel = config.processing.embedding_lane.max_parallel
+        if embedding_parallel != self._embedding_parallel:
+            self._embedding_parallel = embedding_parallel
+            self._embedding_inference_slot = asyncio.Semaphore(embedding_parallel)
         limit = effective_max_parallel_invocations(config)
         if limit == self._parallel_limit:
             return
@@ -357,11 +383,19 @@ class RoutedModelProvider:
         sources.extend(self.custom.values())
         if self.larm.enabled:
             sources.append(self.larm)
-        for source in sources:
-            try:
-                result.extend(await source.models())
-            except ProviderError:
-                pass
+        # En paralelo: en serie, un proveedor caído (2 s hasta que Windows da la
+        # conexión por rechazada) más uno remoto lento sumaban 3-8 s a CADA
+        # llamada, y una tarea llama varias veces (selección, huella). Un
+        # embedding de 20 ms tardaba así más de 10 s en volver.
+        fetched = await asyncio.gather(
+            *(source.models() for source in sources), return_exceptions=True,
+        )
+        for outcome in fetched:
+            if isinstance(outcome, ProviderError):
+                continue
+            if isinstance(outcome, BaseException):
+                raise outcome
+            result.extend(outcome)
         await self.model_enrichment.ensure_loaded()
         quarantine = self.load_quarantine()
         entries = [self.model_enrichment.enrich_entry(item) for item in result]
@@ -547,6 +581,60 @@ class RoutedModelProvider:
             return self._quarantine_loader() or {}
         except Exception:
             logger.warning("routing.quarantine_unavailable", exc_info=True)
+            return {}
+
+    def load_role_unfitness(self) -> dict[RoleKey, RoleUnfitness]:
+        """Mismo criterio que `load_quarantine`: leer mal la evidencia nunca
+        deja al broker sin candidatos."""
+        if self._role_fitness_loader is None:
+            return {}
+        try:
+            return self._role_fitness_loader() or {}
+        except Exception:
+            logger.warning("routing.role_fitness_unavailable", exc_info=True)
+            return {}
+
+    def _without_unfit_for_role(
+        self, catalog: list[dict[str, Any]], roles: list[str],
+    ) -> list[dict[str, Any]]:
+        """Aparta de un rol de consenso a los modelos que fallan en él.
+
+        Solo cuando TODOS los roles pedidos son del mismo grupo (proponentes o
+        árbitro): `single` y el resto no se tocan, que es justo donde estos
+        modelos sí responden. Fail-open como la cuarentena: si no quedara nadie,
+        se sigue con el catálogo entero."""
+        groups = {role_group(role) for role in roles}
+        group = next(iter(groups)) if len(groups) == 1 else None
+        if group is None or not catalog:
+            return catalog
+        unfit = self.load_role_unfitness()
+        if not unfit:
+            return catalog
+        kept = [entry for entry in catalog if (*quarantine_key(entry), group) not in unfit]
+        if not kept:
+            logger.info("routing.role_fitness_bypassed", extra={
+                "event": "routing.role_fitness_bypassed", "role_group": group,
+            })
+            return catalog
+        if len(kept) != len(catalog):
+            logger.info("routing.role_unfit_skipped", extra={
+                "event": "routing.role_unfit_skipped",
+                "role_group": group,
+                "skipped": [
+                    f"{entry['provider']}/{entry['name']}: "
+                    f"{unfit[(*quarantine_key(entry), group)].reason}"
+                    for entry in catalog if entry not in kept
+                ],
+            })
+        return kept
+
+    def _load_arbiter_records(self) -> dict[ArbiterRecordKey, ArbiterRecord]:
+        if self._arbiter_record_loader is None:
+            return {}
+        try:
+            return self._arbiter_record_loader() or {}
+        except Exception:
+            logger.warning("routing.arbiter_record_unavailable", exc_info=True)
             return {}
 
     def _load_stats(self) -> dict[ModelKey, ModelStats]:
@@ -999,12 +1087,22 @@ class RoutedModelProvider:
             )
         if not context_catalog:
             raise ProviderError("MODEL_UNAVAILABLE", "No hay modelos permitidos disponibles", retryable=True)
+        if not preferred:
+            # Un target o un preferred mandan sobre esta política igual que
+            # sobre las demás: quien fija el modelo asume su historial.
+            ranked_catalog = self._without_unfit_for_role(ranked_catalog, roles)
         # El árbitro se elige con otro criterio que los proponentes, y solo
         # cuando la petición no ha fijado ya un modelo: un target o un
         # preferred mandan sobre cualquier política.
         if all(role == "arbiter" for role in roles) and not preferred:
             ranked_catalog = self._rank_arbiters(ranked_catalog, request)
-        elif self.system1 is not None and not preferred and count == 1 and roles == ["single"]:
+        elif (
+            self.system1 is not None and not preferred and count == 1 and roles == ["single"]
+            and request.inference_kind != InferenceKind.embedding
+        ):
+            # Los embeddings no pasan por System-1: juzga qué modelo redacta
+            # mejor una respuesta, no qué espacio vectorial conviene, y además
+            # ocupa el slot serie del chat, que es lo que el carril evita.
             # Semantic decisions see only deterministically eligible candidates;
             # explicit models, arbiters and multi-model contracts keep precedence.
             # The budget narrows only what System-1 may pick: applied to the
@@ -1112,15 +1210,24 @@ class RoutedModelProvider:
         if request.execution.selection.arbiter_policy != "strongest_available":
             return catalog
         budget = local_memory_budget_bytes(self.config)
+        # Quien como árbitro de ESTE tipo de tarea falla más de lo que acierta
+        # pasa detrás de los demás: el tamaño no avisa de un modelo que hace
+        # eco del prompt al sintetizar textos largos.
+        task_type = invocation_task_type(request)
+        records = self._load_arbiter_records()
 
-        def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple[int, float, int]:
+        def failing(entry: dict[str, Any]) -> bool:
+            record = records.get((*quarantine_key(entry), task_type))
+            return record is not None and record.mostly_failing
+
+        def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple[int, int, float, int]:
             index, entry = indexed
             oversized = (
                 is_local_deployment(entry.get("deployment"))
                 and 0 < budget < int(entry.get("size_bytes") or 0)
             )
             parameters = declared_parameter_count(entry)
-            return (1 if oversized else 0, -(parameters or 0.0), index)
+            return (1 if oversized else 0, 1 if failing(entry) else 0, -(parameters or 0.0), index)
 
         return [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
 
@@ -1360,6 +1467,8 @@ class RoutedModelProvider:
             # todo este trabajo pretende eliminar. Tiene su propio carril de
             # uno en uno.
             inference_slot = self._background_inference_slot
+        elif request.inference_kind == InferenceKind.embedding and self.config.processing.embedding_lane.enabled:
+            inference_slot = self._embedding_inference_slot
         else:
             inference_slot = self._parallel_inference_slot if allow_parallel else self._serial_inference_slot
         async with inference_slot:
@@ -1367,6 +1476,7 @@ class RoutedModelProvider:
             allowed = {item.lower() for item in declared} if declared is not None else None
             provider_name = model.provider.lower()
             embedding = request.inference_kind == InferenceKind.embedding
+            batch = request.content.inputs if embedding else None
             if allowed is not None and provider_name not in allowed:
                 raise ProviderError("PROVIDER_NOT_ALLOWED", f"Proveedor no permitido: {model.provider}")
             if provider_name == "ollama":
@@ -1375,6 +1485,8 @@ class RoutedModelProvider:
                 entry = self._resolve_catalog_entry(await self.ollama.models(), model, "Ollama")
                 if not is_local_deployment(entry.get("deployment")) and not request.model_requirements.cloud_allowed:
                     raise ProviderError("CLOUD_NOT_ALLOWED", f"El modelo {model.model} requiere cloud")
+                if batch is not None:
+                    return await self.ollama.embed_batch(request, model.model, list(batch))
                 if embedding:
                     return await self.ollama.embed(request, model.model, prompt)
                 return await self.ollama.generate(request, model.model, prompt, system=system)
@@ -1393,6 +1505,14 @@ class RoutedModelProvider:
                         "MODEL_DEPLOYMENT_MISMATCH",
                         f"Los modelos LARM son locales: {model.deployment}/{model.model}",
                     )
+                if batch is not None:
+                    # La lease de LARM se dimensiona para un texto; prometer un
+                    # lote sin poder dimensionarlo sería truncar por la puerta
+                    # de atrás. Falla el lote entero, como pide el contrato.
+                    raise ProviderError(
+                        "EMBEDDING_BATCH_UNSUPPORTED",
+                        "Los modelos LARM no admiten embeddings en lote; envía un texto por tarea",
+                    )
                 if embedding:
                     return await self.larm.embed(request, model.model, prompt)
                 return await self.larm.generate(request, model.model, prompt, system=system)
@@ -1406,6 +1526,8 @@ class RoutedModelProvider:
                     f"{model.provider}/{model.model}",
                     "No compatible con /chat/completions",
                 )
+                if batch is not None:
+                    return await provider.embed_batch(request, model.model, list(batch))
                 if embedding:
                     return await provider.embed(request, model.model, prompt)
                 return await provider.generate(request, model.model, prompt, system=system)
@@ -1417,6 +1539,8 @@ def build_provider(
     stats_loader: Callable[[], dict[ModelKey, ModelStats]] | None = None,
     quarantine_loader: Callable[[], dict[QuarantineKey, QuarantineEntry]] | None = None,
     fingerprint_recorder: Callable[[tuple[str, str, str], dict[str, Any]], str] | None = None,
+    role_fitness_loader: Callable[[], dict[RoleKey, RoleUnfitness]] | None = None,
+    arbiter_record_loader: Callable[[], dict[ArbiterRecordKey, ArbiterRecord]] | None = None,
 ):
     if config.processing.provider_mode == "bootstrap":
         return BootstrapModelProvider()
@@ -1424,5 +1548,7 @@ def build_provider(
         config,
         stats_loader=stats_loader,
         quarantine_loader=quarantine_loader,
+        role_fitness_loader=role_fitness_loader,
+        arbiter_record_loader=arbiter_record_loader,
         fingerprint_recorder=fingerprint_recorder,
     )

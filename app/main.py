@@ -39,7 +39,7 @@ from app.dashboard_web import (
     valid_csrf_token_shape,
 )
 from app.db import Database
-from app.dispatcher import dispatcher_loop, ingestion_dispatcher_loop
+from app.dispatcher import dispatcher_loop, embedding_dispatcher_loop, ingestion_dispatcher_loop
 from app.health import HealthCache, health_response
 from app.ingestion import (
     ALLOWED_FORMATS,
@@ -64,10 +64,10 @@ from app.model_catalog import (
     model_feature_profile,
 )
 from app.model_fingerprints import fingerprint_recorder
-from app.model_quarantine import load_quarantine
+from app.model_quarantine import load_arbiter_record, load_quarantine, load_role_unfitness
 from app.model_stats import load_model_stats
 from app.providers import build_provider
-from app.repository import IdempotencyConflict, QueueFull, TaskRepository
+from app.repository import IdempotencyConflict, QueueFull, TaskRepository, lane_for_request
 from app.resource_scheduler import ResourceScheduler
 from app.sandbox import SandboxExecutor
 from app.schemas import (
@@ -81,6 +81,7 @@ from app.schemas import (
     DashboardTaskDetail,
     DashboardTaskPage,
     DataClassification,
+    EmbeddingLaneCapability,
     ExecutionPreset,
     ExecutionStrategy,
     FileAcceptedResponse,
@@ -192,6 +193,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         # Misma BD y mismo diferido: la cuarentena caduca sola, así que hay que
         # releerla en cada selección y no cachearla al arrancar.
         quarantine_loader=lambda: load_quarantine(db, broker_config.model_quarantine),
+        # Aptitud por rol de consenso, releída igual en cada selección.
+        role_fitness_loader=lambda: load_role_unfitness(db, broker_config.model_quarantine),
+        arbiter_record_loader=lambda: load_arbiter_record(db, broker_config.model_quarantine),
         # Deja constancia de la configuración con la que se ejecuta cada modelo
         # y señala cuándo cambia (app.model_fingerprints): un modelo que empeora
         # porque le actualizaron la plantilla era hasta ahora indetectable.
@@ -318,6 +322,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         stop_dispatcher = asyncio.Event()
         dispatcher_task = None
         ingestion_dispatcher_task = None
+        embedding_dispatcher_task = None
         if broker_config.processing.auto_dispatch:
             dispatcher_task = asyncio.create_task(
                 dispatcher_loop(
@@ -337,6 +342,20 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                         stop_dispatcher,
                         broker_config.processing.dispatcher_interval_seconds,
                         broker_config.ingestion.max_concurrent,
+                    )
+                )
+            embedding_lane = broker_config.processing.embedding_lane
+            if embedding_lane.enabled:
+                # Carril propio (contrato 2.12): un embedding no espera a que
+                # termine la generación de chat en curso. La capacidad se fija
+                # al arrancar; cambiarla pide reinicio, como la de la ingesta.
+                embedding_dispatcher_task = asyncio.create_task(
+                    embedding_dispatcher_loop(
+                        repository,
+                        coordinator,
+                        stop_dispatcher,
+                        broker_config.processing.dispatcher_interval_seconds,
+                        embedding_lane.max_parallel,
                     )
                 )
         # Descarga por inactividad: carril propio, con el mismo evento de
@@ -361,6 +380,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         mcp_warm_up_task = asyncio.create_task(mcp_registry.warm_up())
         app.state.dispatcher_task = dispatcher_task
         app.state.ingestion_dispatcher_task = ingestion_dispatcher_task
+        app.state.embedding_dispatcher_task = embedding_dispatcher_task
         app.state.idle_unload_task = idle_unload_task
         try:
             yield
@@ -370,7 +390,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             stop_dispatcher.set()
             pending_loops = [
                 task
-                for task in (dispatcher_task, ingestion_dispatcher_task, idle_unload_task)
+                for task in (
+                    dispatcher_task, ingestion_dispatcher_task, embedding_dispatcher_task, idle_unload_task,
+                )
                 if task is not None
             ]
             if pending_loops:
@@ -553,6 +575,21 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             except AttachmentError as exc:
                 status = 404 if exc.code == "ATTACHED_FILE_NOT_FOUND" else 409
                 raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
+        inputs = payload.content.inputs
+        if inputs is not None:
+            # Depende de la configuración del broker, así que no cabe en el
+            # esquema: se comprueba aquí, antes de encolar, con el mismo 422
+            # que cualquier otra petición que el contrato no admite.
+            batch_max = broker_config.processing.embedding_lane.batch_max
+            if len(inputs) > batch_max:
+                raise HTTPException(status_code=422, detail={
+                    "code": "EMBEDDING_BATCH_TOO_LARGE",
+                    "message": (
+                        f"content.inputs trae {len(inputs)} textos y el máximo por lote es "
+                        f"{batch_max} (capabilities.embedding_batch_max)"
+                    ),
+                    "batch_max": batch_max,
+                })
         if not broker_config.sandbox.enabled and (
             "run_code" in payload.execution.agent.skills
             or "run_code" in payload.execution.proposer_skills
@@ -617,7 +654,11 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 )
         try:
             task, created = repository.create_task(
-                payload, queue_max_size=broker_config.processing.queue_max_size
+                payload,
+                queue_max_size=broker_config.processing.queue_max_size,
+                kind=lane_for_request(
+                    payload, embedding_lane=broker_config.processing.embedding_lane.enabled,
+                ),
             )
         except IdempotencyConflict as exc:
             raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
@@ -858,7 +899,29 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     async def dispatcher_tick(request: Request) -> dict[str, str | None]:
         verify_admin_access(request, broker_config)
         task_id = await coordinator.process_next(repository)
+        if task_id is None and broker_config.processing.embedding_lane.enabled:
+            # Sin inferencia pendiente avanza un embedding: con el carril
+            # activo, un cliente que ya usaba este tick para sus embeddings
+            # seguiría viéndolos en cola para siempre.
+            task_id = await _embedding_tick()
         return {"task_id": task_id}
+
+    async def _embedding_tick() -> str | None:
+        task_id = await asyncio.to_thread(
+            repository.claim_next_embedding_task,
+            broker_config.processing.embedding_lane.max_parallel,
+        )
+        if task_id is not None:
+            await coordinator.process_task(repository, task_id)
+        return task_id
+
+    @app.post("/api/v1/dispatcher/embedding/tick")
+    async def embedding_dispatcher_tick(request: Request) -> dict[str, str | None]:
+        """Avanza el carril de embeddings una tarea (con auto_dispatch apagado)."""
+        verify_admin_access(request, broker_config)
+        if not broker_config.processing.embedding_lane.enabled:
+            raise HTTPException(status_code=409, detail="EMBEDDING_LANE_DISABLED")
+        return {"task_id": await _embedding_tick()}
 
     @app.post("/api/v1/dispatcher/ingestion/tick")
     async def ingestion_dispatcher_tick(request: Request) -> dict[str, str | None]:
@@ -954,7 +1017,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             system1_judgments=broker_config.system1.enabled,
             system1_semantic_routing=broker_config.system1.enabled and broker_config.system1.routing.enabled,
             system1_evaluation=broker_config.system1.enabled,
-            contract_version="2.11",
+            contract_version="2.12",
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -1005,9 +1068,20 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             long_context_map_reduce=True,
             derived_data_boundary=True,
             work_lanes=(
-                [TaskKind.inference, TaskKind.ingestion]
-                if broker_config.ingestion.enabled
-                else [TaskKind.inference]
+                [TaskKind.inference]
+                + ([TaskKind.ingestion] if broker_config.ingestion.enabled else [])
+                + ([TaskKind.embedding] if broker_config.processing.embedding_lane.enabled else [])
+            ),
+            # Contrato 2.12. El lote se anuncia siempre (no depende del carril);
+            # el carril, solo si está activo.
+            embedding_batch_max=broker_config.processing.embedding_lane.batch_max,
+            embedding_lane=(
+                EmbeddingLaneCapability(
+                    max_parallel=broker_config.processing.embedding_lane.max_parallel,
+                    batch_max=broker_config.processing.embedding_lane.batch_max,
+                )
+                if broker_config.processing.embedding_lane.enabled
+                else None
             ),
             generation_determinism=True,
             exclude_from_model_learning=True,

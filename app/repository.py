@@ -14,10 +14,12 @@ from app.db import Database, dumps_json, loads_json
 from app.providers import ModelOutput, ProviderError
 from app.schemas import (
     FINAL_ARTIFACT_TYPES,
+    REQUEST_CARRYING_KINDS,
     TERMINAL_STATUSES,
     EffectiveGeneration,
     ExecutionFingerprint,
     ExecutionStrategy,
+    InferenceKind,
     ModelReference,
     PromptCompressionEcho,
     QueueItem,
@@ -67,8 +69,12 @@ PENDING_QUEUE_STATUSES = ("queued", "waiting_for_memory", "waiting_for_dependenc
 
 def _make_room_in_queue(
     connection: Any, priority: int, created_at: str, *, exclude_id: str | None = None,
+    kind: str = TaskKind.inference.value,
 ) -> int:
     """Posición donde entra una tarea de inferencia según su prioridad.
+
+    `kind` es el carril con el que se compite: un embedding solo adelanta a
+    otros embeddings, porque cada carril se reclama por separado.
 
     El reclamo ordena antes por `queue_position` que por `priority`, así que la
     prioridad solo tiene efecto si se traduce en posición al encolar: la tarea
@@ -82,9 +88,9 @@ def _make_room_in_queue(
     marks = ",".join("?" for _ in PENDING_QUEUE_STATUSES)
     row = connection.execute(
         f"SELECT MIN(queue_position) AS pos FROM tasks "
-        f"WHERE kind = 'inference' AND status IN ({marks}) AND queue_position IS NOT NULL "
+        f"WHERE kind = ? AND status IN ({marks}) AND queue_position IS NOT NULL "
         f"AND id <> ? AND (priority > ? OR (priority = ? AND created_at > ?))",
-        (*PENDING_QUEUE_STATUSES, exclude_id or "", priority, priority, created_at),
+        (kind, *PENDING_QUEUE_STATUSES, exclude_id or "", priority, priority, created_at),
     ).fetchone()
     if row is None or row["pos"] is None:
         tail = connection.execute(
@@ -99,6 +105,15 @@ def _make_room_in_queue(
         (position,),
     )
     return position
+
+
+def lane_for_request(request: TaskCreateRequest, *, embedding_lane: bool) -> TaskKind:
+    """Carril en el que se encola una petición. Fuente única para la API y el
+    probador del panel: si discreparan, la misma petición correría en carriles
+    distintos según por dónde entrase."""
+    if embedding_lane and request.inference_kind == InferenceKind.embedding:
+        return TaskKind.embedding
+    return TaskKind.inference
 
 
 class IdempotencyConflict(ValueError):
@@ -135,7 +150,13 @@ class TaskRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def create_task(self, request: TaskCreateRequest, *, queue_max_size: int) -> tuple[TaskStateResponse, bool]:
+    def create_task(
+        self, request: TaskCreateRequest, *, queue_max_size: int,
+        kind: TaskKind = TaskKind.inference,
+    ) -> tuple[TaskStateResponse, bool]:
+        """Encola una petición en su carril. `kind` lo decide quien sabe la
+        configuración (si el carril de embeddings está activo): el repositorio
+        no la conoce."""
         task_id = f"task_{uuid4().hex}"
         now = _utc_now_iso()
         request_json = request.model_dump(mode="json")
@@ -160,16 +181,16 @@ class TaskRepository:
             queued = connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'queued'").fetchone()[0]
             if int(queued) >= queue_max_size:
                 raise QueueFull("QUEUE_FULL")
-            queue_position = _make_room_in_queue(connection, request.priority, now)
+            queue_position = _make_room_in_queue(connection, request.priority, now, kind=kind.value)
             connection.execute(
                 """
                 INSERT INTO tasks (
-                    id, request_id, idempotency_key, request_hash, request_json, status, priority, queue_position,
-                    progress_json, task_group, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, request_id, idempotency_key, request_hash, request_json, kind, status, priority,
+                    queue_position, progress_json, task_group, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (task_id, request.request_id, request.idempotency_key, request_hash, dumps_json(request_json),
-                 TaskStatus.queued.value, request.priority, queue_position, dumps_json(progress),
+                 kind.value, TaskStatus.queued.value, request.priority, queue_position, dumps_json(progress),
                  request.group, now, now),
             )
             connection.execute(
@@ -189,7 +210,7 @@ class TaskRepository:
         if row is None:
             raise KeyError(task_id)
         kind = TaskKind(row["kind"])
-        if kind != TaskKind.inference:
+        if kind not in REQUEST_CARRYING_KINDS:
             raise ValueError(
                 f"la tarea {task_id} es del carril {kind.value} y no lleva una petición de inferencia"
             )
@@ -317,6 +338,53 @@ class TaskRepository:
             connection.execute(
                 "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (row["id"], "task.claimed", dumps_json({"status": "routing"}), now),
+            )
+            return str(row["id"])
+
+    def claim_next_embedding_task(self, max_parallel: int) -> str | None:
+        """Reclama un embedding si su carril tiene sitio.
+
+        Mismo orden que la inferencia —`queue_position`, que ya refleja la
+        prioridad al encolar— y la misma regla de `not_before` para lo que
+        espera memoria o dependencias. Sin reserva anti-inanición: aquí todos
+        piden el mismo modelo pequeño, y nadie se queda sin turno por tamaño.
+
+        El conteo de activos y el reclamo van en la misma transacción
+        inmediata: dos vueltas del despachador no pueden pasar el mismo hueco.
+        """
+        active = ACTIVE_INFERENCE_STATUSES
+        marks = ",".join("?" for _ in active)
+        claimable = self.CLAIMABLE_INFERENCE_STATUSES
+        claim_marks = ",".join("?" for _ in claimable)
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            running = connection.execute(
+                f"SELECT COUNT(*) AS total FROM tasks WHERE kind = 'embedding' AND status IN ({marks})",
+                active,
+            ).fetchone()
+            if int(running["total"]) >= max_parallel:
+                return None
+            row = connection.execute(
+                f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
+                f"AND kind = 'embedding' AND (not_before IS NULL OR not_before <= ?) "
+                f"ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1",
+                (*claimable, now),
+            ).fetchone()
+            if row is None:
+                return None
+            progress = loads_json(row["progress_json"], {})
+            progress["phase"] = TaskStatus.routing.value
+            cursor = connection.execute(
+                f"UPDATE tasks SET status = ?, queue_position = NULL, progress_json = ?, "
+                f"not_before = NULL, updated_at = ? "
+                f"WHERE id = ? AND status IN ({claim_marks})",
+                (TaskStatus.routing.value, dumps_json(progress), now, row["id"], *claimable),
+            )
+            if cursor.rowcount != 1:
+                return None
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (row["id"], "task.claimed", dumps_json({"status": "routing", "lane": "embedding"}), now),
             )
             return str(row["id"])
 
@@ -1429,9 +1497,9 @@ class TaskRepository:
         llamadas locales el reintento automático es seguro: cuesta cómputo,
         no dinero.
         """
-        # Solo inferencia: las conversiones interrumpidas las recupera
-        # `requeue_interrupted_ingestion_tasks`, que no tiene que razonar sobre
-        # invocaciones ambiguas ni sobre coste ya facturado.
+        # Solo inferencia y embeddings: las conversiones interrumpidas las
+        # recupera `requeue_interrupted_ingestion_tasks`, que no tiene que
+        # razonar sobre invocaciones ambiguas ni sobre coste ya facturado.
         active_statuses = ACTIVE_INFERENCE_STATUSES
         placeholders = ",".join("?" for _ in active_statuses)
         now = _utc_now_iso()
@@ -1439,7 +1507,7 @@ class TaskRepository:
         with self.db.transaction() as connection:
             rows = connection.execute(
                 "SELECT id, attempt, progress_json FROM tasks "
-                f"WHERE kind = 'inference' AND status IN ({placeholders})",
+                f"WHERE kind IN ('inference', 'embedding') AND status IN ({placeholders})",
                 active_statuses,
             ).fetchall()
             position = 0
@@ -1773,7 +1841,7 @@ class TaskRepository:
         # de que haya que mirar el kind ANTES de interpretar la petición.
         request = (
             TaskCreateRequest.model_validate(loads_json(row["request_json"]))
-            if kind == TaskKind.inference
+            if kind in REQUEST_CARRYING_KINDS
             else None
         )
         return TaskStateResponse(

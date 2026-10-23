@@ -21,6 +21,7 @@ from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.providers.base import (
     MIN_BYTES_PER_TOKEN,
     ROLE_SYSTEM_PROMPTS,
+    estimate_required_context,
     estimate_tokens_upper_bound,
     flatten_multimodal,
     multimodal_content,
@@ -56,7 +57,7 @@ from app.strategy_router import (
     recommend_from_cases,
     signal_bucket,
 )
-from app.task_classifier import classify_task_type
+from app.task_classifier import classify_task_type, task_type_scope
 
 logger = logging.getLogger("ai_broker.coordinator")
 
@@ -507,10 +508,13 @@ class ConsensusCoordinator:
             self.scheduler.config.processing.task_timeout_seconds,
         )
         try:
-            await asyncio.wait_for(
-                self._process_task_request(repository, task_id, request),
-                timeout=effective_timeout,
-            )
+            # Desde 3.12 wait_for corre en esta misma tarea: el ámbito se
+            # restaura al salir para que no se cuele en la siguiente.
+            with task_type_scope(classify_task_type(request)):
+                await asyncio.wait_for(
+                    self._process_task_request(repository, task_id, request),
+                    timeout=effective_timeout,
+                )
         except asyncio.TimeoutError:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
@@ -927,6 +931,7 @@ class ConsensusCoordinator:
     def _finalize_single(
         self, repository, task_id: str, request: TaskCreateRequest,
         model: ModelReference, output: ModelOutput, invocation_id: str,
+        embedding_model: dict[str, Any] | None = None,
     ) -> None:
         progress = {
             "phase": TaskStatus.completed.value,
@@ -936,14 +941,24 @@ class ConsensusCoordinator:
             "cost_estimated_usd": None,
             "cost_actual_usd": output.cost_usd,
         }
-        result = self._technical_result(request, model, output)
+        result = self._technical_result(request, model, output, embedding_model)
         repository.complete_single_task(
             task_id, invocation_id, model, output, progress=progress, result=result,
         )
         try:
-            if output.embedding is not None:
+            if output.embeddings is not None:
+                # El artefacto final lleva el lote entero y la identidad del
+                # modelo: quien lo descargue debe poder saber con qué espacio
+                # vectorial se hizo sin cruzarlo con nada más.
+                artifact = self.artifacts.write_text(task_id, "single/embeddings.json", dumps_json({
+                    "embeddings": [list(vector) for vector in output.embeddings],
+                    "embedding_model": embedding_model,
+                }))
+                artifact_type = "embedding_output"
+            elif output.embedding is not None:
                 artifact = self.artifacts.write_text(task_id, "single/embedding.json", dumps_json({
                     "embedding": list(output.embedding),
+                    "embedding_model": embedding_model,
                 }))
                 artifact_type = "embedding_output"
             else:
@@ -967,7 +982,37 @@ class ConsensusCoordinator:
         if inference is None:
             return
         model, output, invocation_id = inference
-        self._finalize_single(repository, task_id, request, model, output, invocation_id)
+        embedding_model = None
+        if request.inference_kind == InferenceKind.embedding:
+            embedding_model = await self._embedding_model_identity(model, output)
+        self._finalize_single(
+            repository, task_id, request, model, output, invocation_id, embedding_model,
+        )
+
+    async def _embedding_model_identity(
+        self, model: ModelReference, output: ModelOutput,
+    ) -> dict[str, Any]:
+        """Con qué espacio vectorial se calcularon los vectores (contrato 2.12).
+
+        Mezclar en un índice vectores de dos modelos —o de dos versiones del
+        mismo nombre— da búsquedas basura sin ningún error visible. El digest
+        es lo que delata que `bge-m3:latest` ya no es el de ayer; sale de la
+        misma huella que se guarda con la invocación, no de otra consulta con
+        otra verdad."""
+        vectors = output.embeddings if output.embeddings is not None else (
+            (output.embedding,) if output.embedding is not None else ()
+        )
+        fingerprint = await self._invocation_fingerprint(model) or {}
+        components = fingerprint.get("components") or {}
+        digest = (components.get("digest") or {}).get("value")
+        return {
+            "provider": model.provider,
+            "deployment": model.deployment,
+            "model": model.model,
+            "dimensions": len(vectors[0]) if vectors else 0,
+            "digest": digest,
+            "fingerprint_hash": fingerprint.get("hash"),
+        }
 
     # ------------------------------------------------ map-reduce de contexto largo
 
@@ -1022,16 +1067,29 @@ class ConsensusCoordinator:
                 "chunks_total": len(chunks),
             })
         else:
+            single_pass_cap = self.scheduler.config.processing.long_context_single_pass_max_tokens
+            selected: ModelReference | None
             try:
-                await self.provider.select(request, 1, ["single"])
-                return False
+                selected = (await self.provider.select(request, 1, ["single"]))[0]
             except ProviderError as error:
                 if error.code != "CONTEXT_LIMIT_EXCEEDED":
                     raise
-            probe = request.model_copy(update={
-                "content": request.content.model_copy(update={"prompt": instruction, "attachments": []}),
-            })
-            model = (await self.provider.select(probe, 1, ["single"]))[0]
+                selected = None
+            if selected is not None:
+                # Cabe en la ventana declarada; solo se trocea si el modelo no
+                # es cloud y el prompt pasa del tope de una sola pasada.
+                if (
+                    not single_pass_cap
+                    or selected.deployment.lower() == "cloud"
+                    or estimate_required_context(request) <= single_pass_cap
+                ):
+                    return False
+                model = selected
+            else:
+                probe = request.model_copy(update={
+                    "content": request.content.model_copy(update={"prompt": instruction, "attachments": []}),
+                })
+                model = (await self.provider.select(probe, 1, ["single"]))[0]
             resolved_window = await self._context_window_for(model)
             if resolved_window is None:
                 raise ProviderError(
@@ -1039,6 +1097,8 @@ class ConsensusCoordinator:
                     "map_reduce requiere conocer la ventana de contexto del modelo seleccionado",
                 )
             window = resolved_window
+            if single_pass_cap and model.deployment.lower() != "cloud":
+                window = min(window, single_pass_cap)
             chunks = self._split_documents_for_window(
                 documents, instruction, window, request.generation.max_output_tokens,
             )
@@ -2239,12 +2299,27 @@ class ConsensusCoordinator:
         quorum = min(2, len(proposers))
         if len(proposals) < quorum:
             repository.set_stage_status(task_id, run_id, "proposing", "failed")
+            causes = ", ".join(
+                f"{item.get('model')}: {item.get('code')}" for item in skipped_proposers
+            ) or "sin detalle de las bajas"
             repository.update_task(
                 task_id,
                 TaskStatus.failed,
                 progress={**progress, "phase": TaskStatus.failed.value},
                 error={
                     "code": "CONSENSUS_QUORUM_NOT_REACHED",
+                    # El contrato (Client_API §8) promete {code, message,
+                    # retryable} en todo error, y este era el único que no los
+                    # traía: el cliente no sabía si reintentar.
+                    "message": (
+                        f"Solo {len(proposals)} de {len(proposers)} proponentes respondieron y "
+                        f"hacen falta {quorum} ({causes})"
+                    ),
+                    # Reintentar sirve si alguna baja fue transitoria (timeout,
+                    # proveedor caído, memoria). Si todas fueron definitivas
+                    # —eco del prompt, salida degenerada, capacidad—, repetir
+                    # con los mismos modelos fallaría igual.
+                    "retryable": any(item.get("retryable") for item in skipped_proposers),
                     "completed": len(proposals),
                     "required": quorum,
                     # Sin esto, una tarea en la que fallaron TODOS los
@@ -2977,6 +3052,9 @@ class ConsensusCoordinator:
             invocation_id = repository.start_invocation(
                 task_id, run_id, "arbiter", candidate, classify_task_type(request),
                 await self._model_loaded_state(candidate),
+                # Sin esto, una tarea excluida del aprendizaje seguía moviendo
+                # el historial del árbitro (cuarentena, aptitud por rol).
+                excluded_from_learning=request.exclude_from_model_learning,
                 compression=self._compression_echo(synthesis_request),
             )
             try:
@@ -3274,6 +3352,7 @@ class ConsensusCoordinator:
         request: TaskCreateRequest,
         model: ModelReference,
         output: ModelOutput,
+        embedding_model: dict[str, Any] | None = None,
     ) -> dict:
         result: dict[str, Any] = {
             "inference_kind": request.inference_kind.value,
@@ -3283,8 +3362,14 @@ class ConsensusCoordinator:
             "models_used": [model.model_dump(mode="json")],
             "fallback_used": self._fallback_used(request, model),
         }
-        if request.inference_kind == InferenceKind.embedding:
+        if request.inference_kind == InferenceKind.embedding and output.embeddings is not None:
+            result["embeddings"] = [list(vector) for vector in output.embeddings]
+            result["dimensions"] = len(output.embeddings[0]) if output.embeddings else 0
+            result["embedding_model"] = embedding_model
+        elif request.inference_kind == InferenceKind.embedding:
             result["embedding"] = list(output.embedding or ())
+            result["dimensions"] = len(output.embedding or ())
+            result["embedding_model"] = embedding_model
         else:
             result["assistant_content"] = output.content
             result["result_markdown"] = output.content

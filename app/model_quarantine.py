@@ -111,3 +111,160 @@ def quarantine_key(entry: dict) -> QuarantineKey:
         str(entry.get("deployment") or "").lower(),
         str(entry.get("name") or "").lower(),
     )
+
+
+# Roles del consenso agrupados por el trabajo que hacen. Los cinco nombres de
+# proponente son la misma tarea con distinta instrucción; el árbitro lee las
+# propuestas y sintetiza, que es otra cosa y falla de otra manera.
+PROPOSER_ROLES = frozenset({
+    "proposer", "generalist", "specialist", "skeptic", "analyst", "reviewer", "refiner",
+})
+ARBITER_ROLES = frozenset({"arbiter"})
+
+# (provider, deployment, model, grupo de rol)
+RoleKey = tuple[str, str, str, str]
+
+
+def role_group(role: str | None) -> str | None:
+    """`proposer`, `arbiter` o None para los roles que no son de consenso."""
+    value = str(role or "").lower()
+    if value in PROPOSER_ROLES:
+        return "proposer"
+    if value in ARBITER_ROLES:
+        return "arbiter"
+    return None
+
+
+@dataclass(frozen=True)
+class RoleUnfitness:
+    """Por qué un modelo no se elige para un rol de consenso."""
+
+    attempts: int
+    failures: int
+    last_code: str
+
+    @property
+    def failure_rate(self) -> float:
+        return self.failures / self.attempts if self.attempts else 0.0
+
+    @property
+    def reason(self) -> str:
+        return (
+            f"{self.failures} de {self.attempts} invocaciones en este rol acabaron en un fallo "
+            f"definitivo (último: {self.last_code})"
+        )
+
+
+def load_role_unfitness(
+    db: Database, settings: ModelQuarantineConfig
+) -> dict[RoleKey, RoleUnfitness]:
+    """Modelos que no sirven para un rol de consenso aunque sirvan para lo demás.
+
+    Existe porque la cuarentena mira al modelo entero y aquí el defecto es del
+    rol. lfm2:24b acierta 384 de 395 veces en `single` y, como proponente,
+    devuelve su propio prompt una de cada tres; nemotron:latest acierta casi
+    siempre en `single` y como árbitro hace eco 16 de 21 veces. Los aciertos en
+    `single` rompían la racha de la cuarentena, y el ranking —tiempo esperado
+    por tipo de tarea, sin rol— los seguía poniendo primeros porque son rápidos.
+
+    Cuenta solo los códigos definitivos de la cuarentena: un timeout o falta de
+    memoria no dicen nada del modelo en ese rol. Tampoco cuenta el tráfico
+    excluido del aprendizaje, por la misma razón que allí."""
+    if not settings.enabled or settings.role_max_failure_rate >= 1.0:
+        return {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=settings.role_window_hours)).isoformat()
+    roles = sorted(PROPOSER_ROLES | ARBITER_ROLES)
+    marks = ",".join("?" for _ in roles)
+    rows = db.query_all(
+        f"""
+        SELECT provider, deployment, model, role, status, error_code
+        FROM model_invocations
+        WHERE created_at >= ? AND status IN ('completed', 'failed')
+          AND excluded_from_learning = 0 AND role IN ({marks})
+        ORDER BY created_at ASC, id ASC
+        """,
+        (cutoff, *roles),
+    )
+    definitive = {code.upper() for code in settings.definitive_codes}
+    tallies: dict[RoleKey, list] = {}
+    for row in rows:
+        group = role_group(row["role"])
+        if group is None:
+            continue
+        code = str(row["error_code"] or "").upper()
+        if row["status"] == "failed" and code not in definitive:
+            continue
+        key: RoleKey = (
+            str(row["provider"]).lower(), str(row["deployment"]).lower(),
+            str(row["model"]).lower(), group,
+        )
+        tally = tallies.setdefault(key, [0, 0, ""])
+        tally[0] += 1
+        if row["status"] == "failed":
+            tally[1] += 1
+            tally[2] = code
+    return {
+        key: RoleUnfitness(attempts=attempts, failures=failures, last_code=last_code)
+        for key, (attempts, failures, last_code) in tallies.items()
+        if attempts >= settings.role_min_attempts
+        and failures / attempts >= settings.role_max_failure_rate
+    }
+
+
+# (provider, deployment, model, task_type)
+ArbiterRecordKey = tuple[str, str, str, str]
+
+
+@dataclass(frozen=True)
+class ArbiterRecord:
+    """Cómo le ha ido a un modelo como árbitro en un tipo de tarea."""
+
+    attempts: int
+    failures: int
+
+    @property
+    def mostly_failing(self) -> bool:
+        """Más fallos definitivos que aciertos. Es un criterio de ORDEN, no de
+        exclusión: basta un eco sin ningún acierto para dejar pasar delante a
+        quien no tiene ese historial, sin vetar a nadie."""
+        return self.failures > self.attempts - self.failures
+
+
+def load_arbiter_record(db: Database, settings: ModelQuarantineConfig) -> dict[ArbiterRecordKey, ArbiterRecord]:
+    """Historial de cada modelo como árbitro, por tipo de tarea.
+
+    El árbitro se elige por tamaño declarado (`strongest_available`), y el
+    tamaño no avisa de que ornith:35b devuelve su propio prompt al sintetizar
+    apuntes de una transcripción larga. Por tipo de tarea porque el mismo
+    modelo puede arbitrar bien respuestas cortas y hacer eco con 13 000 tokens
+    de propuestas. Mismos filtros que load_role_unfitness: solo códigos
+    definitivos, sin tráfico excluido del aprendizaje, misma ventana."""
+    if not settings.enabled:
+        return {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=settings.role_window_hours)).isoformat()
+    roles = sorted(ARBITER_ROLES)
+    marks = ",".join("?" for _ in roles)
+    rows = db.query_all(
+        f"""
+        SELECT provider, deployment, model, task_type, status, error_code
+        FROM model_invocations
+        WHERE created_at >= ? AND status IN ('completed', 'failed')
+          AND excluded_from_learning = 0 AND task_type IS NOT NULL AND role IN ({marks})
+        """,
+        (cutoff, *roles),
+    )
+    definitive = {code.upper() for code in settings.definitive_codes}
+    tallies: dict[ArbiterRecordKey, list[int]] = {}
+    for row in rows:
+        code = str(row["error_code"] or "").upper()
+        if row["status"] == "failed" and code not in definitive:
+            continue
+        key: ArbiterRecordKey = (
+            str(row["provider"]).lower(), str(row["deployment"]).lower(),
+            str(row["model"]).lower(), str(row["task_type"]).lower(),
+        )
+        tally = tallies.setdefault(key, [0, 0])
+        tally[0] += 1
+        if row["status"] == "failed":
+            tally[1] += 1
+    return {key: ArbiterRecord(attempts, failures) for key, (attempts, failures) in tallies.items()}

@@ -1,6 +1,6 @@
 # Especificación para aplicaciones cliente
 
-*Contrato 2.11 · 2 de octubre de 2026*
+*Contrato 2.12 · 21 de octubre de 2026*
 
 Este documento describe **cómo una aplicación envía tareas al broker, recoge el resultado y solicita juicios estructurados a modelos System-1**. Está escrito desde el contrato real (`app/schemas.py`), no desde el histórico de versiones: lo que hay aquí es la forma actual, sin tener que reconstruirla leyendo cinco listas de novedades.
 
@@ -35,12 +35,14 @@ Devuelve, entre otros:
 
 | Campo | Forma | Para qué te sirve |
 |---|---|---|
-| `contract_version` | `string` | `"2.11"`. Si no coincide con lo que esperas, revisa §12 |
+| `contract_version` | `string` | `"2.12"`. Si no coincide con lo que esperas, revisa §12 |
 | `system1_judgments` | `bool` | Si el servicio de juicios System-1 está habilitado (§15) |
 | `system1_semantic_routing` | `bool` | Si System-1 y su enrutado semántico están habilitados. Puede operar en modo sombra (§15.6) |
 | `system1_evaluation` | `bool` | Si el juicio admite `target` y devuelve la nota de cada intento, también la rechazada (§15.8) |
 | `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
-| `work_lanes` | `[string]` | Carriles activos: `["inference"]` o `["inference", "ingestion"]` |
+| `work_lanes` | `[string]` | Carriles activos: `inference` siempre; `ingestion` y `embedding` si están encendidos |
+| `embedding_batch_max` | `int \| null` | Máximo de textos en `content.inputs` (§5.10). Ausente o `null` = broker sin lotes: manda un texto por tarea |
+| `embedding_lane` | `{max_parallel, batch_max} \| null` | Carril propio de embeddings (§5.10). `null` = apagado: tus embeddings hacen cola con el chat |
 | `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
 | `presets` | `{string: [string]}` | Presets válidos **por estrategia**: la clave es la estrategia |
 | `scheduling_by_preset` | `{string: [string]}` | Políticas de planificación válidas **por preset**: la clave es el preset |
@@ -68,7 +70,7 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 ```json
 {
-  "contract_version": "2.11",
+  "contract_version": "2.12",
   "system1_judgments": true,
   "system1_semantic_routing": true,
   "strategies": ["single", "mixture_of_agents", "agent"],
@@ -88,7 +90,9 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
   },
   "derived_data_boundary": true,
   "task_group_status": true,
-  "work_lanes": ["inference", "ingestion"],
+  "work_lanes": ["inference", "ingestion", "embedding"],
+  "embedding_batch_max": 64,
+  "embedding_lane": { "max_parallel": 1, "batch_max": 64 },
   "generation_determinism": true,
   "exclude_from_model_learning": true,
   "invocation_telemetry": true,
@@ -260,7 +264,7 @@ Todo lo demás tiene default. Respuesta `202`:
 |---|---|---|---|
 | `idempotency_key` | string **obligatorio** | — | 1–240 caracteres, solo `A-Za-z0-9._:-`. Ver §5.2 |
 | `request_id` | string \| null | `null` | Tu identificador de correlación; el broker lo devuelve tal cual |
-| `inference_kind` | `chat` \| `embedding` | `chat` | `embedding` exige estrategia `single` y `output.format: "json"` |
+| `inference_kind` | `chat` \| `embedding` | `chat` | `embedding` exige estrategia `single` y `output.format: "json"`; desde 2.12 sin `json_schema`. Admite lote con `content.inputs` (§5.10) |
 | `content` | objeto **obligatorio** | — | §5.3 |
 | `output` | objeto | markdown/es | §5.4 |
 | `generation` | objeto | 0.3 / 4000 | `temperature` 0–2, `max_output_tokens` ≥ 1, `seed`, `top_p`. Ver §5.7 |
@@ -289,6 +293,7 @@ El broker ejecuta **una inferencia a la vez**; `priority` decide quién va despu
 - **Pasa por delante de una reserva por memoria** cuando es más urgente que la tarea reservada y esta aún no puede reintentar.
 - Al **reanudar** tras `waiting_for_tools`, la tarea vuelve según su prioridad y su hora de llegada.
 - El **reordenado manual** del panel o de la API tiene la última palabra: mover una tarea a mano la deja donde se dijo.
+- **Los embeddings tienen su propia cola** (2.12, si `capabilities.embedding_lane` no es `null`): no esperan a la inferencia en curso y la prioridad ordena dentro de su carril. Un embedding de pregunta a `1` pasa delante de un indexado masivo a `100`. Ver §5.10.
 
 ### 5.2 Idempotencia
 
@@ -303,7 +308,8 @@ La comparación es sobre un hash canónico del cuerpo completo, así que un camb
 
 | Campo | Tipo | Notas |
 |---|---|---|
-| `prompt` | string **obligatorio** | Mínimo 1 carácter |
+| `prompt` | string **obligatorio** salvo en un lote | Mínimo 1 carácter |
+| `inputs` | lista de string | Solo con `inference_kind: "embedding"`: lote de textos, un vector por texto (§5.10). **Excluyente con `prompt`**: si llegan los dos, `422` |
 | `attachments` | lista | Solo ficheros ya ingeridos. Ver §7 |
 | `metadata` | objeto libre | Se persiste con la tarea; el panel usa `origin` para etiquetar la procedencia |
 
@@ -312,7 +318,7 @@ La comparación es sobre un hash canónico del cuerpo completo, así que un camb
 | Campo | Valores | Default |
 |---|---|---|
 | `format` | `markdown` \| `text` \| `json` | `markdown` |
-| `json_schema` | objeto | **obligatorio si `format: "json"`** |
+| `json_schema` | objeto | **obligatorio si `format: "json"`**, salvo en `inference_kind: "embedding"`, donde no se usa (2.12) |
 | `language` | string 2–16 | `"es"` |
 
 Con `format: "json"` el broker avisa si el modelo elegido tiene verificado por sondeo que **no** soporta salida estructurada.
@@ -387,6 +393,16 @@ Un grupo que no drena nunca no cuelga la cola: cada tarea que espera tiene su pr
 
 Si mides reproducibilidad, **mira `seed_status` antes de dar por buena una comparación**: una semilla aceptada en silencio y descartada por debajo es peor que no tenerla.
 
+**Razonamiento apagado por el broker (2.12, solo Ollama).** La telemetría de la invocación puede traer además `generation.thinking`. Solo aparece cuando el broker mandó `think: false` a un modelo que razona; si no está, el modelo usó su comportamiento por defecto:
+
+| `thinking` | Significa |
+|---|---|
+| `disabled_short_budget` | `max_output_tokens` < 512: razonando no le habría quedado sitio para responder |
+| `disabled_after_runaway` | El modelo gastó todo el presupuesto razonando y no respondió; el broker repitió **una vez** sin razonamiento. `tokens_output` suma los dos intentos |
+| `disabled_known_runaway` | Ese modelo se desbocó razonando en las últimas 24 h **con el mismo tipo de tarea** (código, prosa, contexto largo), así que se le llamó directamente sin razonamiento. Desbocarse con código no le apaga el razonamiento al resumir un documento |
+
+No hay campo de petición para pedirlo: es un rescate del broker, no una opción. Si comparas calidad entre invocaciones del mismo modelo, sepáralas por este campo, porque sin razonamiento la respuesta es otra.
+
 ### 5.8 Tráfico que no debe enseñar al broker
 
 `exclude_from_model_learning: true` marca una tarea como **no representativa**.
@@ -428,6 +444,42 @@ GET /api/v1/groups/{group}
 Un grupo sin ninguna tarea devuelve `404 GROUP_NOT_FOUND` en vez de ceros, para que un nombre mal escrito no parezca una tirada ya acabada. Anunciado en `capabilities.task_group_status`.
 
 ---
+
+### 5.10 Embeddings en lote y carril propio
+
+*Contrato 2.12.* Antes de enviar un lote comprueba `contract_version >= "2.12"` y que `capabilities.embedding_batch_max` existe. Un broker anterior no anuncia ninguna de las dos cosas: con él, manda un texto por tarea.
+
+**Lote.** Pon los textos en `content.inputs` y no mandes `content.prompt`:
+
+```json
+{
+  "idempotency_key": "ko:indice:nota-42:v3",
+  "inference_kind": "embedding",
+  "content": { "inputs": ["fragmento 1…", "fragmento 2…", "fragmento 3…"] },
+  "output": { "format": "json" },
+  "model_requirements": {
+    "target_model": { "provider": "ollama", "deployment": "local", "model": "bge-m3:latest" },
+    "fallback_allowed": false
+  },
+  "risk": { "data_classification": "local_only" },
+  "priority": 100
+}
+```
+
+- Como máximo `embedding_batch_max` textos (64 por defecto). Más → `422 EMBEDDING_BATCH_TOO_LARGE` con `batch_max` en el detalle.
+- `result.embeddings` trae un vector por texto, **en el mismo orden que `inputs`**. La petición de un solo texto (`content.prompt`) sigue devolviendo `result.embedding` como antes.
+- **Un lote, un modelo.** El lote entero se calcula con un solo modelo, que no se cambia a mitad. Si ese modelo no está disponible, falla el lote entero.
+- **Nada se trunca.** Si un texto no cabe en el contexto del modelo, la tarea falla con `EMBEDDING_INPUT_TOO_LONG`, `error.details.index` dice qué texto es y no se entrega ningún vector. Trocea ese texto y reenvía el lote. (El vector de un texto recortado parece válido y no lo es.)
+- Los modelos `larm` no admiten lotes: `EMBEDDING_BATCH_UNSUPPORTED`.
+- El artefacto final (`embedding_output`, `final: true`, §8.3) es un JSON con `embeddings` y `embedding_model`.
+
+**Identidad del modelo.** Junto a los vectores, `result.embedding_model` trae `{provider, deployment, model, dimensions, digest, fingerprint_hash}`; `result.dimensions` repite la dimensión. Guarda `model` y `digest` con tu índice: si cambian, el espacio vectorial ha cambiado y hay que recalcular. Mezclar vectores de dos modelos da búsquedas basura sin ningún error visible. `digest` es el mismo valor que `execution_fingerprint.components.digest` (§8.2); puede ser `null` si el proveedor no lo publica.
+
+**Carril propio.** Con `capabilities.embedding_lane` presente, las tareas `inference_kind: "embedding"` corren en su propio carril (`kind: "embedding"`) y no esperan a que termine la inferencia de chat en curso. `embedding_lane.max_parallel` es cuántas corren a la vez. Dentro del carril manda `priority` (§5.1.1): el embedding de una pregunta a prioridad `1` pasa delante de un indexado a `100`.
+
+- **Memoria.** El modelo de embeddings pasa por el mismo planificador de memoria que el resto. Si cargarlo obligara a descargar el modelo de una inferencia en curso, la tarea espera en `waiting_for_memory`; nunca expulsa ese modelo.
+- **Métricas.** Las invocaciones de embeddings cuentan en las métricas por modelo y en la cuarentena como cualquier otra, en su propio tipo de tarea (`embedding`), sin mezclarse con las de chat.
+- Con el carril apagado (`embedding_lane: null`) todo funciona igual, pero los embeddings hacen cola con el chat.
 
 ## 6. Elegir estrategia
 
@@ -473,6 +525,10 @@ Sin más configuración. Es el default y cubre la mayoría de los casos.
 - `selection.arbiter_policy`: `strongest_available` (por defecto) elige el árbitro por tamaño declarado, no por rapidez — el árbitro juzga, no responde. Incluye modelos cloud si la tarea los permite, así que puede no ser local. `fastest_available` lo elige con el mismo ranking por tiempo que a los proponentes. Cualquier otro valor se **rechaza** en la validación.
 - `proposer_skills` da herramientas a los proponentes antes de proponer. **El árbitro nunca usa herramientas.** Solo válido en esta estrategia.
 - Se necesitan al menos 2 proponentes con éxito o la tarea falla con `CONSENSUS_QUORUM_NOT_REACHED`.
+  El error trae `message` con cuántos respondieron y por qué cayó cada uno, `retryable` (`true` si alguna baja fue transitoria; `false` si todas fueron fallos definitivos del modelo, que repetirían igual) y `skipped_proposers` con el detalle.
+- Un modelo que como proponente (o como árbitro) acaba en fallo definitivo al menos el 30 % de las veces en los últimos 7 días, con 5 invocaciones o más en ese rol, deja de elegirse para ese rol en la selección automática; sigue disponible para `single`. Una selección `manual`, `required_proposers`, `target_model` o `preferred_model` mandan sobre esta regla.
+- Entre los árbitros candidatos, el que en **ese tipo de tarea** (código, prosa, contexto largo) acumula más fallos definitivos que aciertos como árbitro pasa detrás de los demás, aunque sea el más grande. No excluye a nadie: solo cambia el orden. Las invocaciones del árbitro de una tarea con `exclude_from_model_learning: true` ya no cuentan en ese historial (antes sí, por un fallo).
+- El contexto de los modelos de LM Studio es el que tienen de verdad: el cargado, si están en memoria, o el que LM Studio usa al cargarlos bajo demanda (`jit_context_window`). Un modelo al que no le cabe el texto deja de ser candidato, en vez de fallar con un 400 a mitad de tarea.
 - Si falla el árbitro, el broker prueba otro y si tampoco puede entrega la mejor propuesta (ver «El resultado»). Con `selection.arbiter`, `preferred_arbiter` o `allow_substitution: false` no se cambia de árbitro: solo se degrada.
 
 **Segunda ronda (`max_rounds`).** Con `max_rounds: 2` los proponentes pueden ver la síntesis de la primera ronda y mejorarla, y el árbitro sintetiza otra vez sobre lo refinado. Es un **techo, no una orden**, igual que `max_proposers`:
@@ -763,7 +819,15 @@ Para `chat`:
 | `usage` | Tokens y coste reales |
 | `inference_kind`, `output_format` | Eco de lo que pediste |
 
-Para `embedding`: `result.embedding` con el vector.
+Para `embedding`:
+
+| Campo | Contenido |
+|---|---|
+| `embedding` | El vector, si mandaste un solo texto en `content.prompt` |
+| `embeddings` | Un vector por texto de `content.inputs`, en el mismo orden (2.12) |
+| `dimensions` | Longitud de cada vector (2.12) |
+| `embedding_model` | `{provider, deployment, model, dimensions, digest, fingerprint_hash}`: con qué espacio vectorial se calculó (2.12, §5.10) |
+| `model_used`, `usage`, `inference_kind` | Como en `chat` |
 
 Según la estrategia aparecen además `result.agent` (iteraciones, skills usadas), `result.long_context` (fragmentos) o el detalle del consenso.
 
@@ -965,7 +1029,7 @@ curl -s -H "X-Admin-Token: $TOKEN"      http://<broker>/api/v1/tasks/$TASK/invoc
 
 ### El campo `kind`
 
-`inference` para tus tareas. `ingestion` aparece si consultas tareas de conversión de ficheros, que el broker también expone como tareas; en esas, `execution_strategy`, `execution_preset` y `selection_mode` son `null` — una conversión no tiene ejecución que describir. Si tu cliente asume que esos campos siempre traen valor, míralo antes.
+`inference` para tus tareas. `embedding` para las de `inference_kind: "embedding"` cuando el broker tiene el carril de embeddings encendido (2.12). `ingestion` aparece si consultas tareas de conversión de ficheros, que el broker también expone como tareas; en esas, `execution_strategy`, `execution_preset` y `selection_mode` son `null` — una conversión no tiene ejecución que describir. Si tu cliente asume que esos campos siempre traen valor, míralo antes.
 
 ---
 
@@ -1047,6 +1111,7 @@ Para `POST /api/v1/system1/judge`, una petición inválida devuelve `422 CONTRAC
 | `409` | `INGESTION_DISABLED` | Este broker no acepta adjuntos | Comprobar `capabilities.file_ingestion` |
 | `409` | `SANDBOX_DISABLED` | Pediste `run_code` sin sandbox | Comprobar `capabilities.sandbox_run_code` |
 | `409` | `TABULAR_ATTACHMENT_REQUIRES_SANDBOX` | CSV/XLSX sin `run_code` | Usar `agent` o `mixture_of_agents` con `run_code` |
+| `422` | `EMBEDDING_BATCH_TOO_LARGE` | `content.inputs` trae más textos que `embedding_batch_max` | Partir el lote |
 | `429` | `QUEUE_FULL` | Cola llena | Backoff y reintentar |
 | `401`/`403` | — | Falta o no vale el token admin | Revisar `X-Admin-Token` |
 
@@ -1058,7 +1123,7 @@ Errores **durante la ejecución** no son HTTP: la petición ya se aceptó con `2
 | `CONTEXT_LIMIT_EXCEEDED` | La petición no cabe en el contexto | no — acorta o autoriza `map_reduce` |
 | `CONTEXT_WINDOW_UNKNOWN` | El modelo exacto no declara su contexto | no |
 | `BUDGET_EXCEEDED` | Se agotó `max_cost_usd` a mitad | no — sube el presupuesto |
-| `CONSENSUS_QUORUM_NOT_REACHED` | Menos de 2 proponentes con éxito | según causa |
+| `CONSENSUS_QUORUM_NOT_REACHED` | Menos de 2 proponentes con éxito. `message` dice quién cayó y por qué | `true` si alguna baja fue transitoria |
 | `PROVIDER_UNAVAILABLE` | Proveedor caído o apagado | **sí** |
 | `PROVIDER_NOT_ALLOWED` / `CLOUD_NOT_ALLOWED` | La frontera de datos bloqueó el modelo | no — revisa §4 |
 | `MODEL_CAPABILITY_MISMATCH` | El modelo no hace lo que pide la tarea (visión, JSON, tools) | no |
@@ -1066,6 +1131,8 @@ Errores **durante la ejecución** no son HTTP: la petición ya se aceptó con `2
 | `IMAGE_GENERATION_UNSUPPORTED` | La tarea pide generar o modificar una imagen y nadie sabe producirlas | no |
 | `PROMPT_ECHOED` | El modelo devolvió su prompt en vez de responder | no — el broker lo aparta tras dos veces |
 | `DEGENERATE_OUTPUT` | El modelo se quedó repitiendo una frase hasta el final | no — igual que el anterior |
+| `EMBEDDING_INPUT_TOO_LONG` | Un texto del lote no cabe en el contexto del modelo; `details.index` dice cuál. No se entrega ningún vector | no — trocea ese texto |
+| `EMBEDDING_BATCH_UNSUPPORTED` | El modelo elegido (LARM) no admite lotes | no — un texto por tarea |
 | `TASK_TIMEOUT` | Se agotó `execution.timeout_seconds` | según causa |
 | `ATTACHMENT_EXPANSION_FAILED` | No se pudo inyectar el documento adjunto | no |
 | `TASK_RETRY_LIMIT_EXCEEDED` | La tarea se reintentó tras varios reinicios del broker | no |
@@ -1075,6 +1142,17 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### 2.12 — embeddings en lote y carril propio (21 de octubre de 2026)
+
+Ampliación aditiva: toda petición válida en 2.11 sigue siéndolo y devuelve lo mismo.
+
+- **`content.inputs`** para vectorizar un lote en una tarea, con `embedding_batch_max` en `/capabilities` y `result.embeddings` en el mismo orden (§5.10).
+- **Carril `embedding`**: las tareas de embedding no consumen el workflow único de inferencia. Se anuncia en `work_lanes` y en `embedding_lane: {max_parallel, batch_max}`. Las tareas de ese carril llevan `kind: "embedding"`.
+- **`EMBEDDING_INPUT_TOO_LONG`** con el índice del texto: nunca se trunca.
+- **Identidad del modelo** junto a los vectores: `result.embedding_model` y `result.dimensions`, también en la petición de un solo texto.
+- **Arreglo:** `inference_kind: "embedding"` ya no exige `output.json_schema`.
+- **Rescate del razonamiento desbocado** (Ollama): si un modelo agota `max_output_tokens` razonando y no responde, se repite una vez con `think: false` y se declara en `generation.thinking` (§5.7). Antes la invocación fallaba con `INVALID_PROVIDER_RESPONSE`.
 
 ### Puente LARM — 10 de octubre de 2026, sin cambio de versión
 

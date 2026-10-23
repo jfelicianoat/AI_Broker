@@ -32,6 +32,11 @@ processing:
   dispatcher_interval_seconds: 0.1
   provider_mode: real
   dependency_wait_seconds: 2.0
+  long_context_single_pass_max_tokens: 96000
+  embedding_lane:
+    enabled: true
+    max_parallel: 1
+    batch_max: 64
 prompt_compression:
   enabled: true
   level: aggressive
@@ -261,6 +266,8 @@ providers:
     sync_exclude: []
     catalog_cache_seconds: 5.0
     default_context_window: 32768
+    jit_context_window: 8192
+    lmstudio_loaded_context: true
     probe_max_output_tokens: 8
     probe_delay_seconds: 0.0
     probe_max_models: 20

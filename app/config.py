@@ -163,6 +163,26 @@ class PersistenceConfig(BaseModel):
     files_retention_days: int = Field(default=0, ge=0)
 
 
+class EmbeddingLaneConfig(BaseModel):
+    """Carril propio de las tareas `inference_kind: embedding` (contrato 2.12).
+
+    Un embedding de bge-m3 tarda unos 200 ms, pero la tarea entera tardaba
+    35–54 s porque hacía cola detrás de la generación de chat en curso: el
+    workflow de inferencia es uno solo. Este carril las saca de esa cola. La
+    memoria sigue pasando por el mismo planificador, así que un embedding que
+    no quepa espera en `waiting_for_memory`; nunca desaloja un modelo con lease.
+    """
+
+    # Apagado, los embeddings vuelven a la cola de inferencia y el broker deja
+    # de anunciar el carril en capabilities.
+    enabled: bool = True
+    # Embeddings que corren a la vez. 1 por defecto: el modelo es pequeño y lo
+    # que se gana en paralelo se lo come la generación que comparte la GPU.
+    max_parallel: int = Field(default=1, ge=1, le=8)
+    # Máximo de textos por tarea en `content.inputs`.
+    batch_max: int = Field(default=64, ge=1, le=2048)
+
+
 class ProcessingConfig(BaseModel):
     max_active_workflows: int = 1
     max_parallel_invocations: int | str = "auto"
@@ -198,11 +218,19 @@ class ProcessingConfig(BaseModel):
     # en esta misma cola y suele terminar en segundos, así que un intervalo
     # largo añadiría a la respuesta un retraso que no lo causa nada.
     dependency_wait_seconds: float = Field(default=2.0, ge=0.1, le=3600.0)
+    # Tokens que una tarea con long_context=map_reduce puede mandar de una sola
+    # pasada a un modelo no cloud. Sin este tope, el troceado solo ocurría si el
+    # prompt no cabía en NINGÚN modelo, y Ollama declara ventanas de un millón
+    # de tokens (nemotron) que en local no se leen dentro del plazo: la tarea
+    # moría por timeout sin haber troceado nada. Por encima del tope se trocea
+    # con fragmentos de este tamaño. 0 = sin tope (solo trocea si no cabe).
+    long_context_single_pass_max_tokens: int = Field(default=96000, ge=0)
     # Un agente en marcha cede el turno entre iteraciones si en la cola espera
     # una tarea más urgente (priority menor). Con un solo workflow a la vez, es
     # lo que impide que una investigación larga retenga a una app que necesita
     # respuesta ya. La conversación se congela y se retoma donde quedó.
     yield_to_urgent_tasks: bool = True
+    embedding_lane: EmbeddingLaneConfig = Field(default_factory=EmbeddingLaneConfig)
 
     @model_validator(mode="after")
     def validate_single_workflow(self) -> ProcessingConfig:
@@ -815,6 +843,16 @@ class OpenAICompatibleProviderConfig(BaseModel):
     sync_exclude: list[str] = Field(default_factory=list)
     catalog_cache_seconds: float = Field(default=5.0, ge=0)
     default_context_window: int = Field(default=128_000, gt=0)
+    # Contexto con el que el servidor carga un modelo bajo demanda, si es
+    # menor que el que admite el modelo. LM Studio carga con su
+    # «defaultContextLength» (8192 en el PC de IA) aunque el GGUF admita 262k,
+    # y rechaza con 400 lo que no quepa: el broker lo elegía como árbitro de
+    # textos largos porque lo creía de 32k. None = el servidor no recorta.
+    jit_context_window: int | None = Field(default=None, gt=0)
+    # Leer de la API nativa de LM Studio (/api/v0/models) el contexto con el
+    # que está cargado cada modelo (`loaded_context_length`). Manda sobre
+    # `jit_context_window` y sobre lo declarado: es lo que hay en memoria.
+    lmstudio_loaded_context: bool = False
     probe_max_output_tokens: int = Field(default=1, ge=1, le=1024)
     probe_delay_seconds: float = Field(default=1.0, ge=0, le=60)
     # 50 es también el valor que propone el panel para un proveedor nuevo:
@@ -987,6 +1025,14 @@ class ModelQuarantineConfig(BaseModel):
             "MODEL_DEPLOYMENT_MISMATCH",
         ]
     )
+    # Aptitud por rol de consenso (app.model_quarantine.load_role_unfitness).
+    # Un modelo que como proponente o árbitro acaba en fallo definitivo al menos
+    # esta fracción de las veces, con al menos `role_min_attempts` invocaciones
+    # en ese rol dentro de la ventana, deja de elegirse para ESE rol; sigue en
+    # `single`. 1.0 = desactivado.
+    role_max_failure_rate: float = Field(default=0.3, gt=0, le=1.0)
+    role_min_attempts: int = Field(default=5, ge=1, le=1000)
+    role_window_hours: float = Field(default=168.0, gt=0, le=8760)
 
 
 class BrokerConfig(BaseModel):

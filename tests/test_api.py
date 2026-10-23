@@ -386,7 +386,7 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["contract_version"] == "2.11"
+    assert body["contract_version"] == "2.12"
     assert body["system1_judgments"] is False
     assert body["system1_semantic_routing"] is False
     assert body["system1_evaluation"] is False
@@ -394,7 +394,7 @@ def test_capabilities_publish_slow_and_runtime_limits(tmp_path: Path) -> None:
     # trabajo son consultables. Un cliente que lo vea puede omitir
     # cloud_allowed/allowed_providers y confiar en su clasificación.
     assert body["derived_data_boundary"] is True
-    assert body["work_lanes"] == ["inference", "ingestion"]
+    assert body["work_lanes"] == ["inference", "ingestion", "embedding"]
     assert body["presets"]["mixture_of_agents"] == ["fast", "slow"]
     assert body["presets"]["agent"] == ["fast"]
     assert body["scheduling_by_preset"]["fast"] == ["sequential"]

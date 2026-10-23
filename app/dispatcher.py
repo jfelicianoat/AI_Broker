@@ -3,7 +3,9 @@
 La inferencia se procesa de una en una: es el invariante del broker. La ingesta
 tiene su propio bucle y su propio límite de concurrencia, porque convertir un
 fichero no debe consumir el turno de las respuestas — si compartieran carril,
-subir un PDF congelaría la cola de inferencia.
+subir un PDF congelaría la cola de inferencia. Los embeddings (contrato 2.12)
+tienen el suyo por la misma razón: un vector de décimas de segundo no puede
+esperar minutos detrás de una generación.
 """
 from __future__ import annotations
 
@@ -107,6 +109,78 @@ async def ingestion_dispatcher_loop(
         job.cancel()
     if jobs:
         await asyncio.gather(*jobs, return_exceptions=True)
+
+
+async def embedding_dispatcher_loop(
+    repository: TaskRepository,
+    coordinator: ConsensusCoordinator,
+    stop: asyncio.Event,
+    interval_seconds: float,
+    max_parallel: int,
+) -> None:
+    """Carril de embeddings: hasta `max_parallel` tareas a la vez, sin tocar
+    el workflow único de inferencia.
+
+    Antes un embedding de 200 ms esperaba en la cola a que terminase la
+    generación de chat en curso, y la tarea tardaba 35–54 s. Cada tarea pasa
+    por el mismo `process_task` que la inferencia —enrutado, memoria,
+    cancelación, telemetría—; lo único que cambia es quién le da el turno.
+    La cancelación la atiende el propio coordinador, como en inferencia."""
+    logger = logging.getLogger("ai_broker.dispatcher.embedding")
+    running: dict[str, asyncio.Task] = {}
+    while not stop.is_set():
+        try:
+            while len(running) < max_parallel:
+                task_id = await asyncio.to_thread(
+                    repository.claim_next_embedding_task, max_parallel,
+                )
+                if task_id is None:
+                    break
+                job = asyncio.create_task(_process_claimed(repository, coordinator, task_id))
+                running[task_id] = job
+                job.add_done_callback(_forget(running, task_id))
+        except Exception:
+            logger.exception(
+                "dispatcher.embedding_iteration_failed",
+                extra={"event": "dispatcher.embedding_iteration_failed"},
+            )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            pass
+    # Igual que la ingesta: lo que estaba en vuelo queda en un estado activo y
+    # la recuperación del próximo arranque lo devuelve a la cola.
+    jobs = list(running.values())
+    for job in jobs:
+        job.cancel()
+    if jobs:
+        await asyncio.gather(*jobs, return_exceptions=True)
+
+
+async def _process_claimed(
+    repository: TaskRepository, coordinator: ConsensusCoordinator, task_id: str,
+) -> None:
+    """Mismo trato de errores que el bucle de inferencia: un fallo inesperado
+    deja la tarea en `failed` en vez de colgada en un estado activo."""
+    try:
+        await coordinator.process_task(repository, task_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        current = repository.get_task(task_id)
+        if current.status in {TaskStatus.completed, TaskStatus.cancelled}:
+            return
+        repository.update_task(
+            task_id,
+            TaskStatus.failed,
+            progress={"phase": TaskStatus.failed.value},
+            error={
+                "code": "INTERNAL_ERROR",
+                "message": f"Dispatcher failure: {type(error).__name__}",
+                "retryable": False,
+            },
+            clear_queue_position=True,
+        )
 
 
 def _forget(

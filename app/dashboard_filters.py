@@ -32,6 +32,7 @@ STATUS_LABELS = {
 LANE_LABELS = {
     "inference": "Inferencia",
     "ingestion": "Conversiones",
+    "embedding": "Embeddings",
 }
 
 HEALTH_LABELS = {

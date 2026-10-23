@@ -83,9 +83,10 @@
       <label class="field">
         <span>Carril</span>
         <select name="kind">
-          <option value="">Ambos</option>
+          <option value="">Todos</option>
           <option value="inference" {% if form.kind == 'inference' %}selected{% endif %}>Inferencia</option>
           <option value="ingestion" {% if form.kind == 'ingestion' %}selected{% endif %}>Conversiones</option>
+          <option value="embedding" {% if form.kind == 'embedding' %}selected{% endif %}>Embeddings</option>
         </select>
       </label>
 

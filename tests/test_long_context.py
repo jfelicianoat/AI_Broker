@@ -61,7 +61,7 @@ def test_map_reduce_rejected_with_json_output():
 def test_capabilities_announce_map_reduce(tmp_path):
     with make_client(tmp_path) as client:
         body = client.get("/api/v1/capabilities").json()
-        assert body["contract_version"] == "2.11"
+        assert body["contract_version"] == "2.12"
         assert body["long_context_map_reduce"] is True
 
 
@@ -141,8 +141,11 @@ class TinyWindowProvider:
         pass
 
 
-def _make_coordinator(tmp_path: Path, provider) -> ConsensusCoordinator:
-    config = BrokerConfig(persistence=PersistenceConfig(database=str(tmp_path / "lc.db")))
+def _make_coordinator(tmp_path: Path, provider, **processing) -> ConsensusCoordinator:
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "lc.db")),
+        processing=ProcessingConfig(**processing),
+    )
     db = Database(tmp_path / "lc.db")
     db.init_schema()
     return ConsensusCoordinator(db, ResourceScheduler(config), provider=provider)
@@ -202,6 +205,42 @@ def test_map_reduce_skipped_when_prompt_fits(tmp_path):
     # Cupo entero: ruta single normal, sin fragmentar.
     assert provider.map_calls == 0
     assert "long_context" not in (state["result"] or {})
+
+
+def test_map_reduce_chunks_above_single_pass_cap_even_if_window_fits(tmp_path):
+    # El caso de nemotron: Ollama declara un millón de tokens, el prompt cabe
+    # en la ventana y aun así no se lee en local dentro del plazo.
+    provider = TinyWindowProvider()
+    provider.window = 1_048_576
+    coordinator = _make_coordinator(tmp_path, provider, long_context_single_pass_max_tokens=2000)
+    state = _run_task(coordinator, _long_request())
+
+    assert state["status"] == "completed"
+    assert provider.map_calls > 1
+    assert provider.reduce_calls >= 1
+    planned = coordinator.db.query_all(
+        "SELECT payload_json FROM events WHERE task_id = ? AND event_type = 'chunking.planned'",
+        (state["task_id"],),
+    )
+    assert '"context_window":2000' in planned[0]["payload_json"].replace(" ", "")
+
+
+class CloudWindowProvider(TinyWindowProvider):
+    async def select(self, request, count, roles):
+        return [
+            ModelReference(provider="ollama", deployment="cloud", model="tiny", role=roles[i])
+            for i in range(count)
+        ]
+
+
+def test_single_pass_cap_does_not_apply_to_cloud_models(tmp_path):
+    provider = CloudWindowProvider()
+    provider.window = 1_048_576
+    coordinator = _make_coordinator(tmp_path, provider, long_context_single_pass_max_tokens=2000)
+    state = _run_task(coordinator, _long_request())
+
+    assert state["status"] == "completed"
+    assert provider.map_calls == 0
 
 
 def test_map_reduce_without_documents_falls_back_to_normal_error(tmp_path):

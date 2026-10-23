@@ -1,6 +1,8 @@
 # Control del razonamiento (thinking) en el AI Broker
 
-Estado: **análisis, sin implementar**. Fecha de las mediciones: **2026-09-12**.
+Estado: **análisis, sin implementar** el campo de petición. Fecha de las
+mediciones: **2026-09-12**. Sí implementado (2026-10-23) el rescate automático
+del razonamiento desbocado en Ollama: ver §1.1.
 
 Origen: una app cliente pidió poder desactivar el razonamiento de los modelos
 que use, porque no lo necesita y solo le cuesta latencia y tokens. Este
@@ -17,6 +19,34 @@ Ollama**. En `app/providers/ollama.py`:
   `thinking` **y** el presupuesto de salida es menor de 512 tokens. El motivo es
   evitar que el modelo agote `num_predict` razonando y devuelva `content` vacío.
 - Se aplica en `generate` (~línea 856) y en `chat_tools` (~línea 914).
+
+### 1.1 Rescate del razonamiento desbocado (2026-10-23)
+
+`nemotron-3.5-lightning` (30b y latest) fallaba la mitad de sus tareas con
+presupuesto amplio: gastaba los 7 500 tokens de salida en `message.thinking`
+(~32 000 caracteres) y devolvía `content` vacío. Con el mismo prompt y
+`think: false` responde bien en ~5 s y 76 tokens (medido el 2026-10-23).
+
+Ahora, en `generate` y `chat_tools`:
+
+- Si la respuesta para por `done_reason=length` con `thinking` y sin `content`
+  ni `tool_calls`, se repite **una sola vez** con `think: false` dentro del
+  mismo lease. `tokens_output` suma los dos intentos.
+- El par (modelo, tipo de tarea) queda marcado 24 h
+  (`RUNAWAY_THINKING_MEMORY_SECONDS`, en memoria: se pierde al reiniciar) y las
+  llamadas siguientes de ese modelo **con ese mismo tipo de tarea** van
+  directamente con `think: false`. El tipo es el de `classify_task_type` sobre
+  la petición original, el mismo con que se registra la invocación y se puntúa
+  el ranking: el coordinador lo fija por tarea (`task_type_scope`), así que los
+  trozos de un map-reduce cuentan como `long_context` aunque sueltos parezcan
+  prosa. De los 48 desbordes registrados hasta el 2026-10-23, 42 fueron en
+  código: con una marca por modelo, un fallo en código apagaba el razonamiento
+  también al hacer apuntes de una transcripción.
+- La invocación lo declara en `generation.thinking`:
+  `disabled_short_budget` | `disabled_after_runaway` | `disabled_known_runaway`.
+
+No resuelve la trampa de §7: las invocaciones sin razonamiento entran en
+`model_stats` mezcladas con las demás.
 
 No hay ninguna vía para que la app lo pida: `GenerationConfig`
 (`app/schemas.py:237`) solo tiene `temperature`, `max_output_tokens`, `seed` y

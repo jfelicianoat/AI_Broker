@@ -1,0 +1,114 @@
+<div id="embedding-lane-panel"
+     class="panel embedding-lane-panel"
+     hx-get="/dashboard/fragments/embedding-lane"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     data-refresh-pauseable>
+  <div class="panel-heading" id="embeddings">
+    <div>
+      <h2>Carril de embeddings</h2>
+      {% if lane.enabled %}
+        <p>{{ lane.running|length }}/{{ lane.capacity }} en curso · {{ lane.queued_tasks }} en cola
+          ({{ lane.queued_texts }} textos) · lotes de hasta {{ lane.batch_max }}</p>
+      {% else %}
+        <p>Carril apagado (processing.embedding_lane.enabled): los embeddings hacen cola con el chat.</p>
+      {% endif %}
+    </div>
+    <button class="button secondary compact" type="button" data-refresh-target="#embedding-lane-panel">Actualizar</button>
+  </div>
+  {% if lane.enabled %}
+    <div class="embedding-lane-metrics">
+      <div class="embedding-lane-metric">
+        <span class="metric-label">Textos vectorizados</span>
+        <strong>{{ lane.completed_texts }}</strong>
+        <span>última hora · {{ '%.0f'|format(lane.texts_per_minute) }}/min de media</span>
+      </div>
+      <div class="embedding-lane-metric">
+        <span class="metric-label">Tareas</span>
+        <strong>{{ lane.completed }} bien · {{ lane.failed }} fallida{{ "s" if lane.failed != 1 }}</strong>
+        <span>
+          {%- if lane.failures -%}
+            {% for item in lane.failures %}{{ item.code }} ×{{ item.total }}{% if not loop.last %}, {% endif %}{% endfor %}
+          {%- else -%}
+            sin fallos en la última hora
+          {%- endif -%}
+        </span>
+      </div>
+      <div class="embedding-lane-metric">
+        <span class="metric-label">Esperando memoria</span>
+        <strong>{{ lane.waiting_memory }}</strong>
+        <span>no desalojan el modelo de una inferencia en curso</span>
+      </div>
+    </div>
+
+    <h3 class="embedding-lane-subtitle">Ahora</h3>
+    {% if lane.running %}
+      <div class="queue-preview-list">
+        {% for task in lane.running %}
+          <div class="queue-preview-row embedding-lane-running">
+            <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+            <span class="queue-preview-id">
+              <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+              <span>{{ task.texts }} texto{{ 's' if task.texts != 1 }} · prioridad {{ task.priority }}
+                {%- if task.model %} · {{ task.model }}{% endif %} · {{ '%.0f'|format(task.seconds) }} s</span>
+            </span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-inline">Nada vectorizándose ahora mismo.</div>
+    {% endif %}
+
+    {% if lane.next %}
+      <h3 class="embedding-lane-subtitle">Siguientes (orden real de reclamo)</h3>
+      <div class="queue-preview-list">
+        {% for task in lane.next %}
+          <div class="queue-preview-row">
+            <span class="position">{{ loop.index }}</span>
+            <span class="queue-preview-id">
+              <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
+              <span>{{ task.texts }} texto{{ 's' if task.texts != 1 }} · prioridad {{ task.priority }}</span>
+            </span>
+            <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+          </div>
+        {% endfor %}
+      </div>
+      {% if lane.by_priority|length > 1 %}
+        <div class="empty-inline">
+          En cola por prioridad:
+          {% for item in lane.by_priority %}{{ item.priority }} → {{ item.tasks }} tareas ({{ item.texts }} textos){% if not loop.last %} · {% endif %}{% endfor %}
+        </div>
+      {% endif %}
+    {% endif %}
+
+    <h3 class="embedding-lane-subtitle">Modelos de embeddings (24 h)</h3>
+    {% if lane.models %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Modelo</th>
+              <th scope="col" class="align-right">Invocaciones</th>
+              <th scope="col" class="align-right">Éxito</th>
+              <th scope="col" class="align-right">Latencia media</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for model in lane.models %}
+              <tr>
+                <td>{{ model.model }} <span class="embedding-lane-dim">{{ model.provider }}/{{ model.deployment }}</span></td>
+                <td class="align-right">{{ model.attempts }}</td>
+                <td class="align-right">{{ '%.0f%%'|format(model.success_rate * 100) }} ({{ model.successes }}/{{ model.attempts }})</td>
+                <td class="align-right">{{ model.avg_latency_ms|ms }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="empty-inline">Misma evidencia que usa el router; el detalle por modelo está en
+        <a href="/dashboard/routing">Enrutamiento → Embeddings</a>.</div>
+    {% else %}
+      <div class="empty-inline">Aún no hay invocaciones de embeddings en las últimas 24 h.</div>
+    {% endif %}
+  {% endif %}
+</div>

@@ -8,6 +8,7 @@ from app.config import BrokerConfig
 from app.db import Database, loads_json
 from app.repository import TaskRepository, _parse_dt
 from app.schemas import (
+    REQUEST_CARRYING_KINDS,
     DashboardEventItem,
     DashboardHistoryItem,
     DashboardHistoryOptions,
@@ -47,11 +48,16 @@ def lane_capacities(config: BrokerConfig) -> dict[str, int]:
     """Cuánto trabajo simultáneo admite cada carril.
 
     Inferencia: el invariante de un único workflow. Ingesta: su propio tope,
-    configurable, que es lo que impide que subir cinco PDFs asfixie la máquina."""
-    return {
+    configurable, que es lo que impide que subir cinco PDFs asfixie la máquina.
+    Embeddings: su concurrencia, y solo si el carril está activo; apagado, los
+    embeddings cuentan en el carril de inferencia, que es donde corren."""
+    capacities = {
         TaskKind.inference.value: config.processing.max_active_workflows,
         TaskKind.ingestion.value: config.ingestion.max_concurrent,
     }
+    if config.processing.embedding_lane.enabled:
+        capacities[TaskKind.embedding.value] = config.processing.embedding_lane.max_parallel
+    return capacities
 
 
 class DashboardQueryRepository:
@@ -78,7 +84,10 @@ class DashboardQueryRepository:
         )
         counts = {str(row["kind"]): row for row in rows}
         lanes: list[LaneOccupancy] = []
-        for kind in (TaskKind.inference, TaskKind.ingestion):
+        kinds = [TaskKind.inference, TaskKind.ingestion]
+        if TaskKind.embedding.value in capacities:
+            kinds.append(TaskKind.embedding)
+        for kind in kinds:
             row = counts.get(kind.value)
             lanes.append(
                 LaneOccupancy(
@@ -293,6 +302,134 @@ class DashboardQueryRepository:
             ],
         )
 
+    def embedding_lane_view(self, config: BrokerConfig, *, window_hours: int = 1) -> dict[str, Any]:
+        """Lo que está pasando en el carril de embeddings, para su propio panel.
+
+        Existe porque un indexado masivo son cientos de tareas que se pierden
+        en la cola general, y la que está corriendo no sale en «Tarea activa»,
+        que es la del workflow de inferencia. Aquí se ve qué se vectoriza
+        ahora, qué viene detrás —en el orden real de reclamo—, cuántos textos
+        faltan y cómo van los modelos de embeddings."""
+        lane = config.processing.embedding_lane
+        active_marks = ",".join("?" for _ in ACTIVE_STATUSES)
+        pending = ("queued", "waiting_for_memory", "waiting_for_dependencies")
+        pending_marks = ",".join("?" for _ in pending)
+        texts = "COALESCE(json_array_length(request_json, '$.content.inputs'), 1)"
+        running_rows = self.db.query_all(
+            f"""
+            SELECT id, priority, status, progress_json, updated_at, {texts} AS texts,
+                   json_extract(request_json, '$.content.metadata.origin') AS origin
+            FROM tasks WHERE kind = 'embedding' AND status IN ({active_marks})
+            ORDER BY updated_at ASC
+            """,
+            ACTIVE_STATUSES,
+        )
+        now = datetime.now(timezone.utc)
+        running = []
+        for row in running_rows:
+            progress = loads_json(row["progress_json"], {}) or {}
+            models = progress.get("active_invocations") or []
+            model = models[0] if models and isinstance(models[0], dict) else {}
+            running.append({
+                "task_id": row["id"],
+                "priority": row["priority"],
+                "status": TaskStatus(row["status"]),
+                "texts": int(row["texts"] or 1),
+                "model": model.get("model"),
+                "provider": model.get("provider"),
+                "seconds": max(0.0, (now - _parse_dt(row["updated_at"])).total_seconds()),
+                "origin": row["origin"],
+            })
+        totals = self.db.query_one(
+            f"""
+            SELECT COUNT(*) AS tasks, COALESCE(SUM({texts}), 0) AS texts,
+                   SUM(CASE WHEN status = 'waiting_for_memory' THEN 1 ELSE 0 END) AS waiting_memory
+            FROM tasks WHERE kind = 'embedding' AND status IN ({pending_marks})
+            """,
+            pending,
+        )
+        by_priority = self.db.query_all(
+            f"""
+            SELECT priority, COUNT(*) AS tasks, COALESCE(SUM({texts}), 0) AS texts
+            FROM tasks WHERE kind = 'embedding' AND status IN ({pending_marks})
+            GROUP BY priority ORDER BY priority ASC
+            """,
+            pending,
+        )
+        next_rows = self.db.query_all(
+            f"""
+            SELECT id, priority, status, {texts} AS texts, created_at
+            FROM tasks WHERE kind = 'embedding' AND status IN ({pending_marks})
+            ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 5
+            """,
+            pending,
+        )
+        since = (now - timedelta(hours=window_hours)).isoformat()
+        recent = self.db.query_one(
+            f"""
+            SELECT SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                   COALESCE(SUM(CASE WHEN status = 'completed' THEN {texts} ELSE 0 END), 0) AS texts
+            FROM tasks WHERE kind = 'embedding' AND updated_at >= ?
+              AND status IN ('completed', 'failed', 'cancelled')
+            """,
+            (since,),
+        )
+        failures = self.db.query_all(
+            """
+            SELECT json_extract(error_json, '$.code') AS code, COUNT(*) AS total
+            FROM tasks WHERE kind = 'embedding' AND status = 'failed' AND updated_at >= ?
+            GROUP BY code ORDER BY total DESC LIMIT 3
+            """,
+            (since,),
+        )
+        # Mismo origen que el ranking del router (model_invocations con
+        # task_type 'embedding'): lo que se ve aquí es lo que decide.
+        models = self.db.query_all(
+            """
+            SELECT provider, deployment, model, COUNT(*) AS attempts,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS successes,
+                   AVG(CASE WHEN status = 'completed' THEN latency_ms END) AS avg_latency_ms
+            FROM model_invocations
+            WHERE task_type = 'embedding' AND status IN ('completed', 'failed') AND created_at >= ?
+            GROUP BY provider, deployment, model ORDER BY attempts DESC LIMIT 6
+            """,
+            ((now - timedelta(hours=24)).isoformat(),),
+        )
+        completed_texts = int((recent["texts"] if recent else 0) or 0)
+        return {
+            "enabled": lane.enabled,
+            "capacity": lane.max_parallel,
+            "batch_max": lane.batch_max,
+            "running": running,
+            "queued_tasks": int(totals["tasks"] or 0) if totals else 0,
+            "queued_texts": int(totals["texts"] or 0) if totals else 0,
+            "waiting_memory": int(totals["waiting_memory"] or 0) if totals else 0,
+            "by_priority": [dict(row) for row in by_priority],
+            "next": [
+                {
+                    "task_id": row["id"], "priority": row["priority"],
+                    "status": TaskStatus(row["status"]), "texts": int(row["texts"] or 1),
+                }
+                for row in next_rows
+            ],
+            "window_hours": window_hours,
+            "completed": int((recent["completed"] if recent else 0) or 0),
+            "failed": int((recent["failed"] if recent else 0) or 0),
+            "completed_texts": completed_texts,
+            "texts_per_minute": completed_texts / (window_hours * 60),
+            "failures": [dict(row) for row in failures],
+            "models": [
+                {
+                    **dict(row),
+                    # Tasa observada, sin el suavizado que aplica el router:
+                    # en pantalla se lee mejor «9 de 10» que un 0,83 corregido.
+                    "success_rate": int(row["successes"] or 0) / max(1, int(row["attempts"])),
+                }
+                for row in models
+            ],
+        }
+
     def active_task_detail(self) -> DashboardTaskDetail | None:
         """El workflow de inferencia en curso, que es único por invariante.
 
@@ -498,7 +635,7 @@ class DashboardQueryRepository:
         payload = loads_json(row["request_json"], {})
         result = loads_json(row["result_json"], None) or {}
         error = loads_json(row["error_json"], None) or {}
-        request = payload if kind == TaskKind.inference else {}
+        request = payload if kind in REQUEST_CARRYING_KINDS else {}
         metadata = (request.get("content") or {}).get("metadata") or {}
         execution = request.get("execution") or {}
         created_at = _parse_dt(row["created_at"])
@@ -512,12 +649,12 @@ class DashboardQueryRepository:
             origin=metadata.get("origin") if isinstance(metadata.get("origin"), str) else None,
             execution_strategy=(
                 ExecutionStrategy(execution.get("strategy", "single"))
-                if kind == TaskKind.inference
+                if kind in REQUEST_CARRYING_KINDS
                 else None
             ),
             execution_preset=(
                 ExecutionPreset(execution.get("preset", "fast"))
-                if kind == TaskKind.inference
+                if kind in REQUEST_CARRYING_KINDS
                 else None
             ),
             models=_parse_model_list(row["invocation_models"]),
@@ -578,7 +715,7 @@ class DashboardQueryRepository:
         # En el carril de ingesta el payload es un descriptor de conversión, no
         # una petición: leerle "execution" devolvería el default single/fast y
         # el panel enseñaría una estrategia que esa tarea nunca tuvo.
-        request = payload if kind == TaskKind.inference else {}
+        request = payload if kind in REQUEST_CARRYING_KINDS else {}
         requirements = request.get("model_requirements") or {}
         requested_model = _model_reference(requirements.get("target_model"))
         effective_model = _model_reference(result.get("model_used"))
@@ -595,12 +732,12 @@ class DashboardQueryRepository:
             origin=metadata.get("origin") if isinstance(metadata.get("origin"), str) else None,
             execution_strategy=(
                 ExecutionStrategy(execution.get("strategy", "single"))
-                if kind == TaskKind.inference
+                if kind in REQUEST_CARRYING_KINDS
                 else None
             ),
             execution_preset=(
                 ExecutionPreset(execution.get("preset", "fast"))
-                if kind == TaskKind.inference
+                if kind in REQUEST_CARRYING_KINDS
                 else None
             ),
             requested_model=requested_model,
