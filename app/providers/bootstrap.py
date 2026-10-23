@@ -109,6 +109,15 @@ class BootstrapModelProvider:
         return {"requested": request.prompt_compression or "broker_default", "effective": "off"}
 
     async def propose(self, request: TaskCreateRequest, model: ModelReference, ordinal: int) -> ModelOutput:
+        if request.inference_kind == InferenceKind.embedding and request.content.inputs is not None:
+            # Un vector distinto por texto, derivado del propio texto, para que
+            # una prueba pueda comprobar que el orden de salida es el de entrada.
+            vectors = tuple(
+                (float(len(text)), float(ord(text[0])), 1.0) for text in request.content.inputs
+            )
+            return ModelOutput(None, sum(max(1, len(text) // 4) for text in request.content.inputs), 0,
+                               0.0, 1.0, embeddings=vectors,
+                               generation=effective_generation(request, applies=False))
         if request.inference_kind == InferenceKind.embedding:
             return ModelOutput(None, max(1, len(request.content.prompt)//4), 0, 0.0, 1.0, (0.25, 0.5, 0.75),
                                generation=effective_generation(request, applies=False))

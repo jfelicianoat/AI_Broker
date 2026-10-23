@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import re
 import time
@@ -542,6 +543,9 @@ class ModelOutput:
     cost_usd: float
     latency_ms: float
     embedding: tuple[float, ...] | None = None
+    # Lote de embeddings (contrato 2.12): un vector por texto de
+    # `content.inputs`, en el mismo orden.
+    embeddings: tuple[tuple[float, ...], ...] | None = None
     # Parámetros efectivos de la llamada (ver effective_generation) y
     # componentes de huella observados en la RESPUESTA —capa C: el
     # `system_fingerprint` de un proveedor cloud no está en el catálogo, solo
@@ -568,6 +572,13 @@ class ModelOutput:
     def technical_output(self) -> dict[str, Any]:
         if self.embedding is not None:
             return {"embedding": list(self.embedding)}
+        if self.embeddings is not None:
+            # La fila de invocación no repite los vectores: un lote de 64 son
+            # más de 1 MB de JSON, y ya viajan en el resultado y en el artefacto.
+            return {
+                "embeddings_count": len(self.embeddings),
+                "dimensions": len(self.embeddings[0]) if self.embeddings else 0,
+            }
         payload: dict[str, Any] = {"assistant_content": self.content}
         if self.content_source and self.content_source != "content":
             payload["content_source"] = self.content_source
@@ -776,6 +787,51 @@ def enforce_context_limit(request: TaskCreateRequest, context_window: int | None
             "CONTEXT_LIMIT_EXCEEDED",
             f"La inferencia requiere como máximo conservador {required} tokens y el modelo admite {context_window}",
         )
+
+def embedding_input_too_long(
+    index: int, context_window: int | None, *, estimated_tokens: int | None = None,
+    provider_error: str | None = None,
+) -> ProviderError:
+    """El lote entero falla por un texto, y el error dice cuál.
+
+    Nunca se trunca: el vector de un texto recortado parece válido y no lo es,
+    y en un índice de búsqueda ese fallo no se ve jamás."""
+    details: dict[str, Any] = {"index": index, "context_window": context_window}
+    if estimated_tokens is not None:
+        details["estimated_tokens"] = estimated_tokens
+    if provider_error is not None:
+        details["provider_error"] = provider_error
+    return ProviderError(
+        "EMBEDDING_INPUT_TOO_LONG",
+        f"El texto {index} del lote no cabe en el contexto del modelo ({context_window} tokens); "
+        "no se ha calculado ningún vector. Trocea ese texto y reenvía el lote.",
+        details=details,
+    )
+
+
+def enforce_embedding_inputs_fit(inputs: Sequence[str], context_window: int | None) -> None:
+    """Comprobación previa de cada texto del lote contra la ventana declarada.
+
+    Usa la misma cota conservadora que el resto del broker; lo que se le
+    escape lo rechaza el runtime al vectorizar, y el adaptador lo traduce al
+    mismo error con su índice."""
+    if context_window is None:
+        raise ProviderError("CONTEXT_WINDOW_UNKNOWN", "El proveedor no declara la ventana de contexto")
+    for index, text in enumerate(inputs):
+        estimated = estimate_tokens_upper_bound(text)
+        if estimated > context_window:
+            raise embedding_input_too_long(index, context_window, estimated_tokens=estimated)
+
+
+def numeric_vector(value: Any) -> tuple[float, ...] | None:
+    """El vector como tupla de floats finitos, o None si no lo es."""
+    if not isinstance(value, list) or not value or any(
+        isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item))
+        for item in value
+    ):
+        return None
+    return tuple(float(item) for item in value)
+
 
 def request_with_context_capped_output(
     request: TaskCreateRequest,

@@ -174,6 +174,9 @@ El motor de la cola y la memoria de los modelos locales.
 | `provider_mode` | `real` | `real` \| `bootstrap` | `bootstrap` sustituye a los proveedores reales por uno de arranque, para levantar el broker sin ningún runtime instalado |
 | `dependency_wait_seconds` | `2.0` | 0.1–3600 | Cada cuánto reintenta una tarea en `waiting_for_dependencies`. Corto a propósito: lo que la bloquea está en esta misma cola y suele terminar en segundos |
 | `yield_to_urgent_tasks` | `true` | bool | Un agente, un `mixture_of_agents` o un map-reduce (estrategia explícita, no `auto`) cede el turno entre pasos si en la cola espera una tarea con `priority` menor que la suya: el agente entre iteraciones, el consenso entre oleadas y tras la primera síntesis, el map-reduce entre fragmentos y entre reducciones. Guarda lo hecho y lo retoma sin repetir llamadas. `false` = corren hasta el final |
+| `embedding_lane.enabled` | `true` | bool | Carril propio para `inference_kind: embedding` (contrato 2.12): no consumen el workflow único de inferencia y se anuncian en `capabilities.embedding_lane`. `false` = los embeddings hacen cola con el chat. **Pide reinicio** |
+| `embedding_lane.max_parallel` | `1` | int 1–8 | Embeddings que corren a la vez en el carril. **Pide reinicio** |
+| `embedding_lane.batch_max` | `64` | int 1–2048 | Máximo de textos en `content.inputs`. Se anuncia como `capabilities.embedding_batch_max`; más textos → `422 EMBEDDING_BATCH_TOO_LARGE` |
 
 > **El plazo de una tarea es una cadena, no un número.** Se corta por el primero que venza: `execution.timeout_seconds` de la petición (o `processing.default_task_timeout_seconds` si no lo trae), el techo `processing.task_timeout_seconds`, y el `timeout_seconds` del proveedor que atiende la invocación. Subir uno solo no sirve de nada si otro corta antes; el arranque avisa (`config.timeout_incoherent`) y el error `TASK_TIMEOUT` nombra cuál mandó (`timeout_bound_by`).
 
@@ -358,6 +361,9 @@ modelo que falla **rápido y siempre** puede seguir puntuando bien.
 | `consecutive_failures` | `2` | 1–20 | Fallos definitivos seguidos, sin ningún acierto entre medias, para apartarlo. Con uno solo, un tropiezo puntual apartaría un modelo sano |
 | `window_hours` | `24.0` | >0, ≤8760 | La cuarentena caduca sola: pasada la ventana sin invocaciones, el modelo vuelve. Si sigue roto vuelve a caer tras dos intentos; si lo han reinstalado, nadie tiene que acordarse de rehabilitarlo |
 | `definitive_codes` | ver abajo | | Códigos que significan "este modelo no sirve", no "ahora no se puede" |
+| `role_max_failure_rate` | `0.3` | >0, ≤1 | Aptitud por rol de consenso: fracción de fallos definitivos como proponente (o como árbitro) a partir de la cual el modelo deja de elegirse para ESE rol. Sigue en `single`. `1.0` = desactivado |
+| `role_min_attempts` | `5` | 1–1000 | Invocaciones mínimas en el rol, dentro de la ventana, para aplicar la regla |
+| `role_window_hours` | `168.0` | >0, ≤8760 | Ventana de la aptitud por rol (7 días) |
 
 Por defecto: `INVALID_PROVIDER_RESPONSE`, `PROMPT_ECHOED`, `DEGENERATE_OUTPUT`,
 `MODEL_COMPATIBILITY_MISMATCH`, `MODEL_UNAVAILABLE`,
@@ -529,6 +535,8 @@ usar los nombres reservados `ollama`, `deepseek` ni `bootstrap`.
 | `sync_exclude` | `[]` | Patrones fnmatch que apartan del catálogo. Se aplica después de `sync_include` y manda sobre él |
 | `catalog_cache_seconds` | `5.0` | |
 | `default_context_window` | `128000` | Ventana que se asume para un modelo descubierto sin declarar |
+| `jit_context_window` | `null` | Contexto con el que el servidor carga un modelo bajo demanda, si es menor que el declarado. LM Studio carga con su `defaultContextLength` (8192 en el PC de IA) y rechaza con 400 lo que no quepa; con este valor el broker no le manda textos que no le caben. Fuente en el catálogo: `jit_default` |
+| `lmstudio_loaded_context` | `false` | Lee de la API nativa de LM Studio (`/api/v0/models`) el `loaded_context_length` de cada modelo cargado y lo usa como su contexto, por encima de lo declarado y de `jit_context_window`. Fuente: `loaded`. Si la API no contesta, manda lo demás |
 | `probe_max_output_tokens` | `1` | Tokens de cada petición de sondeo (1–1024) |
 | `probe_delay_seconds` | `1.0` | Pausa entre sondeos, para no golpear el endpoint (0–60) |
 | `probe_max_models` | `50` | Modelos por tanda de sondeo (1–1000). Se respeta tal cual: si el catálogo tiene más modelos sin analizar, el panel avisa de cuántos quedan para la siguiente tanda |

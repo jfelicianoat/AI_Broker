@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, cast, get_args
+from typing import Annotated, Any, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -141,6 +141,16 @@ class TaskKind(str, Enum):
 
     inference = "inference"
     ingestion = "ingestion"
+    # Contrato 2.12. Las tareas `inference_kind: embedding` corren aquí cuando
+    # el carril está activo (processing.embedding_lane). Un embedding dura
+    # décimas de segundo y antes hacía cola detrás de una generación de minutos:
+    # con una tarea por fragmento, indexar unas notas llevaba horas.
+    embedding = "embedding"
+
+
+# Carriles cuya fila lleva un TaskCreateRequest en `request_json`. La ingesta
+# guarda un descriptor de conversión y validarlo como petición reventaría.
+REQUEST_CARRYING_KINDS = frozenset({TaskKind.inference, TaskKind.embedding})
 
 # Política de privacidad fail-closed: solo lo que se ejecuta en esta máquina
 # cuenta como local ("bootstrap" es el proveedor fake in-process). Cualquier
@@ -313,21 +323,39 @@ class InlineImage(StrictBaseModel):
 
 
 class TaskContent(StrictBaseModel):
-    prompt: str = Field(min_length=1)
+    # Obligatorio salvo en un lote de embeddings, que va por `inputs`. Se queda
+    # como `str` (vacío cuando no viaja) para no obligar a todo el broker a
+    # tratar un prompt ausente: quien lee un lote lo hace por `embedding_texts`.
+    prompt: str = ""
+    # Contrato 2.12: lote de textos de una tarea de embedding, un vector por
+    # texto y en el mismo orden. Excluyente con `prompt`.
+    inputs: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, min_length=1)
     attachments: list[ContentAttachment] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_prompt_or_inputs(self) -> TaskContent:
+        if self.inputs is not None:
+            # Vacío cuenta como ausente: es como se persiste un lote (el campo
+            # sale en `request_json` con su default) y al releerlo no puede
+            # parecer que trae los dos.
+            if self.prompt:
+                # Con los dos no hay forma de saber cuál de los dos quería
+                # vectorizar el cliente, y adivinar daría un índice equivocado.
+                raise ValueError("content.inputs and content.prompt are mutually exclusive")
+            return self
+        if not self.prompt:
+            raise ValueError("content.prompt is required (min length 1)")
+        return self
 
 
 class TaskOutput(StrictBaseModel):
     format: OutputFormat = OutputFormat.markdown
     json_schema: dict[str, Any] | None = None
     language: str = Field(default="es", min_length=2, max_length=16)
-
-    @model_validator(mode="after")
-    def require_schema_for_json(self) -> TaskOutput:
-        if self.format == OutputFormat.json and self.json_schema is None:
-            raise ValueError("output.json_schema is required when output.format is json")
-        return self
+    # El esquema obligatorio con format=json se exige en TaskCreateRequest,
+    # que sabe el inference_kind: un embedding devuelve un vector y no tiene
+    # nada que validar contra un esquema (contrato 2.12).
 
 
 class GenerationConfig(StrictBaseModel):
@@ -791,7 +819,23 @@ class TaskCreateRequest(StrictBaseModel):
                 raise ValueError("embedding only supports single strategy")
             if self.output.format != OutputFormat.json:
                 raise ValueError("embedding requires output.format=json")
+        else:
+            if self.content.inputs is not None:
+                raise ValueError("content.inputs is only supported with inference_kind=embedding")
+            if self.output.format == OutputFormat.json and self.output.json_schema is None:
+                raise ValueError("output.json_schema is required when output.format is json")
         return self
+
+
+def embedding_texts(request: TaskCreateRequest) -> list[str]:
+    """Los textos que vectoriza una tarea de embedding, en orden.
+
+    Un lote los trae en `content.inputs`; la petición de un solo texto, en
+    `content.prompt`. Fuente única para que nadie confunda el prompt vacío de un
+    lote con un texto que vectorizar."""
+    if request.content.inputs is not None:
+        return list(request.content.inputs)
+    return [request.content.prompt]
 
 
 def apply_default_timeout(request: TaskCreateRequest, default_seconds: int) -> TaskCreateRequest:
@@ -866,6 +910,9 @@ class ExecutionFingerprint(StrictBaseModel):
 # "sent" significa que el broker lo incluyó en el cuerpo, no que el modelo lo
 # haya honrado: eso último no es observable desde fuera y no se afirma.
 GenerationParameterStatus = Literal["not_requested", "sent", "unsupported"]
+# Por qué el broker mandó think=false (Ollama). None = el modelo razonó con
+# su comportamiento por defecto, o no tiene razonamiento que apagar.
+ThinkingMode = Literal["disabled_short_budget", "disabled_known_runaway", "disabled_after_runaway"]
 
 # --- Vocabulario cerrado de invocaciones (contrato 2.10) ---------------------
 #
@@ -971,6 +1018,8 @@ class EffectiveGeneration(StrictBaseModel):
     seed_status: GenerationParameterStatus = "not_requested"
     top_p: float | None = None
     top_p_status: GenerationParameterStatus = "not_requested"
+    # Solo cuando el broker apagó el razonamiento (ver ThinkingMode).
+    thinking: ThinkingMode | None = None
 
 
 class TaskExecutionSummary(StrictBaseModel):
@@ -1220,6 +1269,14 @@ class MCPServerCapability(StrictBaseModel):
     data_boundary: Literal["local", "egress"]
 
 
+class EmbeddingLaneCapability(StrictBaseModel):
+    # Embeddings que pueden correr a la vez en el carril.
+    max_parallel: int
+    # Igual que `embedding_batch_max`; se repite aquí para que quien mire el
+    # carril tenga sus dos límites juntos.
+    batch_max: int
+
+
 class BrokerCapabilitiesResponse(StrictBaseModel):
     system1_judgments: bool = False
     system1_semantic_routing: bool = False
@@ -1325,6 +1382,14 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # El entregable de la tarea se identifica en /artifacts con `final: true`,
     # y esa es la vía canónica para recogerlo (`result` sigue sin contrato).
     canonical_artifacts: bool = False
+    # --- Contrato 2.12 — embeddings en lote y carril propio ------------------
+    # Máximo de textos en `content.inputs`. None = este broker no admite lotes
+    # y el cliente debe mandar un texto por tarea.
+    embedding_batch_max: int | None = None
+    # Carril de embeddings: las tareas `inference_kind: embedding` no consumen
+    # el workflow único de inferencia. None = carril apagado (los embeddings
+    # hacen cola con el chat, como antes de 2.12).
+    embedding_lane: EmbeddingLaneCapability | None = None
     # --- Puente LARM (aditivo; contract_version sigue en 2.11) ----------------
     # El broker resuelve modelos locales gestionados por LARM: target exacto
     # {provider: "larm", deployment: "local", model: <variant_id>}, servido con

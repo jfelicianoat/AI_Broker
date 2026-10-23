@@ -139,7 +139,7 @@ def test_bridge_off_announces_nothing_and_refuses_larm_targets(tmp_path: Path) -
         capabilities = client.get("/api/v1/capabilities").json()
         assert capabilities["local_runtime_resolver"] is False
         assert capabilities["larm_contract_version"] is None
-        assert capabilities["contract_version"] == "2.11"
+        assert capabilities["contract_version"] == "2.12"
         state = run_task(client, task_payload(fake.variant.variant_id, key="larm-off"))
     assert state["status"] == "failed"
     assert state["error"]["code"] == "PROVIDER_UNAVAILABLE"
@@ -174,7 +174,7 @@ def test_capabilities_announce_bridge_only_with_live_catalog(tmp_path: Path) -> 
     assert capabilities["local_runtime_resolver"] is True
     assert capabilities["larm_contract_version"] == "1.0"
     # El puente es aditivo: el contrato del broker no cambia por LARM.
-    assert capabilities["contract_version"] == "2.11"
+    assert capabilities["contract_version"] == "2.12"
     larm_models = [item for item in models["models"] if item["provider"] == "larm"]
     assert [item["name"] for item in larm_models] == [fake.variant.variant_id]
     assert larm_models[0]["deployment"] == "local"

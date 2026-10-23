@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -28,9 +29,11 @@ from app.providers.base import (
     decoded_json,
     effective_generation,
     enforce_context_limit,
+    enforce_embedding_inputs_fit,
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
     multimodal_content,
+    numeric_vector,
     probe_rate_limit_streak_limit,
     provider_error_from_http,
     rate_limited_error,
@@ -48,6 +51,10 @@ from app.providers.diagnostics import reasoning_only_error
 from app.schemas import OutputFormat, TaskCreateRequest
 
 logger = logging.getLogger("ai_broker.openai_compatible")
+
+# Cuánto se recuerda que un servidor no contestó a /models antes de volver a
+# intentarlo. Corto: un servidor que vuelve reaparece en el catálogo enseguida.
+CATALOG_FAILURE_RETRY_SECONDS = 30.0
 
 # Capacidades sondeables contra /chat/completions con 1 token de salida.
 PROBE_FEATURES: tuple[str, ...] = ("vision", "json_mode", "tools")
@@ -75,6 +82,12 @@ class OpenAICompatibleProvider:
         # Solo cachea los nombres devueltos por /models: los campos derivados de la
         # configuración (compatibilidad, costes) se reconstruyen en cada llamada.
         self._names_cache = _CatalogCache(config.catalog_cache_seconds)
+        # modelo -> contexto con el que está cargado (lmstudio_loaded_context).
+        self._loaded_context_cache = _CatalogCache(config.catalog_cache_seconds)
+        # Último fallo de red al pedir /models y hasta cuándo se recuerda. Sin
+        # esto, un servidor apagado costaba ~2 s de conexión rechazada en cada
+        # consulta del catálogo, que el broker hace varias veces por tarea.
+        self._catalog_failure: tuple[float, ProviderError] | None = None
         # Resumen de la última tanda de sondeo: cuántos modelos quedaron fuera y
         # por qué. Lo lee el panel para no anunciar un "guardado" que esconde
         # una tanda que no analizó nada.
@@ -116,8 +129,11 @@ class OpenAICompatibleProvider:
         names = list(configured)
         if self.config.sync_models:
             cached_names = self._names_cache.get()
+            failure = self._catalog_failure
             if cached_names is not None:
                 names = list(cached_names)
+            elif failure is not None and time.monotonic() < failure[0]:
+                raise failure[1]
             else:
                 try:
                     response = await self.client.get("/models", headers=self._headers())
@@ -137,27 +153,66 @@ class OpenAICompatibleProvider:
                 except ProviderError:
                     raise
                 except httpx.HTTPError as error:
-                    raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+                    unavailable = ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True)
+                    self._catalog_failure = (time.monotonic() + CATALOG_FAILURE_RETRY_SECONDS, unavailable)
+                    raise unavailable from error
+                self._catalog_failure = None
                 self._names_cache.set(list(names))
-        return [self._catalog_entry(name, configured.get(name)) for name in names]
+        loaded = await self._loaded_contexts()
+        return [self._catalog_entry(name, configured.get(name), loaded.get(name)) for name in names]
 
-    def _catalog_entry(self, name: str, model_config: Any | None = None) -> dict[str, Any]:
+    async def _loaded_contexts(self) -> dict[str, int]:
+        """Contexto real de cada modelo cargado en LM Studio. Vacío si la
+        opción está apagada o la API nativa no contesta: entonces manda lo
+        declarado, como antes."""
+        if not self.config.lmstudio_loaded_context:
+            return {}
+        cached = self._loaded_context_cache.get()
+        if cached is not None:
+            return dict(cached)
+        url = httpx.URL(self.config.base_url).copy_with(path="/api/v0/models", query=None)
+        try:
+            response = await self.client.get(url, headers=self._headers())
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            logger.debug("openai_compatible.loaded_context_unavailable", exc_info=True)
+            return {}
+        loaded = {
+            str(item["id"]): int(item["loaded_context_length"])
+            for item in (payload.get("data") if isinstance(payload, dict) else None) or []
+            if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded"
+            and isinstance(item.get("loaded_context_length"), int) and item["loaded_context_length"] > 0
+        }
+        self._loaded_context_cache.set(dict(loaded))
+        return loaded
+
+    def _catalog_entry(
+        self, name: str, model_config: Any | None = None, loaded_context: int | None = None,
+    ) -> dict[str, Any]:
         capabilities = (
             list(model_config.capabilities)
             if model_config is not None
             else infer_openai_compatible_capabilities(name)
         )
+        declared = (
+            model_config.context_window if model_config is not None else self.config.default_context_window
+        )
+        # "default" = heredado de default_context_window sin verificar: puede no
+        # corresponder al contexto real del modelo y producir errores 4xx tardíos.
+        context_window = declared
+        source = "configured" if model_config is not None else "default"
+        if loaded_context is not None:
+            context_window, source = loaded_context, "loaded"
+        elif self.config.jit_context_window is not None and self.config.jit_context_window < declared:
+            context_window, source = self.config.jit_context_window, "jit_default"
         return {
             "name": name,
             "provider": self.config.id,
             "deployment": self.config.deployment,
             "status": "online",
-            "context_window": (
-                model_config.context_window if model_config is not None else self.config.default_context_window
-            ),
-            # "default" = heredado de default_context_window sin verificar: puede no
-            # corresponder al contexto real del modelo y producir errores 4xx tardíos.
-            "context_window_source": "configured" if model_config is not None else "default",
+            "context_window": context_window,
+            "context_window_source": source,
             "capabilities": capabilities,
             "family": self.config.display_name or self.config.id,
             "compatibility": (
@@ -677,6 +732,69 @@ class OpenAICompatibleProvider:
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             embedding=tuple(float(value) for value in vector),
             # /embeddings no admite ni temperatura ni semilla.
+            generation=effective_generation(request, applies=False),
+        )
+
+    async def embed_batch(self, request: TaskCreateRequest, model: str, inputs: list[str]) -> ModelOutput:
+        """Lote en una sola llamada a /embeddings, que acepta `input` como lista.
+
+        El orden se reconstruye por el `index` de cada elemento de `data` y no
+        por su posición: el estándar lo declara y nada obliga al servidor a
+        devolverlos ordenados. La longitud solo se comprueba contra la ventana
+        declarada: estos servidores no tienen un modo sin truncado que se pueda
+        pedir, así que lo que no quepa no debe llegar a enviarse."""
+        catalog = await self.models()
+        entry = next((item for item in catalog if item["name"] == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo {self.config.id} no disponible: {model}")
+        if "embedding" not in {str(capability).lower() for capability in entry.get("capabilities") or []}:
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad embedding")
+        enforce_embedding_inputs_fit(inputs, entry.get("context_window"))
+        input_cost, _ = self._costs(model)
+        if request.model_requirements.max_cost_usd is not None:
+            estimated_input = sum(estimate_tokens_upper_bound(text) for text in inputs)
+            estimated_cost = estimated_input * input_cost / 1_000_000
+            if estimated_cost > request.model_requirements.max_cost_usd:
+                raise ProviderError(
+                    "BUDGET_EXCEEDED",
+                    f"El coste maximo estimado ({estimated_cost:.6f} USD) supera el presupuesto",
+                )
+        started = datetime.now(timezone.utc)
+        try:
+            response = await self.client.post(
+                "/embeddings",
+                headers=self._headers(),
+                json={"model": model, "input": inputs},
+            )
+            response.raise_for_status()
+            payload = decoded_json(response, self.config.id)
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise provider_error_from_http(error, provider=self.config.id, model=model) from error
+        data = [item for item in payload.get("data") or [] if isinstance(item, dict)]
+        ordered: dict[int, tuple[float, ...] | None] = {}
+        for position, item in enumerate(data):
+            index = item.get("index", position)
+            if isinstance(index, int) and not isinstance(index, bool):
+                ordered[index] = numeric_vector(item.get("embedding"))
+        vectors = [ordered.get(index) for index in range(len(inputs))]
+        if len(data) != len(inputs) or any(vector is None for vector in vectors):
+            raise ProviderError(
+                "INVALID_PROVIDER_RESPONSE",
+                f"{self.config.id} devolvio {len(data)} vectores para {len(inputs)} textos",
+            )
+        usage = payload.get("usage") or {}
+        input_tokens = int(usage.get("prompt_tokens") or usage.get("total_tokens") or 0)
+        return ModelOutput(
+            content=None,
+            tokens_input=input_tokens,
+            tokens_output=0,
+            cost_usd=input_tokens * input_cost / 1_000_000,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            embeddings=tuple(vector for vector in vectors if vector is not None),
             generation=effective_generation(request, applies=False),
         )
 

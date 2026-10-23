@@ -105,7 +105,8 @@ class PhaseFourOllamaTests(unittest.IsolatedAsyncioTestCase):
             if request.url.path == "/api/chat":
                 body = json.loads(request.content)
                 state["chat_body"] = body
-                if body.get("think") is False:
+                state.setdefault("think_sent", []).append(body.get("think"))
+                if body.get("think") is False and not state.get("always_runaway"):
                     return httpx.Response(200, json={
                         "message": {"content": "connection ok"}, "done_reason": "stop",
                         "prompt_eval_count": 4, "eval_count": 3,
@@ -131,7 +132,7 @@ class PhaseFourOllamaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(state["chat_body"]["think"], False)
         self.assertEqual(output.content, "connection ok")
 
-    async def test_ample_budget_keeps_thinking_on(self) -> None:
+    async def test_ample_budget_keeps_thinking_on_unless_it_runs_away(self) -> None:
         state: dict = {}
         provider = await self._thinking_provider(state)
         request = TaskCreateRequest.model_validate({
@@ -139,17 +140,111 @@ class PhaseFourOllamaTests(unittest.IsolatedAsyncioTestCase):
             "content": {"prompt": "Analiza a fondo el problema"},
             "generation": {"max_output_tokens": 4000},
         })
+        output = await provider.generate(request, "reasoner", request.content.prompt)
+        # Primero razona (presupuesto amplio); al agotarlo sin responder se
+        # repite una sola vez con think=false, como nemotron-3.5-lightning.
+        self.assertEqual(state["think_sent"], [None, False])
+        self.assertEqual(output.content, "connection ok")
+        self.assertEqual(output.generation["thinking"], "disabled_after_runaway")
+        # Los tokens quemados razonando cuentan: el coste no se esconde.
+        self.assertEqual(output.tokens_output, 32 + 3)
+
+        # La siguiente llamada ya no malgasta el presupuesto razonando.
+        output = await provider.generate(request, "reasoner", request.content.prompt)
+        await provider.close()
+        self.assertEqual(state["think_sent"], [None, False, False])
+        self.assertEqual(output.generation["thinking"], "disabled_known_runaway")
+
+    async def test_agent_turn_recovers_from_runaway_thinking(self) -> None:
+        state: dict = {}
+        provider = await self._thinking_provider(state)
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "phase4:thinking-agent",
+            "content": {"prompt": "Analiza a fondo el problema"},
+            "generation": {"max_output_tokens": 4000},
+        })
+        turn = await provider.chat_tools(
+            request, "reasoner", [{"role": "user", "content": "hola"}], [],
+        )
+        await provider.close()
+        self.assertEqual(state["think_sent"], [None, False])
+        self.assertEqual(turn.content, "connection ok")
+        self.assertEqual(turn.generation["thinking"], "disabled_after_runaway")
+
+    async def test_runaway_memory_expires(self) -> None:
+        state: dict = {}
+        provider = await self._thinking_provider(state)
+        provider._runaway_thinkers[("reasoner", "prose")] = 0.0
+        self.assertIsNone(provider._thinking_mode("reasoner", "prose", ["thinking"], 4000))
+        self.assertNotIn(("reasoner", "prose"), provider._runaway_thinkers)
+        await provider.close()
+
+    async def test_runaway_mark_only_covers_the_same_task_type(self) -> None:
+        state: dict = {}
+        provider = await self._thinking_provider(state)
+        code = TaskCreateRequest.model_validate({
+            "idempotency_key": "phase4:thinking-code",
+            "content": {"prompt": "Implementa una función Python que ordene una lista:\n```python\ndef f(x): pass\n```"},
+            "generation": {"max_output_tokens": 4000},
+        })
+        prose = TaskCreateRequest.model_validate({
+            "idempotency_key": "phase4:thinking-prose",
+            "content": {"prompt": "Haz unos apuntes de esta charla sobre historia medieval"},
+            "generation": {"max_output_tokens": 4000},
+        })
+        output = await provider.generate(code, "reasoner", code.content.prompt)
+        self.assertEqual(output.generation["thinking"], "disabled_after_runaway")
+        self.assertEqual(set(provider._runaway_thinkers), {("reasoner", "code")})
+        # Desbocarse con código no apaga el razonamiento en prosa: la prosa
+        # vuelve a intentarlo razonando (y aquí se desboca también).
+        state["think_sent"] = []
+        output = await provider.generate(prose, "reasoner", prose.content.prompt)
+        self.assertEqual(state["think_sent"], [None, False])
+        self.assertEqual(output.generation["thinking"], "disabled_after_runaway")
+        await provider.close()
+
+    async def test_map_reduce_chunks_use_the_task_type_of_the_whole_task(self) -> None:
+        from app.task_classifier import invocation_task_type, task_type_scope
+
+        state: dict = {}
+        provider = await self._thinking_provider(state)
+        provider._runaway_thinkers[("reasoner", "prose")] = float("inf")
+        chunk = TaskCreateRequest.model_validate({
+            "idempotency_key": "phase4:thinking-chunk",
+            "content": {"prompt": "Resume este fragmento de la transcripción"},
+            "generation": {"max_output_tokens": 4000},
+        })
+        # El trozo suelto se clasificaría "prose", pero la tarea es
+        # long_context: la marca de prosa no le aplica.
+        with task_type_scope("long_context"):
+            output = await provider.generate(chunk, "reasoner", chunk.content.prompt)
+        # Fuera del ámbito no queda rastro: la siguiente tarea se clasifica sola.
+        self.assertEqual(invocation_task_type(chunk), "prose")
+        self.assertEqual(state["think_sent"], [None, False])
+        self.assertIn(("reasoner", "long_context"), provider._runaway_thinkers)
+        self.assertEqual(output.generation["thinking"], "disabled_after_runaway")
+        await provider.close()
+
+    async def test_runaway_that_persists_without_thinking_reports_why(self) -> None:
+        state: dict = {"always_runaway": True}
+        provider = await self._thinking_provider(state)
+        request = TaskCreateRequest.model_validate({
+            "idempotency_key": "phase4:thinking-stubborn",
+            "content": {"prompt": "Analiza a fondo el problema"},
+            "generation": {"max_output_tokens": 4000},
+        })
         with self.assertRaises(ProviderError) as raised:
             await provider.generate(request, "reasoner", request.content.prompt)
         await provider.close()
-        self.assertNotIn("think", state["chat_body"])
+        # Un solo reintento, nunca un bucle.
+        self.assertEqual(state["think_sent"], [None, False])
         # El error de content vacío debe decir por qué paró y si el
         # razonamiento se comió el presupuesto: "no devolvió message.content"
         # a secas no deja depurar desde el cliente.
         self.assertEqual(raised.exception.code, "INVALID_PROVIDER_RESPONSE")
         self.assertIn("done_reason=length", str(raised.exception))
         self.assertIn("thinking=", str(raised.exception))
-        self.assertIn("agotó max_output_tokens", str(raised.exception))
+        self.assertIn("think=false ya aplicado", str(raised.exception))
 
     async def test_context_limit_fails_before_provider_inference_without_truncation(self) -> None:
         chat_called = False

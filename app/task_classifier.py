@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
-from app.schemas import TaskCreateRequest
+from app.schemas import InferenceKind, TaskCreateRequest
 
 
 def _fold(text: str) -> str:
@@ -285,7 +288,13 @@ def request_text(prompt: str) -> str:
 
 
 def classify_task_type(request: TaskCreateRequest) -> str:
-    """"code" | "long_context" | "prose".
+    """"code" | "long_context" | "prose" | "embedding".
+
+    Un embedding es su propio segmento: sus métricas (éxito, latencia,
+    tokens/s) no se parecen en nada a las de una generación, y mezclarlas en
+    "prosa" con el chat daba a los modelos de embeddings una puntuación que no
+    describía ningún trabajo real. No es un tipo de task_affinity: ahí no
+    hay nada que apartar.
 
     Orden de prioridad: el código manda incluso si el prompt es largo (para
     enrutar bien importa más acertar el modelo de código que el de contexto
@@ -298,12 +307,36 @@ def classify_task_type(request: TaskCreateRequest) -> str:
     # del broker, pero no un script que empiece por el clasificador).
     from app.providers.base import estimate_required_context
 
+    if request.inference_kind == InferenceKind.embedding:
+        return "embedding"
     petition = request_text(request.content.prompt)
     if _has_code_signal(petition):
         return "code"
     if estimate_required_context(request) >= LONG_CONTEXT_TOKEN_THRESHOLD:
         return "long_context"
     return "prose"
+
+
+# Tipo de la tarea que se está procesando. Lo fija el coordinador con la
+# petición ORIGINAL, que es también con la que registra cada invocación: un
+# trozo de map-reduce es corto y, clasificado por sí solo, saldría "prose"
+# aunque la tarea sea "long_context".
+_task_type_in_progress: ContextVar[str | None] = ContextVar("task_type_in_progress", default=None)
+
+
+@contextmanager
+def task_type_scope(task_type: str) -> Iterator[None]:
+    token = _task_type_in_progress.set(task_type)
+    try:
+        yield
+    finally:
+        _task_type_in_progress.reset(token)
+
+
+def invocation_task_type(request: TaskCreateRequest) -> str:
+    """El tipo con el que se va a registrar esta invocación: el de la tarea en
+    curso si lo hay; si no (sondeos en sombra, pruebas), el de la petición."""
+    return _task_type_in_progress.get() or classify_task_type(request)
 
 
 def _has_code_signal(text: str) -> bool:

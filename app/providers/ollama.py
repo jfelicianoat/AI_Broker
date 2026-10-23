@@ -29,14 +29,18 @@ from app.providers.base import (
     content_text,
     decoded_json,
     effective_generation,
+    embedding_input_too_long,
     enforce_context_limit,
+    enforce_embedding_inputs_fit,
     estimate_required_context,
+    numeric_vector,
     provider_error_from_http,
     provider_http_error_message,
     request_with_context_capped_output,
     returned_images,
 )
 from app.schemas import OutputFormat, TaskCreateRequest
+from app.task_classifier import invocation_task_type
 
 logger = logging.getLogger("ai_broker.ollama")
 
@@ -82,6 +86,29 @@ def _thinking_disabled(capabilities: Any, max_output_tokens: int) -> bool:
     encima del umbral se deja razonar, que es donde aporta calidad."""
     declared = {str(item).lower() for item in (capabilities or [])}
     return "thinking" in declared and max_output_tokens < THINKING_MIN_OUTPUT_TOKENS
+
+
+# Cuánto se recuerda que un modelo razona sin freno. Nemotron-3.5-lightning
+# gastaba los 7 500 tokens de salida en message.thinking y devolvía content
+# vacío en la mitad de sus tareas; con think=false contesta en segundos.
+# La marca es por (modelo, tipo de tarea): desbocarse con código no dice nada
+# de cómo razona resumiendo un documento largo, y apagárselo ahí también le
+# quitaría calidad justo donde el razonamiento sí le cabe.
+RUNAWAY_THINKING_MEMORY_SECONDS = 24 * 3600
+
+
+def _thinking_runaway(payload: dict[str, Any]) -> bool:
+    """La respuesta llegó vacía porque el razonamiento se comió el
+    presupuesto: paró por longitud, con thinking y sin content."""
+    message = payload.get("message") or {}
+    content = message.get("content")
+    thinking = message.get("thinking")
+    return (
+        str(payload.get("done_reason") or "") == "length"
+        and isinstance(thinking, str) and bool(thinking.strip())
+        and not (isinstance(content, str) and content.strip())
+        and not message.get("tool_calls")
+    )
 
 
 @dataclass(frozen=True)
@@ -218,6 +245,14 @@ def _generation_options(
     if num_ctx is not None:
         options["num_ctx"] = num_ctx
     return options
+
+
+def _with_thinking(generation: dict[str, Any], thinking_mode: str | None) -> dict[str, Any]:
+    """La clave solo aparece cuando el broker apagó el razonamiento: una
+    invocación normal guarda exactamente el mismo snapshot que antes."""
+    if thinking_mode is not None:
+        generation["thinking"] = thinking_mode
+    return generation
 
 
 def _empty_content_error(payload: dict[str, Any], think_disabled: bool) -> ProviderError:
@@ -529,6 +564,34 @@ class OllamaProvider:
         # modelo -> (expira_en_monotonic, digest visto, metadatos).
         self._metadata_cache: dict[str, tuple[float, str, dict[str, Any]]] = {}
         self._version_cache = _CatalogCache(METADATA_CACHE_SECONDS)
+        # (modelo, tipo de tarea) -> expira_en_monotonic. Mientras dure la
+        # marca, ese modelo se llama con think=false SOLO en ese tipo de tarea.
+        self._runaway_thinkers: dict[tuple[str, str], float] = {}
+
+    def _thinking_mode(
+        self, model: str, task_type: str, capabilities: Any, max_output_tokens: int,
+    ) -> str | None:
+        """Por qué mandar think=false en esta llamada, o None para no tocarlo."""
+        if _thinking_disabled(capabilities, max_output_tokens):
+            return "disabled_short_budget"
+        declared = {str(item).lower() for item in (capabilities or [])}
+        expires = self._runaway_thinkers.get((model, task_type))
+        if "thinking" in declared and expires is not None:
+            if expires > time.monotonic():
+                return "disabled_known_runaway"
+            self._runaway_thinkers.pop((model, task_type), None)
+        return None
+
+    def _remember_runaway(self, model: str, task_type: str, payload: dict[str, Any]) -> None:
+        self._runaway_thinkers[(model, task_type)] = (
+            time.monotonic() + RUNAWAY_THINKING_MEMORY_SECONDS
+        )
+        logger.info("ollama.thinking_runaway", extra={
+            "event": "ollama.thinking_runaway",
+            "model": model,
+            "task_type": task_type,
+            "eval_count": int(payload.get("eval_count") or 0),
+        })
 
     async def reload_config(self, config: BrokerConfig) -> None:
         """Aplica la config nueva de verdad: cliente y lifecycle se reconstruyen
@@ -869,8 +932,10 @@ class OllamaProvider:
             request, entry.get("context_window"), _estimation_text(prompt, system)
         )
         started = datetime.now(timezone.utc)
-        think_disabled = _thinking_disabled(
-            entry.get("capabilities"), inference_request.generation.max_output_tokens
+        task_type = invocation_task_type(request)
+        thinking_mode = self._thinking_mode(
+            model, task_type, entry.get("capabilities"),
+            inference_request.generation.max_output_tokens,
         )
         user_message: dict[str, Any] = {"role": "user", "content": prompt}
         if request.inline_images:
@@ -905,13 +970,24 @@ class OllamaProvider:
                     "keep_alive": -1,
                     "options": _generation_options(inference_request, plan, num_ctx),
                 }
-                if think_disabled:
+                if thinking_mode is not None:
                     payload_request["think"] = False
                 if inference_request.output.format == OutputFormat.json:
                     payload_request["format"] = inference_request.output.json_schema
                 response = await self.client.post("/api/chat", json=payload_request)
                 response.raise_for_status()
                 payload = response.json()
+                if thinking_mode is None and _thinking_runaway(payload):
+                    # El razonamiento agotó el presupuesto: una segunda vez sin
+                    # razonar, dentro del mismo lease (el modelo sigue cargado).
+                    self._remember_runaway(model, task_type, payload)
+                    wasted_tokens = int(payload.get("eval_count") or 0)
+                    thinking_mode = "disabled_after_runaway"
+                    payload_request["think"] = False
+                    response = await self.client.post("/api/chat", json=payload_request)
+                    response.raise_for_status()
+                    payload = response.json()
+                    payload["eval_count"] = int(payload.get("eval_count") or 0) + wasted_tokens
         except ProviderError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as error:
@@ -925,13 +1001,13 @@ class OllamaProvider:
             # Un modelo que genera imágenes puede contestar solo con la imagen.
             # Eso no es una respuesta vacía: es la respuesta.
             if not images:
-                raise _empty_content_error(payload, think_disabled)
+                raise _empty_content_error(payload, thinking_mode is not None)
             content = _IMAGE_ONLY_ANSWER
         return ModelOutput(
             content=content, tokens_input=int(payload.get("prompt_eval_count") or 0),
             tokens_output=int(payload.get("eval_count") or 0), cost_usd=0.0,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
-            generation=effective_generation(inference_request),
+            generation=_with_thinking(effective_generation(inference_request), thinking_mode),
             images=images,
         )
 
@@ -963,13 +1039,26 @@ class OllamaProvider:
         # plantilla de tools en el contexto invitando a llamarlas.
         if tools:
             payload_request["tools"] = tools
-        if _thinking_disabled(entry.get("capabilities"), request.generation.max_output_tokens):
+        task_type = invocation_task_type(request)
+        thinking_mode = self._thinking_mode(
+            model, task_type, entry.get("capabilities"), request.generation.max_output_tokens
+        )
+        if thinking_mode is not None:
             payload_request["think"] = False
         try:
             async with self.lifecycle.lease(model, plan.gpu_bytes):
                 response = await self.client.post("/api/chat", json=payload_request)
                 response.raise_for_status()
                 payload = response.json()
+                if thinking_mode is None and _thinking_runaway(payload):
+                    self._remember_runaway(model, task_type, payload)
+                    wasted_tokens = int(payload.get("eval_count") or 0)
+                    thinking_mode = "disabled_after_runaway"
+                    payload_request["think"] = False
+                    response = await self.client.post("/api/chat", json=payload_request)
+                    response.raise_for_status()
+                    payload = response.json()
+                    payload["eval_count"] = int(payload.get("eval_count") or 0) + wasted_tokens
         except ProviderError:
             raise
         except (httpx.TimeoutException, httpx.NetworkError) as error:
@@ -997,7 +1086,7 @@ class OllamaProvider:
             cost_usd=0.0,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             raw_assistant_message={"role": "assistant", **message},
-            generation=effective_generation(request),
+            generation=_with_thinking(effective_generation(request), thinking_mode),
         )
 
     @staticmethod
@@ -1071,3 +1160,86 @@ class OllamaProvider:
             # ningún sitio y la telemetría lo dice en vez de callarlo.
             generation=effective_generation(request, applies=False),
         )
+
+    async def embed_batch(self, request: TaskCreateRequest, model: str, inputs: list[str]) -> ModelOutput:
+        """Un lote de textos en una sola llamada a /api/embed, bajo un solo lease.
+
+        Un lote, un modelo: si el modelo no está, falla el lote entero. Y nada
+        de truncar: con `truncate: false` Ollama rechaza el lote si un texto no
+        cabe, pero no dice cuál; entonces se repasan los textos uno a uno hasta
+        dar con él, para que el error lleve su índice. Ese repaso solo cuesta
+        en el caso que ya es un fallo."""
+        catalog = await self.models()
+        entry = next((item for item in catalog if item["name"] == model), None)
+        if entry is None:
+            raise ProviderError("MODEL_UNAVAILABLE", f"Modelo Ollama no disponible: {model}")
+        if "embedding" not in set(entry.get("capabilities") or []):
+            raise ProviderError("MODEL_CAPABILITY_MISMATCH", f"El modelo {model} no declara capacidad embedding")
+        context_window = entry.get("context_window")
+        enforce_embedding_inputs_fit(inputs, context_window)
+        started = datetime.now(timezone.utc)
+        plan = self._offload_plan(entry)
+        try:
+            async with self.lifecycle.lease(model, plan.gpu_bytes):
+                response = await self.client.post(
+                    "/api/embed",
+                    json={"model": model, "input": inputs, "truncate": False, "keep_alive": -1},
+                )
+                if response.status_code == 400 and _exceeds_context(response):
+                    raise await self._locate_too_long(model, inputs, context_window, response)
+                response.raise_for_status()
+                payload = response.json()
+        except ProviderError:
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+        except httpx.HTTPStatusError as error:
+            raise provider_error_from_http(error, provider="ollama", model=model) from error
+        raw = payload.get("embeddings") or []
+        vectors = [numeric_vector(item) for item in raw]
+        if len(vectors) != len(inputs) or any(vector is None for vector in vectors):
+            raise ProviderError(
+                "INVALID_PROVIDER_RESPONSE",
+                f"Ollama devolvió {len(raw)} vectores válidos o no para {len(inputs)} textos",
+            )
+        return ModelOutput(
+            content=None,
+            tokens_input=int(payload.get("prompt_eval_count") or 0),
+            tokens_output=0,
+            cost_usd=0.0,
+            latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
+            embeddings=tuple(vector for vector in vectors if vector is not None),
+            generation=effective_generation(request, applies=False),
+        )
+
+    async def _locate_too_long(
+        self, model: str, inputs: list[str], context_window: Any, response: httpx.Response,
+    ) -> ProviderError:
+        """Qué texto del lote rechazó Ollama por largo. Se llama con el lease
+        del lote aún tomado: el modelo sigue cargado y cada prueba es barata."""
+        provider_error = _error_text(response)
+        for index, text in enumerate(inputs):
+            single = await self.client.post(
+                "/api/embed",
+                json={"model": model, "input": text, "truncate": False, "keep_alive": -1},
+            )
+            if single.status_code == 400 and _exceeds_context(single):
+                return embedding_input_too_long(index, context_window, provider_error=provider_error)
+        # Ninguno falla suelto: no se puede señalar un índice sin inventarlo.
+        return ProviderError(
+            "EMBEDDING_INPUT_TOO_LONG",
+            f"Ollama rechazó el lote por longitud y ningún texto falla por separado: {provider_error}",
+            details={"index": None, "context_window": context_window, "provider_error": provider_error},
+        )
+
+
+def _error_text(response: httpx.Response) -> str:
+    try:
+        return str(response.json().get("error") or response.text)
+    except ValueError:
+        return response.text
+
+
+def _exceeds_context(response: httpx.Response) -> bool:
+    """Firma con la que Ollama rechaza un texto que no cabe con truncate=false."""
+    return "exceeds the context length" in _error_text(response)

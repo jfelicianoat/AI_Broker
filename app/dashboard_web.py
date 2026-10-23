@@ -69,7 +69,7 @@ from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.providers.routing import task_affinity_excluded, task_affinity_patterns
-from app.repository import IdempotencyConflict, QueueFull, TaskRepository
+from app.repository import IdempotencyConflict, QueueFull, TaskRepository, lane_for_request
 from app.residency import build_report, local_openai_provider_roots
 from app.resource_scheduler import ResourceScheduler
 from app.schemas import (
@@ -277,6 +277,7 @@ def create_dashboard_router(
             "summary": queries.summary(window_hours=24, lane_capacities=lane_capacities(config)),
             "queue": queries.list_tasks(page=1, page_size=5, status=PENDING_TASK_STATUSES, origin=None),
             "active": queries.active_task_detail(),
+            "embedding_lane": queries.embedding_lane_view(config),
             "health": await health_loader(),
             "resources": await resources(),
             "residency": await residency(),
@@ -291,6 +292,7 @@ def create_dashboard_router(
             "tasks.html",
             {
                 "queue": queries.list_tasks(page=1, page_size=50, status=PENDING_TASK_STATUSES, origin=None),
+                "embedding_lane": queries.embedding_lane_view(config),
                 "history": queries.list_terminal_tasks(page_size=20),
                 "nav_active": "tareas",
             },
@@ -751,6 +753,14 @@ def create_dashboard_router(
             },
         )
 
+    @protected.get("/dashboard/fragments/embedding-lane", response_class=HTMLResponse)
+    async def embedding_lane_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/embedding_lane.html",
+            context={"lane": queries.embedding_lane_view(config)},
+        )
+
     @protected.get("/dashboard/fragments/active", response_class=HTMLResponse)
     async def active_fragment(request: Request):
         return templates.TemplateResponse(
@@ -1128,6 +1138,9 @@ def create_dashboard_router(
                 task, created = repository.create_task(
                     payload,
                     queue_max_size=config.processing.queue_max_size,
+                    kind=lane_for_request(
+                        payload, embedding_lane=config.processing.embedding_lane.enabled,
+                    ),
                 )
                 if created:
                     coordinator.initialize_run(task.task_id, payload)
@@ -1487,6 +1500,7 @@ _TASK_TYPE_LABELS = {
     "code": "Código",
     "long_context": "Contexto largo",
     "prose": "Prosa",
+    "embedding": "Embeddings",
     # Bucket propio de las descripciones de figuras (app.ingestion.service).
     # No compite en la selección de modelo para texto, pero sí se enseña: es
     # trabajo real de un modelo real y se paga en GPU.
