@@ -148,8 +148,23 @@ def test_bridge_off_announces_nothing_and_refuses_larm_targets(tmp_path: Path) -
     assert fake.requests == []
 
 
+def test_larm_offline_is_requeued_for_a_retry(tmp_path: Path) -> None:
+    """LARM caído es una caída del proveedor: la tarea vuelve a la cola."""
+    config = broker_config(tmp_path)
+    fake = FakeLarm()
+    fake.offline = True
+    with TestClient(create_app(config)) as client:
+        client.app.state.coordinator.artifacts = ArtifactStore(tmp_path / "tasks")
+        install(client.app, config, fake, FakeRuntime(fake))
+        state = run_task(client, task_payload(fake.variant.variant_id, key="larm-down-retry"))
+    assert state["status"] == "queued"
+    assert state["progress"]["outage_retry"]["code"] == "PROVIDER_UNAVAILABLE"
+
+
 def test_larm_offline_is_retryable_and_never_falls_back_when_forbidden(tmp_path: Path) -> None:
     config = broker_config(tmp_path)
+    # Sin reintentos: así se ve el error con el que acabaría tras agotarlos.
+    config.processing.max_task_attempts = 1
     fake = FakeLarm()
     fake.offline = True
     with TestClient(create_app(config)) as client:

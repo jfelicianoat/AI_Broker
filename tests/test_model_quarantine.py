@@ -66,6 +66,19 @@ class TestQuarantineRule:
         _invocation(db, "sano:q8", "completed", None, 10)
         assert load_quarantine(db, ModelQuarantineConfig()) == {}
 
+    def test_an_earlier_success_does_not_erase_the_streak_after_it(self, tmp_path) -> None:
+        """Secuencia real de nemotron-3.5-lightning:30b el 2026-10-20: dos
+        aciertos y después fallos definitivos seguidos. Los aciertos son
+        ANTERIORES a la racha; no la absuelven."""
+        db = _db(tmp_path)
+        _invocation(db, "lightning:30b", "completed", None, 40)
+        _invocation(db, "lightning:30b", "completed", None, 35)
+        _invocation(db, "lightning:30b", "failed", "INVALID_PROVIDER_RESPONSE", 20)
+        _invocation(db, "lightning:30b", "failed", "INVALID_PROVIDER_RESPONSE", 10)
+        _invocation(db, "lightning:30b", "failed", "INVALID_PROVIDER_RESPONSE", 5)
+        entry = load_quarantine(db, ModelQuarantineConfig())[("ollama", "local", "lightning:30b")]
+        assert entry.failures == 3
+
     def test_running_out_of_memory_is_a_circumstance_not_a_defect(self, tmp_path) -> None:
         db = _db(tmp_path)
         _invocation(db, "grande:bf16", "failed", "VRAM_INSUFFICIENT", 30)

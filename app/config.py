@@ -201,6 +201,10 @@ class ProcessingConfig(BaseModel):
         default=DEFAULT_TASK_TIMEOUT_SECONDS, ge=1, le=86400
     )
     max_task_attempts: int = Field(default=3, ge=1, le=100)
+    # Espera antes de reintentar una tarea que cayó con su proveedor (Ollama
+    # reiniciándose, motor caído, llama-server que no arranca). Crece con el
+    # intento: base × 1, base × 2… hasta max_task_attempts.
+    outage_retry_seconds: float = Field(default=60.0, ge=1.0, le=3600.0)
     unload_after_task: bool = True
     # Segundos que un modelo local puede quedarse en memoria con el broker
     # parado antes de que se le devuelva la máquina al usuario. Es el
@@ -640,6 +644,17 @@ class RoutingConfig(BaseModel):
     # (ver RoutedModelProvider._apply_exploration). 0 = desactivado
     # (comportamiento clásico, determinista).
     exploration_rate: float = Field(default=0.0, ge=0, le=1)
+    # Cuando la petición permite cloud (data_classification public/internal),
+    # los modelos remotos van delante de todos los locales. Sin esto nunca se
+    # elegían: sin medidas recientes quedaban detrás de unos 24 locales
+    # medidos, y la exploración remataba antes a los locales «a medias»
+    # (2.000 de 2.000 elecciones locales con la BD real, 2026-10-25). Decisión
+    # del usuario: repartir el trabajo entre los cloud e ir probándolos.
+    prefer_cloud_when_allowed: bool = True
+    # Exploración propia dentro del bloque cloud: con esta probabilidad sube
+    # al primer puesto un cloud con poca evidencia (o, si todos están medidos,
+    # uno al azar). Es lo que reparte la carga y va midiendo el catálogo.
+    cloud_exploration_rate: float = Field(default=0.5, ge=0, le=1)
 
 
 class ShadowProbeConfig(BaseModel):
@@ -752,9 +767,15 @@ class HealthConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     directory: str = "logs"
+    # Nombre base: el fichero real lleva la fecha (ai-broker-2026-10-25.log).
     filename: str = "ai-broker.log"
-    max_bytes: int = Field(default=10_485_760, ge=1024)
-    backup_count: int = Field(default=5, ge=1, le=100)
+    # Tope de cada fichero dentro de un día; al pasarlo sigue en .1, .2…
+    # 0 = sin tope (un solo fichero por día).
+    max_bytes: int = Field(default=10_485_760, ge=0)
+    # Retención por días en vez de por número de copias: 5 copias de 10 MB
+    # eran unas 13 horas de log con el sondeo de los clientes.
+    keep_forever: bool = False
+    retention_days: int = Field(default=30, ge=1, le=36500)
     console_enabled: bool = True
 
 
@@ -1033,6 +1054,11 @@ class ModelQuarantineConfig(BaseModel):
     role_max_failure_rate: float = Field(default=0.3, gt=0, le=1.0)
     role_min_attempts: int = Field(default=5, ge=1, le=1000)
     role_window_hours: float = Field(default=168.0, gt=0, le=8760)
+    # Arbitrajes que hacen falta en un tipo de tarea para que el historial de
+    # un modelo como árbitro cuente como probado (RoutedModelProvider._rank_arbiters).
+    # Por debajo, el modelo está "sin probar": solo pasa delante de los
+    # probados en las tareas que toca explorar (routing.exploration_rate).
+    arbiter_proven_attempts: int = Field(default=3, ge=1, le=1000)
 
 
 class BrokerConfig(BaseModel):

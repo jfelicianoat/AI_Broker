@@ -48,10 +48,12 @@ def load_quarantine(
 ) -> dict[QuarantineKey, QuarantineEntry]:
     """Modelos apartados ahora mismo, con el motivo de cada uno.
 
-    Cuenta hacia atrás desde la invocación más reciente: un éxito, por antiguo
-    que sea dentro de la ventana, corta la racha y devuelve al modelo a la
-    rotación. Solo cuentan los códigos declarados como definitivos; quedarse
-    sin memoria o un proveedor caído son circunstancias, no defectos.
+    Cuenta hacia atrás desde la invocación más reciente hasta el primer éxito:
+    la racha es lo que hay entre ese éxito y ahora. Un éxito posterior a los
+    fallos devuelve al modelo a la rotación; uno anterior solo marca dónde
+    empieza la racha, no la borra. Solo cuentan los códigos declarados como
+    definitivos; quedarse sin memoria o un proveedor caído son circunstancias,
+    no defectos.
 
     Tampoco cuenta el tráfico excluido del aprendizaje
     (TaskCreateRequest.exclude_from_model_learning): apartar un modelo del
@@ -84,9 +86,12 @@ def load_quarantine(
         if key in settled:
             continue
         if row["status"] == "completed":
-            # Racha rota: el modelo ha demostrado que sigue respondiendo.
+            # Aquí empieza la racha (si la hay): lo que ya se ha contado son los
+            # fallos POSTERIORES a este éxito. Borrarlos —como se hacía— dejaba
+            # sin cuarentena a todo modelo con un solo acierto en la ventana:
+            # el 2026-10-20 nemotron-3.5-lightning:30b encadenó seis fallos
+            # definitivos y siguió eligiéndose.
             settled.add(key)
-            streaks.pop(key, None)
             continue
         code = str(row["error_code"] or "").upper()
         if code not in definitive:
@@ -228,6 +233,19 @@ class ArbiterRecord:
         exclusión: basta un eco sin ningún acierto para dejar pasar delante a
         quien no tiene ese historial, sin vetar a nadie."""
         return self.failures > self.attempts - self.failures
+
+    def band(self, proven_attempts: int, max_failure_rate: float) -> int:
+        """Nivel del historial para ordenar árbitros, de mejor a peor:
+        0 probado y fiable, 1 sin pruebas suficientes, 2 probado y flojo,
+        3 falla más de lo que acierta. Un modelo sin registro es nivel 1."""
+        if self.mostly_failing:
+            return 3
+        if self.attempts < proven_attempts:
+            return 1
+        return 2 if self.failures / self.attempts >= max_failure_rate else 0
+
+
+UNTRIED_ARBITER = ArbiterRecord(attempts=0, failures=0)
 
 
 def load_arbiter_record(db: Database, settings: ModelQuarantineConfig) -> dict[ArbiterRecordKey, ArbiterRecord]:

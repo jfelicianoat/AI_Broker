@@ -100,7 +100,7 @@ Los seis textos comparten una afirmación deliberada —*"será sintetizada por 
 
 El árbitro **no recibe** qué modelo ni qué rol produjo cada candidata: evalúa contenido, no procedencia. La numeración `candidate_N` sigue el orden de finalización de las propuestas.
 
-**Selección del árbitro** (`_select_arbiter`, `app/coordinator.py:1918-1924`), por prioridad: `selection.arbiter` → `selection.preferred_arbiter` → el ranking con rol `arbiter`. Con `arbiter_policy: strongest_available` el ranking se reordena por número de parámetros declarado, dejando al final los modelos que no caben en la máquina.
+**Selección del árbitro** (`_select_arbiter`, `app/coordinator.py:1918-1924`), por prioridad: `selection.arbiter` → `selection.preferred_arbiter` → el ranking con rol `arbiter`. Con `arbiter_policy: strongest_available` el ranking se reordena por el historial como árbitro en ese tipo de tarea (probados y fiables, sin probar, flojos, mayoritariamente fallidos), con el número de parámetros declarado como desempate y los modelos que no caben en la máquina al final.
 
 ### Degradación del árbitro
 

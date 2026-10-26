@@ -310,6 +310,35 @@ td small { display: block; margin-top: 3px; color: var(--muted); font-size: var(
 }
 .routing-zone-heading h3 { margin: 0; font-size: var(--text-title-sm); font-weight: 680; }
 .routing-zone .table-wrap table thead th { background: transparent; }
+/* Panel del informe. El texto de estado va en --text-read: es lo que se
+   lee mientras se espera a la IA, y puede durar minutos. */
+.report-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px; padding: 4px 16px 6px; }
+.report-format { min-width: 240px; }
+.report-check { display: inline-flex; align-items: center; gap: 9px; min-height: 40px; color: var(--text); font-size: var(--text-read); cursor: pointer; }
+.report-check input { width: 18px; height: 18px; margin: 0; accent-color: var(--teal); }
+.report-check input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.report-form .button { min-height: 40px; }
+.report-status { margin: 0; padding: 4px 16px 16px; color: var(--muted); font-size: var(--text-read); line-height: 1.5; }
+.report-status:empty { display: none; }
+.report-status.error { color: var(--red-ink); }
+.report-status.ready { color: var(--green-ink); }
+
+/* Cabecera ordenable: el botón ocupa toda la celda para que el objetivo sea
+   la cabecera entera, no solo el texto. La flecha dice el sentido; la doble
+   flecha atenuada solo avisa de que la columna se puede ordenar. */
+table[data-sortable] th { padding: 0; }
+.sort-button {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 40px; padding: 9px 13px;
+  border: 0; background: transparent; color: inherit; font: inherit; font-weight: inherit;
+  text-align: left; white-space: nowrap; cursor: pointer;
+}
+.sort-button:hover { color: var(--text); }
+.sort-button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.sort-indicator::after { content: "\2195"; color: var(--muted-line); font-size: var(--text-label); }
+th[aria-sort="ascending"] .sort-button,
+th[aria-sort="descending"] .sort-button { color: var(--text); }
+th[aria-sort="ascending"] .sort-indicator::after { content: "\25B2"; color: var(--teal); }
+th[aria-sort="descending"] .sort-indicator::after { content: "\25BC"; color: var(--teal); }
 /* La cabecera de la zona ya es la banda fuerte; la de la tabla, justo debajo,
    deja de competir con ella y se queda como fila de rotulos. */
 .affinity-table td:first-child { border-left: 4px solid var(--zone); }

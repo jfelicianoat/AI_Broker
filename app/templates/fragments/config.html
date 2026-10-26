@@ -391,6 +391,11 @@
         <input name="max_task_attempts" value="{{ config.processing.max_task_attempts }}" inputmode="numeric">
       </label>
       <label class="field">
+        <span>Espera tras caída de proveedor (s)</span>
+        <input name="outage_retry_seconds" value="{{ config.processing.outage_retry_seconds }}" inputmode="decimal">
+        <small>Si Ollama, LM Studio o un proveedor remoto se caen o se están reiniciando, la tarea vuelve a la cola y se reintenta tras esta espera (×1, ×2…) hasta agotar los reintentos por tarea.</small>
+      </label>
+      <label class="field">
         <span>Intervalo del dispatcher (s)</span>
         <input name="dispatcher_interval_seconds" value="{{ config.processing.dispatcher_interval_seconds }}" inputmode="decimal">
       </label>
@@ -504,6 +509,17 @@
       <label class="field">
         <span>Tasa de exploración (0-1)</span>
         <input name="routing_exploration_rate" value="{{ routing.exploration_rate }}" inputmode="decimal">
+      </label>
+      <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="routing_prefer_cloud_when_allowed" {% if routing.prefer_cloud_when_allowed %}checked{% endif %}>
+          Cloud primero cuando la petición lo permite (public/internal)
+        </label>
+      </div>
+      <label class="field">
+        <span>Reparto entre modelos cloud (0-1)</span>
+        <input name="routing_cloud_exploration_rate" value="{{ routing.cloud_exploration_rate }}" inputmode="decimal">
+        <small>Probabilidad de dar la tarea a un cloud con poca evidencia en vez de al más rápido medido. Reparte la carga y va probando el catálogo. Las tareas local_only y confidential no se ven afectadas.</small>
       </label>
     </div>
   </div>
@@ -813,7 +829,7 @@
     <div class="subsection-heading">
       <div>
         <h3>Registro</h3>
-        <p>JSON Lines con rotación. El access log nunca registra cuerpos, prompts ni respuestas. Los cambios aquí <strong>reinstalan los handlers al guardar</strong>: aplican sin reiniciar.</p>
+        <p>JSON Lines, un fichero por día con la fecha en el nombre (<code>{{ config.logging.filename|replace('.log', '') }}-AAAA-MM-DD.log</code>). Si un día pasa del tamaño máximo sigue en <code>.1</code>, <code>.2</code>… La retención borra los de más de N días, o ninguno si se conservan para siempre. El access log nunca registra cuerpos, prompts ni respuestas. Los cambios aquí <strong>reinstalan los handlers al guardar</strong>: aplican sin reiniciar.</p>
       </div>
       <span class="badge badge-neutral">logging</span>
     </div>
@@ -831,10 +847,15 @@
         <input name="logging_max_bytes" value="{{ config.logging.max_bytes }}" inputmode="numeric">
       </label>
       <label class="field">
-        <span>Ficheros conservados</span>
-        <input name="logging_backup_count" value="{{ config.logging.backup_count }}" inputmode="numeric">
+        <span>Días que se conservan los logs</span>
+        <input name="logging_retention_days" value="{{ config.logging.retention_days }}" inputmode="numeric">
+        <small>No se aplica si están marcados para conservarse siempre. 0 bytes en el tamaño = un solo fichero por día.</small>
       </label>
       <div class="check-row config-checks">
+        <label>
+          <input type="checkbox" name="logging_keep_forever" {% if config.logging.keep_forever %}checked{% endif %}>
+          Conservar los logs para siempre (no borrar ninguno)
+        </label>
         <label>
           <input type="checkbox" name="logging_console_enabled" {% if config.logging.console_enabled %}checked{% endif %}>
           Registrar también por consola
@@ -858,7 +879,7 @@
         <div><dt>Origen del token admin</dt><dd>variable {{ config.server.admin_token_env or '—' }} · keyring {{ config.server.admin_keyring_service }}/{{ config.server.admin_keyring_username }}<small>Dónde busca el broker la credencial. El token nunca se muestra ni se edita aquí.</small></dd></div>
         <div><dt>Token de sesión publicado</dt><dd>{% if config.server.publish_session_token == 'keyring' %}keyring {{ config.server.admin_keyring_service }}/{{ config.server.session_token_keyring_username }}{% else %}no se publica{% endif %}<small>Dónde deja el broker el token de cada arranque para los clientes de esta misma máquina. Entrada distinta de la anterior: aquella la escribe el operador, esta el broker.</small></dd></div>
         <div><dt>Base de datos</dt><dd>{{ config.persistence.database }} · journal {{ config.persistence.journal_mode }}<small>La conexión se abre al arrancar; moverla en caliente dejaría escrituras a medias.</small></dd></div>
-        <div><dt>Directorio de logs</dt><dd>{{ config.logging.directory }}/{{ config.logging.filename }}<small>El nivel y la rotación sí se editan arriba; la ruta no, porque los handlers ya escriben en ella.</small></dd></div>
+        <div><dt>Directorio de logs</dt><dd>{{ config.logging.directory }}/{{ config.logging.filename|replace('.log', '') }}-AAAA-MM-DD.log<small>El nivel, la rotación y la retención sí se editan arriba; la ruta no, porque los handlers ya escriben en ella.</small></dd></div>
         <div><dt>Almacén de ficheros</dt><dd>{{ config.ingestion.storage_dir }}<small>Cambiarlo dejaría huérfanos los ficheros ya ingeridos.</small></dd></div>
         <div><dt>Workflows activos</dt><dd>{{ config.processing.max_active_workflows }}<small>Invariante del broker: un único workflow activo. Validado en la configuración.</small></dd></div>
         <div><dt>Modo de proveedores</dt><dd>{{ config.processing.provider_mode }}<small><code>bootstrap</code> sustituye los proveedores reales por dobles de prueba; no debe activarse por accidente.</small></dd></div>

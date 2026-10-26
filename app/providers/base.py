@@ -476,6 +476,19 @@ def effective_generation(
     return snapshot
 
 
+def served_generation(
+    request: TaskCreateRequest, inference_request: TaskCreateRequest, **options: Any,
+) -> dict[str, Any]:
+    """effective_generation de la petición que viajó, más el tope que pidió
+    el cliente cuando se recortó para caber en la ventana. Ese recorte era
+    invisible: 7500 pedidos se quedaban en 963 sin rastro en la tarea."""
+    snapshot = effective_generation(inference_request, **options)
+    requested = request.generation.max_output_tokens
+    if snapshot.get("max_output_tokens") is not None and snapshot["max_output_tokens"] < requested:
+        snapshot["max_output_tokens_requested"] = requested
+    return snapshot
+
+
 def openai_determinism_fields(request: TaskCreateRequest) -> dict[str, Any]:
     """Campos `seed` y `top_p` del cuerpo, solo si la petición los trae.
 
@@ -568,6 +581,11 @@ class ModelOutput:
     # artefactos de la tarea; NO viajan en el resultado JSON, que se lee entero
     # en memoria en cada consulta del estado.
     images: tuple[GeneratedImage, ...] = ()
+    # Por qué paró el modelo, normalizado: "length" si agotó el tope de
+    # salida (finish_reason/done_reason del proveedor), None si terminó por sí
+    # mismo o el adapter no lo sabe. Con "length" la respuesta está cortada,
+    # y la validación de app.providers.routing la rechaza (OUTPUT_TRUNCATED).
+    stop_reason: str | None = None
 
     def technical_output(self) -> dict[str, Any]:
         if self.embedding is not None:
@@ -586,6 +604,8 @@ class ModelOutput:
             payload["raw_content"] = self.raw_content
         if self.images:
             payload["images_returned"] = len(self.images)
+        if self.stop_reason is not None:
+            payload["stop_reason"] = self.stop_reason
         return payload
 
 
@@ -741,6 +761,38 @@ class AgentTurn:
     generation: dict[str, Any] | None = None
     fingerprint_observed: dict[str, dict[str, Any]] | None = None
     content_source: str | None = None
+    stop_reason: str | None = None
+
+
+def normalized_stop_reason(value: Any) -> str | None:
+    """`finish_reason` (OpenAI) o `done_reason` (Ollama) reducido a lo que
+    el broker distingue: "length" cuando el modelo agotó el tope de salida."""
+    return "length" if str(value or "").lower() in {"length", "max_tokens"} else None
+
+
+def output_truncated_error(provider: str, model: str, output: ModelOutput) -> ProviderError:
+    """La respuesta llegó, pero cortada por el tope de salida.
+
+    Sin esto se entregaba como completa: la task_42e80f83… (2026-10-25)
+    acabó a mitad de una fórmula tras 866 tokens y quedó `completed`. El texto
+    parcial viaja con el error para que la invocación lo conserve."""
+    limit = (output.generation or {}).get("max_output_tokens")
+    requested = (output.generation or {}).get("max_output_tokens_requested")
+    detail = f"tope de salida {limit}" if limit is not None else "tope de salida"
+    if requested is not None:
+        detail += f", recortado desde {requested} para caber en la ventana"
+    error = ProviderError(
+        "OUTPUT_TRUNCATED",
+        f"{provider}/{model}: la respuesta se cortó al agotar el {detail} "
+        f"({output.tokens_output} tokens de salida)",
+        details={
+            "max_output_tokens": limit,
+            "max_output_tokens_requested": requested,
+            "tokens_output": output.tokens_output,
+        },
+    )
+    error.output = output
+    return error
 
 
 # Cota superior de tokens por bytes UTF-8: los tokenizers BPE reales producen
@@ -877,6 +929,29 @@ def request_with_context_capped_output(
             ),
         },
     )
+
+
+# Fracción mínima del tope de salida pedido que un modelo debe poder escribir
+# para ser candidato preferente. Por debajo, el recorte deja una respuesta que
+# casi seguro se corta: rnj-1 con 8k de ventana recibía 963 de 7500 tokens.
+MIN_OUTPUT_ROOM_FRACTION = 0.5
+
+
+def output_room_sufficient(
+    request: TaskCreateRequest,
+    context_window: int | None,
+    prompt: str | None = None,
+) -> bool:
+    """Si, tras recortar el tope para caber en la ventana, al modelo le queda
+    sitio para al menos MIN_OUTPUT_ROOM_FRACTION de la salida pedida."""
+    try:
+        capped = request_with_context_capped_output(request, context_window, prompt)
+    except ProviderError as error:
+        if error.code in {"CONTEXT_LIMIT_EXCEEDED", "CONTEXT_WINDOW_UNKNOWN"}:
+            return False
+        raise
+    requested = request.generation.max_output_tokens
+    return capped.generation.max_output_tokens >= requested * MIN_OUTPUT_ROOM_FRACTION
 
 
 def context_fits_with_capped_output(

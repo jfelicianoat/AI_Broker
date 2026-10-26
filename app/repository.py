@@ -544,6 +544,86 @@ class TaskRepository:
             )
             return state
 
+    def schedule_outage_retry(
+        self,
+        task_id: str,
+        error: dict[str, Any],
+        *,
+        base_wait_seconds: float,
+        max_attempts: int,
+    ) -> dict[str, Any] | None:
+        """Devuelve a la cola una tarea que cayó con el proveedor, no por ella.
+
+        Una caída de Ollama (2026-10-24, 15:48) tumbó en ráfaga todas las
+        tareas que llegaron a reclamarse mientras el runtime se levantaba: con
+        el catálogo vacío no había modelos, y la cola entera se fue a `failed`
+        con errores que ya decían retryable=true. Aquí ese reintento lo hace el
+        broker: espera creciente (base × intento) y el mismo tope que la
+        recuperación al arrancar (`processing.max_task_attempts`).
+
+        No reintenta si alguna llamada remota de la tarea llegó a completarse:
+        repetir el workflow la pagaría dos veces. Devuelve None cuando no
+        procede, y entonces la tarea falla como antes.
+        """
+        now = datetime.now(timezone.utc)
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT attempt, progress_json FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            next_attempt = int(row["attempt"] or 0) + 1
+            if next_attempt >= max_attempts:
+                return None
+            billed = connection.execute(
+                "SELECT deployment FROM model_invocations WHERE task_id = ? AND status = 'completed'",
+                (task_id,),
+            ).fetchall()
+            if any(not is_local_deployment(item["deployment"]) for item in billed):
+                return None
+            wait_seconds = base_wait_seconds * next_attempt
+            not_before = (now + timedelta(seconds=wait_seconds)).isoformat()
+            state = {
+                "attempt": next_attempt,
+                "max_attempts": max_attempts,
+                "retry_at": not_before,
+                "code": error.get("code"),
+                "message": error.get("message"),
+            }
+            progress = loads_json(row["progress_json"], {})
+            progress["phase"] = TaskStatus.queued.value
+            progress["outage_retry"] = state
+            connection.execute(
+                "UPDATE tasks SET status = ?, attempt = ?, not_before = ?, progress_json = ?, "
+                "error_json = NULL, updated_at = ? WHERE id = ?",
+                (
+                    TaskStatus.queued.value, next_attempt, not_before, dumps_json(progress),
+                    now.isoformat(), task_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.retry_scheduled", dumps_json(state), now.isoformat()),
+            )
+            return state
+
+    def abandon_open_invocations(self, task_id: str) -> int:
+        """Cierra como 'ambiguous' las invocaciones que la tarea dejó abiertas.
+
+        Una conexión cortada a mitad de respuesta o un timeout de tarea no
+        pasan por fail_invocation, y la fila se quedaba en 'started' para
+        siempre (192 a 2026-10-25). 'ambiguous' es el mismo estado que usa la
+        recuperación al arrancar: no se sabe qué hizo el proveedor, y por eso
+        no cuenta ni como acierto ni como fallo en las métricas.
+        """
+        now = _utc_now_iso()
+        cursor = self.db.execute(
+            "UPDATE model_invocations SET status = 'ambiguous', completed_at = ?, updated_at = ? "
+            "WHERE task_id = ? AND status = 'started'",
+            (now, now, task_id),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
     def clear_memory_wait(self, task_id: str) -> None:
         """Borra el rastro de la espera cuando la tarea por fin arranca.
 
@@ -794,6 +874,31 @@ class TaskRepository:
         return invocation_id
 
     @staticmethod
+    def _record_output_cap(
+        connection: Any, task_id: str, invocation_id: str, output: ModelOutput, now: str,
+    ) -> None:
+        """Evento `generation.output_capped` cuando el proveedor recortó el
+        tope de salida para caber en la ventana. Antes el recorte solo se veía
+        comparando generation_json con la petición a mano."""
+        generation = output.generation or {}
+        requested = generation.get("max_output_tokens_requested")
+        if requested is None:
+            return
+        connection.execute(
+            "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (
+                task_id,
+                "generation.output_capped",
+                dumps_json({
+                    "invocation_id": invocation_id,
+                    "max_output_tokens_requested": requested,
+                    "max_output_tokens": generation.get("max_output_tokens"),
+                }),
+                now,
+            ),
+        )
+
+    @staticmethod
     def _served_with(connection: Any, invocation_id: str, output: ModelOutput) -> tuple[str, list[Any]]:
         """Fragmento SQL con lo que el proveedor declara de la llamada real.
 
@@ -846,6 +951,7 @@ class TaskRepository:
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (task_id, "model_invocation.completed", dumps_json({"invocation_id": invocation_id}), now),
             )
+            self._record_output_cap(connection, task_id, invocation_id, output, now)
 
     def fail_invocation(
         self,
@@ -892,6 +998,7 @@ class TaskRepository:
                         invocation_id,
                     ),
                 )
+                self._record_output_cap(connection, task_id, invocation_id, output, now)
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (

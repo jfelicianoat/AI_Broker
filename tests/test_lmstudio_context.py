@@ -68,3 +68,26 @@ def test_jit_context_never_raises_a_smaller_declared_context() -> None:
         OpenAICompatibleModelConfig(name="en_disco", context_window=4096),
     ])
     assert _contexts(provider)["en_disco"] == (4096, "configured")
+
+
+def test_a_model_whose_maximum_is_below_the_jit_context_keeps_its_maximum() -> None:
+    """Con defaultContextLength a 32k, deepseek-coder-33b (máximo 16k) se carga
+    a 16k: atribuirle 32k le mandaría textos que LM Studio rechaza con 400."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "corto"}, {"id": "largo"}]})
+        if request.url.path == "/api/v0/models":
+            return httpx.Response(200, json={"data": [
+                {"id": "corto", "state": "not-loaded", "max_context_length": 16384},
+                {"id": "largo", "state": "not-loaded", "max_context_length": 262144},
+            ]})
+        return httpx.Response(404, json={})
+
+    config = OpenAICompatibleProviderConfig(**{
+        "id": "lmstudio", "enabled": True, "base_url": "http://127.0.0.1:1234/v1",
+        "api_key_env": None, "deployment": "local", "sync_models": True,
+        "default_context_window": 32768, "jit_context_window": 32768,
+        "lmstudio_loaded_context": True,
+    })
+    contexts = _contexts(OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler)))
+    assert contexts == {"corto": (16384, "model_max"), "largo": (32768, "default")}

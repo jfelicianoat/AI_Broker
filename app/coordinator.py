@@ -21,6 +21,7 @@ from app.providers import BootstrapModelProvider, ModelOutput, ProviderError
 from app.providers.base import (
     MIN_BYTES_PER_TOKEN,
     ROLE_SYSTEM_PROMPTS,
+    context_fits_with_capped_output,
     estimate_required_context,
     estimate_tokens_upper_bound,
     flatten_multimodal,
@@ -74,6 +75,35 @@ _TASK_FATAL_ERRORS = frozenset({
     "TASK_CANCELLED",
     "BUDGET_EXCEEDED",
     "CONTEXT_LIMIT_EXCEEDED",
+})
+# En la síntesis el contexto ya no habla de la petición sino del árbitro: la
+# petición cupo en los proponentes, y lo que no cabe es ella más sus
+# propuestas en la ventana de ESE modelo. El sustituto lo elige el router con
+# la petición original, así que podía tocarle uno de 8k (qwen3.6-35b-a3b en LM
+# Studio) y su rechazo tumbaba la tarea con tres propuestas ya hechas: 16 de
+# los 22 CONTEXT_LIMIT_EXCEEDED de la semana del 2026-10-18.
+_ARBITER_FATAL_ERRORS = _TASK_FATAL_ERRORS - {"CONTEXT_LIMIT_EXCEEDED"}
+# Errores de un proveedor caído o reiniciándose, no de la tarea: con
+# retryable=true la tarea vuelve a la cola con espera en vez de fallar.
+_OUTAGE_ERRORS = frozenset({
+    "PROVIDER_UNAVAILABLE",
+    "PROVIDER_ENGINE_CRASHED",
+    "MODEL_LOAD_TIMEOUT",
+    "MODEL_NOT_LOADED",
+    "MODEL_UNAVAILABLE",
+    # Los cloud gratuitos limitan la frecuencia; al rato vuelven a aceptar.
+    "RATE_LIMITED",
+})
+# Candidatos que se piden al router al buscar repuesto: los que no tengan
+# ventana para la síntesis se saltan, y hace falta margen para encontrar uno.
+_ARBITER_SUBSTITUTE_POOL = 8
+# Modelos que prueba una tarea single antes de rendirse: el elegido y dos
+# relevos. Cancelación y presupuesto no se arreglan cambiando de modelo.
+_SINGLE_FAILOVER_MODELS = 3
+# Tampoco la falta de memoria momentánea: esa tarea espera a su modelo
+# (waiting_for_memory) en vez de irse a otro.
+_SINGLE_FATAL_ERRORS = frozenset({
+    "TASK_CANCELLED", "BUDGET_EXCEEDED", "VRAM_INSUFFICIENT", "LOCAL_MODEL_SLOTS_BUSY",
 })
 
 
@@ -575,6 +605,8 @@ class ConsensusCoordinator:
                 # cupo de modelos cargados, no los bytes.
                 if self._defer_for_memory(repository, task_id, error):
                     return
+            if self._retry_after_outage(repository, task_id, error):
+                return
             current = repository.get_task(task_id)
             context = self._error_context(error, current.progress)
             stage = context.get("stage")
@@ -607,6 +639,12 @@ class ConsensusCoordinator:
                 },
             )
         finally:
+            # Lo que siga abierto aquí ya no lo cerrará nadie: el trabajo de
+            # esta pasada ha terminado, con éxito, fallo, timeout o reintento.
+            try:
+                repository.abandon_open_invocations(task_id)
+            except Exception:
+                logger.warning("task.abandon_invocations_failed", extra={"task_id": task_id})
             # Una tarea que ya terminó no arrastra su historial de espera: los
             # contadores solo tienen sentido mientras sigue peleando por un
             # turno. (En `waiting_for_memory` NO se limpia: ahí es donde vive.)
@@ -640,6 +678,25 @@ class ConsensusCoordinator:
                     self.shadow_probe.schedule(repository, task_id, request)
             except Exception:
                 logger.warning("shadow_probe.schedule_failed", extra={"task_id": task_id})
+
+    def _retry_after_outage(self, repository, task_id: str, error: ProviderError) -> bool:
+        """True si la tarea vuelve a la cola porque cayó el proveedor, no ella."""
+        if error.code not in _OUTAGE_ERRORS or not error.retryable:
+            return False
+        processing = self.scheduler.config.processing
+        state = repository.schedule_outage_retry(
+            task_id,
+            {"code": error.code, "message": str(error)},
+            base_wait_seconds=processing.outage_retry_seconds,
+            max_attempts=processing.max_task_attempts,
+        )
+        if state is None:
+            return False
+        logger.warning(
+            "task.retry_scheduled",
+            extra={"event": "task.retry_scheduled", "task_id": task_id, "code": error.code},
+        )
+        return True
 
     def _defer_for_memory(self, repository, task_id: str, error: ProviderError) -> bool:
         """Devuelve la tarea a la cola en espera de memoria.
@@ -859,8 +916,62 @@ class ConsensusCoordinator:
     ) -> tuple[ModelReference, ModelOutput, str] | None:
         """Ejecuta una inferencia single con reintentos y cancelación. Devuelve
         (modelo, salida, invocation_id) o None si la tarea fue cancelada tras
-        ejecutar. Reutilizado por single normal y por el escalado por confianza."""
-        model = (await self.provider.select(request, 1, [role]))[0]
+        ejecutar. Reutilizado por single normal y por el escalado por confianza.
+
+        Si el modelo falla para bien, se pasa al siguiente candidato del ranking
+        (hasta _SINGLE_FAILOVER_MODELS). Sin esto, cada modelo roto del
+        catálogo costaba una tarea fallida: con cloud primero, HCNSEC anunciaba
+        DeepSeek-V4-Pro y lo desviaba a un modelo que respondía 400 «not
+        supported» (task_4389236e…, 2026-10-25), mientras quedaban decenas de
+        candidatos sanos detrás."""
+        candidates = await self._single_candidates(request, role)
+        for position, model in enumerate(candidates):
+            try:
+                return await self._single_inference_on(repository, task_id, request, role, model)
+            except ProviderError as error:
+                last = position == len(candidates) - 1
+                if last or error.code in _SINGLE_FATAL_ERRORS or repository.is_cancel_requested(task_id):
+                    raise
+                detail = self._skipped_proposer_detail(model, error)
+                repository.add_event(task_id, "single.failover", {
+                    **detail, "next": candidates[position + 1].model_dump(mode="json"),
+                })
+                logger.warning(
+                    "single.failover",
+                    extra={"event": "single.failover", "task_id": task_id,
+                           "model": model.model, "code": error.code},
+                )
+        raise AssertionError("sin candidatos")  # select() nunca devuelve una lista vacía
+
+    async def _single_candidates(
+        self, request: TaskCreateRequest, role: str,
+    ) -> list[ModelReference]:
+        """El modelo elegido y, si la petición lo admite, sus relevos.
+
+        Sin relevo cuando el modelo es parte de lo pedido (target_model, o
+        fallback_allowed=false) y en embeddings: otro modelo daría vectores
+        de otro espacio, incompatibles con los que el cliente ya tiene.
+        """
+        requirements = request.model_requirements
+        fixed = (
+            request.inference_kind == InferenceKind.embedding
+            or requirements.target_model is not None
+            or not requirements.fallback_allowed
+        )
+        count = 1 if fixed else _SINGLE_FAILOVER_MODELS
+        ranked = await self.provider.select(request, count, [role] * count)
+        unique: list[ModelReference] = []
+        seen: set[tuple[str, str, str]] = set()
+        for model in ranked:
+            if self._model_identity(model) not in seen:
+                seen.add(self._model_identity(model))
+                unique.append(model)
+        return unique
+
+    async def _single_inference_on(
+        self, repository, task_id: str, request: TaskCreateRequest, role: str,
+        model: ModelReference,
+    ) -> tuple[ModelReference, ModelOutput, str] | None:
         repository.update_task(
             task_id,
             TaskStatus.generating,
@@ -3039,9 +3150,10 @@ class ConsensusCoordinator:
         no al árbitro, así que su salida es una respuesta completa —peor que
         una síntesis, incomparablemente mejor que un error.
 
-        Los errores de _TASK_FATAL_ERRORS siguen tumbando la tarea: hablan de
-        la petición (cancelada, sin presupuesto, contexto imposible), no del
-        árbitro, y cambiar de modelo no arregla ninguno.
+        Los errores de _ARBITER_FATAL_ERRORS siguen tumbando la tarea: hablan
+        de la petición (cancelada, sin presupuesto), no del árbitro, y cambiar
+        de modelo no arregla ninguno. Un árbitro sin ventana para la síntesis,
+        en cambio, es un defecto de ese árbitro y se recupera como los demás.
         """
         outputs = [output for _, output in proposals]
         failures: list[dict[str, Any]] = []
@@ -3066,12 +3178,14 @@ class ConsensusCoordinator:
                 repository.fail_invocation(
                     invocation_id, task_id, error.code, str(error), error.output
                 )
-                if error.code in _TASK_FATAL_ERRORS or repository.is_cancel_requested(task_id):
+                if error.code in _ARBITER_FATAL_ERRORS or repository.is_cancel_requested(task_id):
                     raise
                 detail = self._skipped_proposer_detail(candidate, error)
                 repository.add_event(task_id, "arbiter.failed", detail)
                 failures.append(detail)
-                candidate = await self._substitute_arbiter(request, attempted)
+                candidate = await self._substitute_arbiter(
+                    request, attempted, synthesis_request, proposals,
+                )
                 continue
             # El checkpoint se cierra en cuanto hay respuesta: cancelación o
             # presupuesto excedido no deben dejar la fila en 'started'.
@@ -3097,7 +3211,11 @@ class ConsensusCoordinator:
         return _Synthesis(model, output, None, degraded=True, failures=failures)
 
     async def _substitute_arbiter(
-        self, request: TaskCreateRequest, attempted: list[ModelReference]
+        self,
+        request: TaskCreateRequest,
+        attempted: list[ModelReference],
+        sizing_request: TaskCreateRequest,
+        proposals: list[tuple[ModelReference, ModelOutput]],
     ) -> ModelReference | None:
         """Otro árbitro, distinto de los ya intentados; None si no procede.
 
@@ -3106,6 +3224,10 @@ class ConsensusCoordinator:
         una decisión del broker. Solo se sustituye una vez, para que un
         catálogo entero de modelos rotos no convierta una tarea en una ronda
         interminable de intentos que el usuario paga en espera.
+
+        El repuesto tiene que poder leer la síntesis entera: si ninguno de los
+        candidatos tiene ventana, se devuelve None y responde la mejor
+        propuesta, sin gastar una invocación que se sabe perdida.
         """
         selection = request.execution.selection
         if len(attempted) > 1 or not selection.allow_substitution:
@@ -3116,16 +3238,56 @@ class ConsensusCoordinator:
         if requirements.target_model is not None or requirements.preferred_model is not None:
             return None
         used = {self._model_identity(model) for model in attempted}
-        count = len(used) + 1
+        # Más de uno por si los primeros no tienen ventana para la síntesis.
+        count = len(used) + _ARBITER_SUBSTITUTE_POOL
         try:
             ranked = await self.provider.select(request, count, ["arbiter"] * count)
         except ProviderError:
             # Quedarse sin árbitro de repuesto no es un fallo: la degradación
             # de más abajo sigue teniendo respuesta que entregar.
             return None
-        return next(
-            (model for model in ranked if self._model_identity(model) not in used), None
-        )
+        windows = await self._context_windows()
+        prompt = self._synthesis_sizing_prompt(request, proposals)
+        for model in ranked:
+            if self._model_identity(model) in used:
+                continue
+            window = windows.get(self._model_identity(model))
+            # Ventana desconocida: no se descarta por lo que no se sabe.
+            if window is None or context_fits_with_capped_output(sizing_request, window, prompt):
+                return model
+            used.add(self._model_identity(model))
+            logger.info(
+                "arbiter.substitute_too_small",
+                extra={"event": "arbiter.substitute_too_small", "model": model.model},
+            )
+        return None
+
+    async def _context_windows(self) -> dict[tuple[str, str, str], int | None]:
+        """Ventana de cada modelo del catálogo; vacío si no se puede consultar."""
+        try:
+            catalog = await self.provider.models()
+        except Exception:
+            return {}
+        return {
+            (str(item.get("provider") or "").lower(), str(item.get("deployment") or "").lower(),
+             str(item.get("name") or "")): item.get("context_window")
+            for item in catalog
+        }
+
+    @staticmethod
+    def _synthesis_sizing_prompt(
+        request: TaskCreateRequest, proposals: list[tuple[ModelReference, ModelOutput]],
+    ) -> str:
+        """Lo que el árbitro va a leer: la petición y todas las propuestas.
+
+        El router mide el contexto con la petición original, y la síntesis
+        pesa varias veces más: con tres propuestas de apuntes, de unos 3k
+        tokens se pasa a más de 20k. Por eso un árbitro de 8k superaba el
+        filtro y luego no cabía (qwen/qwen3.6-35b-a3b, 16 de 16 rechazos).
+        """
+        parts = [ROLE_SYSTEM_PROMPTS["arbiter"], request.content.prompt]
+        parts += [output.content or "" for _, output in proposals]
+        return "\n\n".join(parts)
 
     def _fallback_proposal(
         self, proposals: list[tuple[ModelReference, ModelOutput]]
