@@ -33,6 +33,7 @@ from app.providers.base import (
     estimate_tokens_upper_bound,
     infer_openai_compatible_capabilities,
     multimodal_content,
+    normalized_stop_reason,
     numeric_vector,
     probe_rate_limit_streak_limit,
     provider_error_from_http,
@@ -40,6 +41,7 @@ from app.providers.base import (
     request_with_context_capped_output,
     rescued_content,
     returned_images,
+    served_generation,
 )
 from app.providers.base import (
     openai_determinism_fields as _determinism_fields,
@@ -158,18 +160,22 @@ class OpenAICompatibleProvider:
                     raise unavailable from error
                 self._catalog_failure = None
                 self._names_cache.set(list(names))
-        loaded = await self._loaded_contexts()
-        return [self._catalog_entry(name, configured.get(name), loaded.get(name)) for name in names]
+        loaded, maximums = await self._native_contexts()
+        return [
+            self._catalog_entry(name, configured.get(name), loaded.get(name), maximums.get(name))
+            for name in names
+        ]
 
-    async def _loaded_contexts(self) -> dict[str, int]:
-        """Contexto real de cada modelo cargado en LM Studio. Vacío si la
-        opción está apagada o la API nativa no contesta: entonces manda lo
-        declarado, como antes."""
+    async def _native_contexts(self) -> tuple[dict[str, int], dict[str, int]]:
+        """Contexto real de cada modelo cargado en LM Studio, y el máximo que
+        admite cada uno. Vacíos si la opción está apagada o la API nativa no
+        contesta: entonces manda lo declarado, como antes."""
         if not self.config.lmstudio_loaded_context:
-            return {}
+            return {}, {}
         cached = self._loaded_context_cache.get()
         if cached is not None:
-            return dict(cached)
+            loaded_cached, maximums_cached = cached
+            return dict(loaded_cached), dict(maximums_cached)
         url = httpx.URL(self.config.base_url).copy_with(path="/api/v0/models", query=None)
         try:
             response = await self.client.get(url, headers=self._headers())
@@ -177,18 +183,28 @@ class OpenAICompatibleProvider:
             payload = response.json()
         except (httpx.HTTPError, ValueError):
             logger.debug("openai_compatible.loaded_context_unavailable", exc_info=True)
-            return {}
+            return {}, {}
+        items = [item for item in (payload.get("data") if isinstance(payload, dict) else None) or []
+                 if isinstance(item, dict) and item.get("id")]
+        # LM Studio no carga por encima del máximo del modelo: con
+        # defaultContextLength a 32k, deepseek-coder-33b (16k) se queda en 16k.
+        maximums = {
+            str(item["id"]): int(item["max_context_length"])
+            for item in items
+            if isinstance(item.get("max_context_length"), int) and item["max_context_length"] > 0
+        }
         loaded = {
             str(item["id"]): int(item["loaded_context_length"])
-            for item in (payload.get("data") if isinstance(payload, dict) else None) or []
-            if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded"
+            for item in items
+            if item.get("state") == "loaded"
             and isinstance(item.get("loaded_context_length"), int) and item["loaded_context_length"] > 0
         }
-        self._loaded_context_cache.set(dict(loaded))
-        return loaded
+        self._loaded_context_cache.set((dict(loaded), dict(maximums)))
+        return loaded, maximums
 
     def _catalog_entry(
         self, name: str, model_config: Any | None = None, loaded_context: int | None = None,
+        max_context: int | None = None,
     ) -> dict[str, Any]:
         capabilities = (
             list(model_config.capabilities)
@@ -206,6 +222,8 @@ class OpenAICompatibleProvider:
             context_window, source = loaded_context, "loaded"
         elif self.config.jit_context_window is not None and self.config.jit_context_window < declared:
             context_window, source = self.config.jit_context_window, "jit_default"
+        if loaded_context is None and max_context is not None and max_context < context_window:
+            context_window, source = max_context, "model_max"
         return {
             "name": name,
             "provider": self.config.id,
@@ -324,7 +342,7 @@ class OpenAICompatibleProvider:
                 "compatibility_checked_at": started.isoformat(),
                 "compatibility_error": detail,
             }
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             return {
                 "name": model,
                 "compatibility": "error",
@@ -382,7 +400,7 @@ class OpenAICompatibleProvider:
             if status in (401, 403, 408) or status >= 500:
                 return None
             return False
-        except (httpx.TimeoutException, httpx.NetworkError):
+        except httpx.TransportError:
             return None
 
     async def probe_model_features(self, model: str) -> dict[str, bool]:
@@ -431,7 +449,7 @@ class OpenAICompatibleProvider:
                 "compatibility_checked_at": started.isoformat(),
                 "compatibility_error": detail,
             }
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             return {
                 "name": model,
                 "compatibility": "error",
@@ -710,7 +728,7 @@ class OpenAICompatibleProvider:
             payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
@@ -770,7 +788,7 @@ class OpenAICompatibleProvider:
             payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
@@ -830,7 +848,7 @@ class OpenAICompatibleProvider:
             payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
@@ -872,6 +890,7 @@ class OpenAICompatibleProvider:
             generation=effective_generation(request),
             fingerprint_observed=_observed_fingerprint(payload),
             content_source=source,
+            stop_reason=normalized_stop_reason(choices[0].get("finish_reason") if choices else None),
         )
 
     async def generate(
@@ -923,7 +942,7 @@ class OpenAICompatibleProvider:
             payload = decoded_json(response, self.config.id)
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
@@ -962,8 +981,9 @@ class OpenAICompatibleProvider:
             output_tokens,
             cost,
             (datetime.now(timezone.utc) - started).total_seconds() * 1000,
-            generation=effective_generation(inference_request),
+            generation=served_generation(request, inference_request),
             fingerprint_observed=_observed_fingerprint(payload),
             content_source=source,
             images=images,
+            stop_reason=normalized_stop_reason(choices[0].get("finish_reason") if choices else None),
         )

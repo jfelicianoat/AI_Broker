@@ -25,6 +25,12 @@ ingestion = [
     "markitdown[docx,xlsx,pptx]>=0.1.1",
     "faster-whisper>=1.1.0",
 ]
+# Exportación a PDF del informe de enrutamiento (import perezoso: sin ella el
+# informe sigue saliendo en HTML y el PDF responde 503 diciendo qué falta).
+# Tras instalarla: python -m playwright install chromium-headless-shell
+report = [
+    "playwright>=1.48",
+]
 dev = [
     "pytest>=8.2.0",
     "pytest-cov>=5.0.0",

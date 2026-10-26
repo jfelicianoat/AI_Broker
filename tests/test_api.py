@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -826,6 +827,53 @@ def test_dashboard_configuration_rejects_concurrent_edit(tmp_path: Path) -> None
     assert fresh.status_code == 200
     assert "Configuración guardada" in fresh.text
     assert load_config(config_path).processing.queue_max_size == 300
+
+
+def test_dashboard_saves_log_retention_and_applies_it(tmp_path: Path) -> None:
+    """Retención de logs desde pantalla: casilla de «para siempre» y días."""
+    config_path = tmp_path / "broker_config.yaml"
+    log_dir = tmp_path / "logs"
+    config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker-log-retention.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        logging=LoggingConfig(directory=str(log_dir), console_enabled=False),
+    )
+    form = {
+        "task_timeout_seconds": "900",
+        "max_parallel_invocations": "3",
+        "queue_max_size": "250",
+        "local_vram_budget_gb": "48",
+        "vram_safety_margin_gb": "4",
+        "max_loaded_local_models": "auto",
+        "logging_level": "INFO",
+        "logging_max_bytes": "0",
+        "logging_retention_days": "90",
+    }
+    with TestClient(create_app(config, config_path=config_path)) as client:
+        token = dashboard_csrf(client)
+        page = client.get("/dashboard/config")
+        days = client.post("/dashboard/actions/config", data={"csrf_token": token, **form})
+        forever = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, **form, "logging_keep_forever": "on"},
+        )
+        out_of_range = client.post(
+            "/dashboard/actions/config",
+            data={"csrf_token": token, **form, "logging_retention_days": "0"},
+        )
+
+    assert 'name="logging_keep_forever"' in page.text
+    assert 'name="logging_retention_days"' in page.text
+    assert 'name="logging_backup_count"' not in page.text
+    assert "Configuración guardada" in days.text
+    assert "Configuración guardada" in forever.text
+    assert "entre 1 y 36500" in out_of_range.text
+    saved = load_config(config_path).logging
+    assert saved.keep_forever is True
+    assert saved.retention_days == 90
+    assert saved.max_bytes == 0
+    assert "backup_count" not in config_path.read_text(encoding="utf-8")
+    assert list(log_dir.glob("ai-broker-*.log"))
 
 
 def test_dashboard_configuration_can_be_reviewed_without_saving(tmp_path: Path) -> None:
@@ -1898,7 +1946,6 @@ def test_operational_logging_rotates_and_does_not_log_prompt_body(tmp_path: Path
             directory=str(log_dir),
             filename="broker.log",
             max_bytes=1024,
-            backup_count=2,
             console_enabled=False,
         ),
     )
@@ -1911,10 +1958,11 @@ def test_operational_logging_rotates_and_does_not_log_prompt_body(tmp_path: Path
             json={"idempotency_key": "logs:prompt", "content": {"prompt": secret_prompt}},
         )
 
-    log_files = list(log_dir.glob("broker.log*"))
+    log_files = list(log_dir.glob("broker-*.log"))
     combined = "\n".join(path.read_text(encoding="utf-8") for path in log_files)
-    assert (log_dir / "broker.log").exists()
-    assert any(path.name != "broker.log" for path in log_files)
+    today = datetime.now().date().isoformat()
+    assert (log_dir / f"broker-{today}.log").exists()
+    assert (log_dir / f"broker-{today}.1.log").exists()
     assert "http.request" in combined
     assert "/health/live" in combined
     assert secret_prompt not in combined
@@ -2817,7 +2865,9 @@ def test_context_limit_error_json_explains_prompt_exceeds_model_window(tmp_path:
     assert task["error"]["details"]["context_window"] == 1000
     assert task["error"]["details"]["max_output_tokens_allowed"] == 0
     assert task["error"]["stage"] == "generating"
-    assert task["error"]["model"] == "bootstrap-1"
+    # Con failover en single se prueban el elegido y sus dos relevos; el error
+    # final es el del último, que tampoco cabía.
+    assert task["error"]["model"] == "bootstrap-3"
 
 
 def test_standard_consensus_fails_until_phase_c(tmp_path: Path) -> None:
@@ -3526,10 +3576,10 @@ def test_single_strategy_does_not_retry_permanent_errors(tmp_path: Path) -> None
     with make_client(tmp_path) as client:
         provider = client.app.state.provider
         original_propose = provider.propose
-        calls = {"count": 0}
+        calls: list[str] = []
 
         async def broken_propose(request, model, ordinal):
-            calls["count"] += 1
+            calls.append(model.model)
             raise providers_module.ProviderError("MODEL_UNAVAILABLE", "no existe", retryable=False)
 
         provider.propose = broken_propose
@@ -3542,7 +3592,9 @@ def test_single_strategy_does_not_retry_permanent_errors(tmp_path: Path) -> None
             client.post("/api/v1/dispatcher/tick")
             final = client.get(f"/api/v1/tasks/{task_id}").json()
             assert final["status"] == "failed"
-            assert calls["count"] == 1
+            # Un error permanente no se reintenta en el mismo modelo; sí se
+            # pasa a los relevos (failover), cada uno una sola vez.
+            assert len(calls) == len(set(calls)) == 3
         finally:
             provider.propose = original_propose
 

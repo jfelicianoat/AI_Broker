@@ -33,11 +33,13 @@ from app.providers.base import (
     enforce_context_limit,
     enforce_embedding_inputs_fit,
     estimate_required_context,
+    normalized_stop_reason,
     numeric_vector,
     provider_error_from_http,
     provider_http_error_message,
     request_with_context_capped_output,
     returned_images,
+    served_generation,
 )
 from app.schemas import OutputFormat, TaskCreateRequest
 from app.task_classifier import invocation_task_type
@@ -990,7 +992,7 @@ class OllamaProvider:
                     payload["eval_count"] = int(payload.get("eval_count") or 0) + wasted_tokens
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
@@ -1007,8 +1009,9 @@ class OllamaProvider:
             content=content, tokens_input=int(payload.get("prompt_eval_count") or 0),
             tokens_output=int(payload.get("eval_count") or 0), cost_usd=0.0,
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
-            generation=_with_thinking(effective_generation(inference_request), thinking_mode),
+            generation=_with_thinking(served_generation(request, inference_request), thinking_mode),
             images=images,
+            stop_reason=normalized_stop_reason(payload.get("done_reason")),
         )
 
     async def chat_tools(
@@ -1061,7 +1064,7 @@ class OllamaProvider:
                     payload["eval_count"] = int(payload.get("eval_count") or 0) + wasted_tokens
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
@@ -1087,6 +1090,7 @@ class OllamaProvider:
             latency_ms=(datetime.now(timezone.utc) - started).total_seconds() * 1000,
             raw_assistant_message={"role": "assistant", **message},
             generation=_with_thinking(effective_generation(request), thinking_mode),
+            stop_reason=normalized_stop_reason(payload.get("done_reason")),
         )
 
     @staticmethod
@@ -1138,7 +1142,7 @@ class OllamaProvider:
                 payload = response.json()
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
@@ -1191,7 +1195,7 @@ class OllamaProvider:
                 payload = response.json()
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error

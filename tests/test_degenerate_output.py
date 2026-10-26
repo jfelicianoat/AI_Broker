@@ -81,7 +81,7 @@ class TestTheDetector:
 
 class TestTheLoopBecomesAFailure:
     @staticmethod
-    def _provider(respuesta: str) -> RoutedModelProvider:
+    def _provider(respuesta: str, done_reason: str = "length") -> RoutedModelProvider:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/tags":
                 return httpx.Response(200, json={"models": [{
@@ -90,7 +90,7 @@ class TestTheLoopBecomesAFailure:
                 }]})
             if request.url.path == "/api/chat":
                 return httpx.Response(200, json={
-                    "message": {"content": respuesta}, "done_reason": "length",
+                    "message": {"content": respuesta}, "done_reason": done_reason,
                     "prompt_eval_count": 6858, "eval_count": 4000,
                 })
             return httpx.Response(200, json={"models": []})
@@ -116,7 +116,9 @@ class TestTheLoopBecomesAFailure:
     def test_a_good_answer_still_gets_through(self) -> None:
         provider = self._provider(
             "El documento sostiene que un modelo razonador necesita un objetivo "
-            "explícito para activar su cadena de pensamiento. " * 6
+            "explícito para activar su cadena de pensamiento. " * 6,
+            # Con "length" sería una respuesta cortada (tests/test_output_truncated.py).
+            done_reason="stop",
         )
         model = ModelReference(provider="ollama", deployment="local", model="loro")
         output = asyncio.run(provider.propose(_request(), model, 1))

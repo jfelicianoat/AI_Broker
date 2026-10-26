@@ -70,15 +70,16 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'ingestion_whisper_language': ('Idioma de transcripción', 'Ingesta de ficheros'),
     'ingestion_whisper_model': ('Modelo Whisper', 'Ingesta de ficheros'),
     'local_vram_budget_gb': ('Presupuesto VRAM local (GB)', 'Configuración'),
-    'logging_backup_count': ('Ficheros conservados', 'Registro'),
     'logging_level': ('Nivel', 'Registro'),
     'logging_max_bytes': ('Tamaño máximo por fichero (bytes)', 'Registro'),
+    'logging_retention_days': ('Días que se conservan los logs', 'Registro'),
     'max_loaded_local_models': ('Máx. modelos locales cargados', 'Configuración'),
     'memory_reserve_after': ('Turnos cedidos antes de reservar', 'Configuración'),
     'memory_reserve_window_seconds': ('Duración de la reserva (s)', 'Configuración'),
     'memory_wait_seconds': ('Espera entre reintentos por memoria (s)', 'Configuración'),
     'max_parallel_invocations': ('Máx. invocaciones paralelas slow', 'Configuración'),
     'max_task_attempts': ('Reintentos por tarea', 'Configuración'),
+    'outage_retry_seconds': ('Espera tras caída de proveedor (s)', 'Configuración'),
     'model_enrichment_refresh_hours': ('Refresco (horas)', 'Catálogo externo de modelos'),
     'model_enrichment_url': ('URL del catálogo', 'Catálogo externo de modelos'),
     'ollama_catalog_cache_seconds': ('Caché de catálogo (s)', 'Proveedores'),
@@ -91,6 +92,7 @@ CONFIG_FIELD_LABELS: dict[str, tuple[str, str]] = {
     'prompt_compression_min_chars': ('Mínimo de caracteres para comprimir', 'Compresión de prompts'),
     'queue_max_size': ('Tamaño máximo de cola', 'Configuración'),
     'routing_exploration_rate': ('Tasa de exploración (0-1)', 'Selección adaptativa de modelo'),
+    'routing_cloud_exploration_rate': ('Reparto entre modelos cloud (0-1)', 'Selección adaptativa de modelo'),
     'routing_min_invocations': ('Mín. invocaciones para puntuar (arranque en frío)', 'Selección adaptativa de modelo'),
     'routing_stats_window_days': ('Ventana de histórico (días)', 'Selección adaptativa de modelo'),
     'sandbox_cpus': ('CPUs', 'Sandbox de código'),
@@ -201,6 +203,7 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("resources.memory_reserve_after", "Turnos cedidos antes de reservar"),
         ("resources.memory_reserve_window_seconds", "Duración de la reserva"),
         ("processing.max_task_attempts", "Reintentos por tarea"),
+        ("processing.outage_retry_seconds", "Espera tras caída de proveedor"),
         ("processing.dispatcher_interval_seconds", "Intervalo del dispatcher"),
         ("processing.unload_after_task", "Descargar modelos al terminar"),
         ("processing.idle_unload_seconds", "Descargar modelos tras inactividad"),
@@ -218,7 +221,8 @@ def _config_review_items(current: BrokerConfig, updated: BrokerConfig) -> list[d
         ("health.probe_timeout_seconds", "Timeout de sondeo"),
         ("logging.level", "Nivel de registro"),
         ("logging.max_bytes", "Tamaño máximo del log"),
-        ("logging.backup_count", "Ficheros de log conservados"),
+        ("logging.keep_forever", "Conservar los logs para siempre"),
+        ("logging.retention_days", "Días que se conservan los logs"),
         ("logging.console_enabled", "Registro por consola"),
         ("strategy_router.learning_escalation_threshold", "Umbral de escalado aprendido"),
         ("strategy_router.learning_failure_threshold", "Umbral de fallo aprendido"),
@@ -412,6 +416,10 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
         processing["max_task_attempts"] = _int_range_field(
             form, "max_task_attempts", minimum=1, maximum=100
         )
+        if form.get("outage_retry_seconds") is not None:
+            processing["outage_retry_seconds"] = _float_range_field(
+                form, "outage_retry_seconds", minimum=1.0, maximum=3600.0
+            )
         processing["dispatcher_interval_seconds"] = _float_range_field(
             form, "dispatcher_interval_seconds", minimum=0.01, maximum=60.0
         )
@@ -470,6 +478,10 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
             "stats_window_days": _int_range_field(form, "routing_stats_window_days", minimum=1, maximum=365),
             "min_invocations": _int_range_field(form, "routing_min_invocations", minimum=1, maximum=1000),
             "exploration_rate": _float_range_field(form, "routing_exploration_rate", minimum=0.0, maximum=1.0),
+            "prefer_cloud_when_allowed": _checked(form, "routing_prefer_cloud_when_allowed"),
+            "cloud_exploration_rate": _float_range_field(
+                form, "routing_cloud_exploration_rate", minimum=0.0, maximum=1.0,
+            ),
         }
     if form.get("shadow_probe_max_prompt_chars") is not None:
         payload["shadow_probe"] = {
@@ -587,11 +599,14 @@ def _build_dashboard_config(current: BrokerConfig, form: dict[str, str]) -> Brok
             )
         logging_cfg["level"] = log_level
         logging_cfg["max_bytes"] = _int_range_field(
-            form, "logging_max_bytes", minimum=1024, maximum=1073741824
+            form, "logging_max_bytes", minimum=0, maximum=1073741824
         )
-        logging_cfg["backup_count"] = _int_range_field(
-            form, "logging_backup_count", minimum=1, maximum=100
+        logging_cfg["keep_forever"] = _checked(form, "logging_keep_forever")
+        logging_cfg["retention_days"] = _int_range_field(
+            form, "logging_retention_days", minimum=1, maximum=36500
         )
+        # Retirado: la retención ya no se cuenta en copias sino en días.
+        logging_cfg.pop("backup_count", None)
         logging_cfg["console_enabled"] = _checked(form, "logging_console_enabled")
         payload["logging"] = logging_cfg
     payload["providers"]["ollama"] = _parse_ollama_provider(current, form)
@@ -668,8 +683,8 @@ def _apply_config_update(target: BrokerConfig, updated: BrokerConfig) -> None:
     target.model_enrichment = updated.model_enrichment
     target.health = updated.health
     # El registro se reconfigura de verdad: configure_logging cierra los
-    # handlers vivos y los reinstala, así que nivel, rotación, número de
-    # ficheros y salida por consola aplican sin reiniciar. Reemplazar solo el
+    # handlers vivos y los reinstala, así que nivel, rotación, retención (la
+    # poda corre al reinstalar) y salida por consola aplican sin reiniciar. Reemplazar solo el
     # atributo habría guardado el YAML dejando el logger con el valor viejo.
     logging_changed = target.logging != updated.logging
     target.logging = updated.logging

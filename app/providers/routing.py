@@ -9,6 +9,7 @@ from dataclasses import replace
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config import (
     BrokerConfig,
@@ -19,6 +20,7 @@ from app.config import (
 from app.model_capabilities import supports_image_output, supports_vision
 from app.model_enrichment import ModelEnrichment
 from app.model_quarantine import (
+    UNTRIED_ARBITER,
     ArbiterRecord,
     ArbiterRecordKey,
     QuarantineEntry,
@@ -44,6 +46,8 @@ from app.providers.base import (
     looks_like_prompt_echo,
     neutralize_consensus_delimiters,
     output_language_directive,
+    output_room_sufficient,
+    output_truncated_error,
     prompt_echo_ratio,
     role_system_prompt,
     template_marker_leak,
@@ -738,7 +742,39 @@ class RoutedModelProvider:
                     "ranking": [describe(entry) for entry in ranked[:5]],
                 },
             )
+        if routing.prefer_cloud_when_allowed and request.model_requirements.cloud_allowed:
+            remote = [entry for entry in ranked if self._served_remotely(entry)]
+            if remote:
+                # Cloud delante de todo lo local, con su propio reparto. El
+                # orden interno sigue siendo el de tiempo esperado; los locales
+                # quedan como respaldo en su orden de siempre.
+                local = [entry for entry in ranked if not self._served_remotely(entry)]
+                remote = self._apply_exploration(
+                    remote, routing, stats, task_type, rate=routing.cloud_exploration_rate,
+                )
+                return remote + local
         return self._apply_exploration(ranked, routing, stats, task_type)
+
+    def _served_remotely(self, entry: dict[str, Any]) -> bool:
+        """¿Lo atiende de verdad una máquina ajena?
+
+        La etiqueta `deployment` no basta para «cloud primero»: unsloth
+        (127.0.0.1:8888) se declara `cloud` y lemonade (localhost:13305)
+        `api`, y los dos corren en este mismo PC. Darles la tarea por ser
+        «cloud» la volvería a dejar en la GPU local. Para la frontera de
+        datos sigue mandando la etiqueta, que es lo prudente.
+        """
+        if is_local_deployment(entry.get("deployment")):
+            return False
+        provider_id = str(entry.get("provider") or "").lower()
+        custom = next(
+            (item for item in self.config.providers.custom if item.id.lower() == provider_id), None,
+        )
+        if custom is None:
+            # Ollama Cloud (modelos `-cloud` de Ollama) y DeepSeek: remotos.
+            return True
+        host = (urlparse(custom.base_url).hostname or "").lower()
+        return host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
     @staticmethod
     def _loaded_state(
@@ -801,6 +837,8 @@ class RoutedModelProvider:
         routing: Any,
         stats: dict[ModelKey, ModelStats],
         task_type: str,
+        *,
+        rate: float | None = None,
     ) -> list[dict[str, Any]]:
         """Epsilon-greedy dirigido: con probabilidad exploration_rate, asciende
         otro candidato por delante del primero. Sin esto, en cuanto un modelo
@@ -818,9 +856,11 @@ class RoutedModelProvider:
         modelo pasa a competir de verdad tras min_invocations exploraciones.
         Si ya todos están medidos se cae al sorteo uniforme, que es lo que
         evita que el campeón se eternice."""
-        if routing.exploration_rate <= 0 or len(ranked) < 2:
+        # `rate` lo usa el bloque cloud, que tiene su propia tasa de reparto.
+        exploration_rate = routing.exploration_rate if rate is None else rate
+        if exploration_rate <= 0 or len(ranked) < 2:
             return ranked
-        if random.random() >= routing.exploration_rate:
+        if random.random() >= exploration_rate:
             return ranked
         attempts_by_index = {
             index: self._attempts(stats, ranked[index], task_type)
@@ -955,6 +995,27 @@ class RoutedModelProvider:
             if item.get("context_admission") == "larm"
             or context_fits_with_capped_output(request, item.get("context_window"))
         ]
+        # Caber no basta si el tope de salida se recorta casi entero: rnj-1
+        # cargado a 8k cabía con 963 de los 7500 tokens pedidos y entregó una
+        # respuesta cortada (task_42e80f83…). Se prefieren los que tienen sitio
+        # para al menos la mitad; si no hay ninguno, valen todos los que caben.
+        roomy = [
+            item for item in context_catalog
+            if item.get("context_admission") == "larm"
+            or output_room_sufficient(request, item.get("context_window"))
+        ]
+        if roomy and len(roomy) < len(context_catalog):
+            logger.info(
+                "routing.output_room_filtered",
+                extra={
+                    "event": "routing.output_room_filtered",
+                    "max_output_tokens": request.generation.max_output_tokens,
+                    "excluded": [
+                        f"{item['provider']}/{item['name']}" for item in context_catalog if item not in roomy
+                    ],
+                },
+            )
+        context_catalog = roomy or context_catalog
         return catalog, capability_catalog, context_catalog
 
     def _system1_budget_fits(self, entry: dict[str, Any], request: TaskCreateRequest) -> bool:
@@ -1185,7 +1246,8 @@ class RoutedModelProvider:
     def _rank_arbiters(
         self, catalog: list[dict[str, Any]], request: TaskCreateRequest
     ) -> list[dict[str, Any]]:
-        """Ordena candidatos a árbitro por capacidad en vez de por rapidez.
+        """Ordena candidatos a árbitro por su historial como árbitro y, a
+        igualdad, por tamaño; nunca por rapidez.
 
         El ranking general mide tiempo esperado, que es el criterio correcto
         para quien tiene que responder: cuanto menos espera el usuario, mejor.
@@ -1193,14 +1255,24 @@ class RoutedModelProvider:
         cierta— y ahí la rapidez no dice nada. Pasó de verdad
         (task_14341781…): dos proponentes contestaron "no me has dado ningún
         libro" y el tercero resumió el documento correctamente; el árbitro se
-        quedó con la negativa de los dos. Un árbitro más capaz no garantiza
-        acertar, pero elegirlo por lo rápido que escribe no lo hace nada
-        probable.
+        quedó con la negativa de los dos.
 
-        El tamaño declarado es un indicio pobre y es el único que hay: el
-        histórico mide tiempo y tasa de fallo, no acierto. Se ordena por él y
-        se deja el orden por tiempo como desempate, así que entre modelos de
-        tamaño desconocido o parecido sigue mandando lo medido.
+        Manda lo medido como árbitro en ESTE tipo de tarea
+        (ArbiterRecord.band): probados y fiables, después los que no tienen
+        pruebas suficientes, después los probados flojos y al final los que
+        fallan más de lo que aciertan. El tamaño declarado solo desempata
+        dentro de cada nivel. Ordenar solo por tamaño dejaba sin un solo
+        arbitraje en 30 días a qwen3.8:27b —27B, detrás de cinco modelos
+        mayores—, que al probarlo arbitró 3 de 3 apuntes largos sin eco
+        mientras ornith:35b y nemotron:latest, más grandes, hacían eco del
+        prompt. Y el historial en los demás papeles no sirve de atajo:
+        nemotron:latest acierta 42/43 en ellos y como árbitro 3/9.
+
+        Por eso los no probados no se adelantan por fama, sino en las tareas
+        que toca explorar (routing.exploration_rate): sube el mayor de ellos,
+        rematando antes al que ya tiene la prueba a medias, hasta que su
+        historial lo coloca solo. Una prueba fallida sale barata: el árbitro
+        tiene un sustituto y, detrás, la degradación a la mejor propuesta.
 
         Un modelo que no cabe en la máquina queda el último aunque sea el más
         grande. Ponerlo primero sería elegir un árbitro que va a fallar seguro
@@ -1210,15 +1282,15 @@ class RoutedModelProvider:
         if request.execution.selection.arbiter_policy != "strongest_available":
             return catalog
         budget = local_memory_budget_bytes(self.config)
-        # Quien como árbitro de ESTE tipo de tarea falla más de lo que acierta
-        # pasa detrás de los demás: el tamaño no avisa de un modelo que hace
-        # eco del prompt al sintetizar textos largos.
+        settings = self.config.model_quarantine
         task_type = invocation_task_type(request)
         records = self._load_arbiter_records()
 
-        def failing(entry: dict[str, Any]) -> bool:
-            record = records.get((*quarantine_key(entry), task_type))
-            return record is not None and record.mostly_failing
+        def record(entry: dict[str, Any]) -> ArbiterRecord:
+            return records.get((*quarantine_key(entry), task_type), UNTRIED_ARBITER)
+
+        def band(entry: dict[str, Any]) -> int:
+            return record(entry).band(settings.arbiter_proven_attempts, settings.role_max_failure_rate)
 
         def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple[int, int, float, int]:
             index, entry = indexed
@@ -1227,9 +1299,37 @@ class RoutedModelProvider:
                 and 0 < budget < int(entry.get("size_bytes") or 0)
             )
             parameters = declared_parameter_count(entry)
-            return (1 if oversized else 0, 1 if failing(entry) else 0, -(parameters or 0.0), index)
+            return (1 if oversized else 0, band(entry), -(parameters or 0.0), index)
 
-        return [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
+        ranked = [entry for _, entry in sorted(enumerate(catalog), key=sort_key)]
+        if not ranked or band(ranked[0]) != 0:
+            # Sin un árbitro probado delante no hay nada que explorar: los no
+            # probados ya van primero por su propio nivel.
+            return ranked
+        if self.config.routing.exploration_rate <= 0 or random.random() >= self.config.routing.exploration_rate:
+            return ranked
+        untried = [
+            index for index, entry in enumerate(ranked)
+            if band(entry) == 1 and not (
+                is_local_deployment(entry.get("deployment"))
+                and 0 < budget < int(entry.get("size_bytes") or 0)
+            )
+        ]
+        if not untried:
+            return ranked
+        started = [index for index in untried if record(ranked[index]).attempts > 0]
+        # `ranked` ya va por tamaño dentro del nivel: el primero es el mayor.
+        chosen = (started or untried)[0]
+        logger.info(
+            "routing.arbiter_exploration",
+            extra={
+                "event": "routing.arbiter_exploration",
+                "task_type": task_type,
+                "explored": f"{ranked[chosen]['provider']}/{ranked[chosen]['name']}",
+                "displaced": f"{ranked[0]['provider']}/{ranked[0]['name']}",
+            },
+        )
+        return [ranked[chosen], *ranked[:chosen], *ranked[chosen + 1:]]
 
     async def delete_local_model(self, provider_id: str, model: str) -> int:
         """Borra del disco un modelo local. Devuelve los bytes liberados.
@@ -1331,7 +1431,15 @@ class RoutedModelProvider:
         provider = self._resolve_agent_provider(model)
         slot = self._parallel_inference_slot if allow_parallel else self._serial_inference_slot
         async with slot:
-            return await provider.chat_tools(request, model.model, messages, tools)
+            turn = await provider.chat_tools(request, model.model, messages, tools)
+        # Una respuesta final cortada por el tope no es una respuesta final. Con
+        # tool_calls no se mira: el bucle sigue y el modelo vuelve a hablar.
+        if turn.stop_reason == "length" and not turn.tool_calls and (turn.content or "").strip():
+            raise output_truncated_error(model.provider, model.model, ModelOutput(
+                turn.content, turn.tokens_input, turn.tokens_output, turn.cost_usd, turn.latency_ms,
+                generation=turn.generation, content_source=turn.content_source, stop_reason=turn.stop_reason,
+            ))
+        return turn
 
     async def synthesize(self, request: TaskCreateRequest, model: ModelReference, proposals: list[ModelOutput]) -> ModelOutput:
         candidates = "\n\n".join(
@@ -1445,6 +1553,10 @@ class RoutedModelProvider:
             )
             error.output = output
             raise error
+        # Después del bucle: una repetición que llega al tope es un bucle, y
+        # ese diagnóstico dice más del modelo que «se cortó».
+        if output.stop_reason == "length":
+            raise output_truncated_error(model.provider, model.model, output)
         return output
 
     async def _generate_raw(

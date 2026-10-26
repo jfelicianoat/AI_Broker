@@ -18,9 +18,11 @@ from app.providers.base import (
     _estimation_text,
     effective_generation,
     estimate_tokens_upper_bound,
+    normalized_stop_reason,
     provider_error_from_http,
     request_with_context_capped_output,
     rescued_content,
+    served_generation,
 )
 from app.providers.base import (
     openai_determinism_fields as _determinism_fields,
@@ -135,7 +137,7 @@ class DeepSeekProvider:
             payload = response.json()
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="deepseek", model=model) from error
@@ -161,9 +163,10 @@ class DeepSeekProvider:
         cost = (input_tokens * self.config.input_cost_per_million + output_tokens * self.config.output_cost_per_million) / 1_000_000
         return ModelOutput(content, input_tokens, output_tokens, cost,
                            (datetime.now(timezone.utc) - started).total_seconds() * 1000,
-                           generation=effective_generation(inference_request),
+                           generation=served_generation(request, inference_request),
                            fingerprint_observed=_observed_fingerprint(payload),
-                           content_source=source)
+                           content_source=source,
+                           stop_reason=normalized_stop_reason(choices[0].get("finish_reason") if choices else None))
 
     async def chat_tools(
         self,
@@ -192,7 +195,7 @@ class DeepSeekProvider:
             payload = response.json()
         except ProviderError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
+        except httpx.TransportError as error:
             raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="deepseek", model=model) from error
@@ -230,4 +233,5 @@ class DeepSeekProvider:
             generation=effective_generation(request),
             fingerprint_observed=_observed_fingerprint(payload),
             content_source=turn_source,
+            stop_reason=normalized_stop_reason((payload.get("choices") or [{}])[0].get("finish_reason")),
         )

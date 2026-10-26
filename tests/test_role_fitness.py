@@ -185,3 +185,81 @@ def test_an_arbiter_that_echoes_long_texts_goes_behind_a_smaller_clean_one() -> 
     with task_type_scope("prose"):
         assert [e["name"] for e in router._rank_arbiters(catalog, request)] == ["ornith:35b", "gemma4:12b"]
     asyncio.run(router.close())
+
+
+def test_arbiter_bands() -> None:
+    assert ArbiterRecord(attempts=0, failures=0).band(3, 0.3) == 1
+    assert ArbiterRecord(attempts=2, failures=0).band(3, 0.3) == 1
+    assert ArbiterRecord(attempts=3, failures=0).band(3, 0.3) == 0
+    assert ArbiterRecord(attempts=4, failures=1).band(3, 0.3) == 0
+    assert ArbiterRecord(attempts=3, failures=1).band(3, 0.3) == 2
+    assert ArbiterRecord(attempts=1, failures=1).band(3, 0.3) == 3
+
+
+def _arbiter_catalog() -> list[dict[str, object]]:
+    return [
+        {"provider": "ollama", "deployment": "local", "name": "ornith:35b", "parameter_size": "35B"},
+        {"provider": "ollama", "deployment": "local", "name": "nemotron-3-nano:latest", "parameter_size": "31.6B"},
+        {"provider": "ollama", "deployment": "local", "name": "granite4.1:30b", "parameter_size": "28.9B"},
+        {"provider": "ollama", "deployment": "local", "name": "qwen3.8:27b", "parameter_size": "27B"},
+    ]
+
+
+def _rank(config: BrokerConfig, records: dict[tuple[str, str, str, str], ArbiterRecord]) -> list[str]:
+    from app.task_classifier import task_type_scope
+
+    router = RoutedModelProvider(config, arbiter_record_loader=lambda: records)
+    request = TaskCreateRequest.model_validate({"idempotency_key": "arb:2", "content": {"prompt": "hola"}})
+    try:
+        with task_type_scope("long_context"):
+            return [str(e["name"]) for e in router._rank_arbiters(_arbiter_catalog(), request)]
+    finally:
+        asyncio.run(router.close())
+
+
+def _key(model: str) -> tuple[str, str, str, str]:
+    return ("ollama", "local", model, "long_context")
+
+
+def test_a_proven_arbiter_goes_ahead_of_bigger_untried_ones_and_size_only_breaks_ties() -> None:
+    records = {
+        _key("qwen3.8:27b"): ArbiterRecord(attempts=3, failures=0),
+        # Probado y flojo: detrás de los que no tienen pruebas.
+        _key("nemotron-3-nano:latest"): ArbiterRecord(attempts=4, failures=2),
+    }
+    assert _rank(BrokerConfig(), records) == [
+        "qwen3.8:27b", "ornith:35b", "granite4.1:30b", "nemotron-3-nano:latest",
+    ]
+
+
+def test_exploration_promotes_the_biggest_untried_arbiter_and_finishes_started_trials_first() -> None:
+    config = BrokerConfig()
+    config.routing.exploration_rate = 1.0
+    proven = {_key("qwen3.8:27b"): ArbiterRecord(attempts=3, failures=0)}
+    assert _rank(config, proven)[0] == "ornith:35b"
+    started = {**proven, _key("granite4.1:30b"): ArbiterRecord(attempts=1, failures=0)}
+    assert _rank(config, started)[:2] == ["granite4.1:30b", "qwen3.8:27b"]
+    # Sin ningún probado no hay exploración: el orden ya es el de los no probados.
+    assert _rank(config, {})[0] == "ornith:35b"
+
+
+def test_an_untried_arbiter_that_does_not_fit_is_never_explored(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.providers.routing as routing
+
+    monkeypatch.setattr(routing, "local_memory_budget_bytes", lambda _config: 10)
+    config = BrokerConfig()
+    config.routing.exploration_rate = 1.0
+    records = {
+        _key("qwen3.8:27b"): ArbiterRecord(attempts=3, failures=0),
+        _key("nemotron-3-nano:latest"): ArbiterRecord(attempts=3, failures=0),
+        _key("granite4.1:30b"): ArbiterRecord(attempts=3, failures=0),
+    }
+    catalog = _arbiter_catalog()
+    original = routing.RoutedModelProvider._rank_arbiters
+
+    def with_sizes(self, items, request):  # type: ignore[no-untyped-def]
+        sized = [dict(item, size_bytes=100 if item["name"] == "ornith:35b" else 1) for item in catalog]
+        return original(self, sized, request)
+
+    monkeypatch.setattr(routing.RoutedModelProvider, "_rank_arbiters", with_sizes)
+    assert _rank(config, records) == ["nemotron-3-nano:latest", "granite4.1:30b", "qwen3.8:27b", "ornith:35b"]

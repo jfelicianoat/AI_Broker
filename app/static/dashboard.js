@@ -619,6 +619,191 @@
     });
   }
 
+  // Ordenación en el navegador de las tablas marcadas con data-sortable. La
+  // celda puede dar su clave en data-sort (el valor crudo, sin unidades ni
+  // texto como «sin medir»); si no, se ordena por el texto visible. Las claves
+  // vacías van siempre al final, en ambos sentidos: «sin dato» no es ni el
+  // mayor ni el menor.
+  function sortKey(cell) {
+    if (!cell) return "";
+    const raw = cell.hasAttribute("data-sort") ? cell.getAttribute("data-sort") : cell.textContent;
+    return raw.trim();
+  }
+
+  function sortTable(table, index, direction) {
+    const body = table.tBodies[0];
+    if (!body) return;
+    const rows = Array.from(body.rows).map((row, position) => ({
+      row, position, key: sortKey(row.cells[index])
+    }));
+    const numeric = rows.every(({key}) => key === "" || Number.isFinite(Number(key)));
+    const collator = new Intl.Collator("es", {numeric: true, sensitivity: "base"});
+    rows.sort((a, b) => {
+      if (a.key === "" || b.key === "") {
+        if (a.key === b.key) return a.position - b.position;
+        return a.key === "" ? 1 : -1;
+      }
+      const order = numeric ? Number(a.key) - Number(b.key) : collator.compare(a.key, b.key);
+      if (order === 0) return a.position - b.position;
+      return direction === "ascending" ? order : -order;
+    });
+    rows.forEach(({row}) => body.appendChild(row));
+  }
+
+  function bindSortableTables(root) {
+    root.querySelectorAll("table[data-sortable]").forEach((table) => {
+      if (processed.has(table)) return;
+      processed.add(table);
+      const headers = Array.from(table.querySelectorAll("thead th"));
+      headers.forEach((th, index) => {
+        const label = th.textContent.trim();
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "sort-button";
+        button.textContent = label;
+        const indicator = document.createElement("span");
+        indicator.className = "sort-indicator";
+        indicator.setAttribute("aria-hidden", "true");
+        button.appendChild(indicator);
+        th.textContent = "";
+        th.appendChild(button);
+        button.addEventListener("click", () => {
+          const current = th.getAttribute("aria-sort");
+          let direction;
+          if (current === "ascending") direction = "descending";
+          else if (current === "descending") direction = "ascending";
+          else {
+            // Primer clic: las medidas de mayor a menor (lo que se busca es el
+            // que más casos, éxito o latencia tiene) y el texto de la A a la Z.
+            const body = table.tBodies[0];
+            const keys = body ? Array.from(body.rows).map((row) => sortKey(row.cells[index])) : [];
+            const numeric = keys.some((key) => key !== "")
+              && keys.every((key) => key === "" || Number.isFinite(Number(key)));
+            direction = numeric ? "descending" : "ascending";
+          }
+          headers.forEach((other) => other.removeAttribute("aria-sort"));
+          th.setAttribute("aria-sort", direction);
+          sortTable(table, index, direction);
+          const region = document.getElementById("live-region");
+          if (region) {
+            region.textContent = `Ordenado por ${label}, ${direction === "ascending" ? "ascendente" : "descendente"}`;
+          }
+        });
+      });
+    });
+  }
+
+  // Formulario del informe de enrutamiento. Sin la casilla de IA es un GET
+  // normal (HTML en pestaña nueva, PDF como descarga). Con ella, antes hay que
+  // encolar la interpretación y esperar a que un modelo la escriba; cuando está
+  // lista el botón pasa a «Abrir informe» y es el usuario quien lo pulsa: abrir
+  // una pestaña desde un temporizador lo bloquearía el navegador como popup.
+  const REPORT_STATUS_LABELS = {
+    queued: "en cola",
+    routing: "eligiendo modelo",
+    resource_planning: "preparando memoria",
+    waiting_for_memory: "esperando memoria libre",
+    generating: "el modelo está escribiendo"
+  };
+
+  function bindReportForm(root) {
+    root.querySelectorAll("form[data-report-form]").forEach((form) => {
+      if (processed.has(form)) return;
+      processed.add(form);
+      const panel = form.closest(".report-panel") || form.parentElement;
+      const status = panel.querySelector("[data-report-status]");
+      const ai = form.querySelector("[data-report-ai]");
+      const format = form.querySelector("[data-report-format]");
+      const hidden = form.querySelector("[data-report-interpretation]");
+      const submit = form.querySelector("[data-report-submit]");
+      let polling = null;
+      let busy = false;
+
+      const say = (message, kind) => {
+        if (!status) return;
+        status.textContent = message;
+        status.classList.toggle("error", kind === "error");
+        status.classList.toggle("ready", kind === "ready");
+      };
+      const reset = () => {
+        if (polling) window.clearTimeout(polling);
+        polling = null;
+        busy = false;
+        hidden.value = "";
+        hidden.disabled = true;
+        submit.disabled = false;
+        submit.removeAttribute("aria-busy");
+        submit.textContent = "Generar informe";
+      };
+      const syncTarget = () => {
+        // El PDF se descarga: en una pestaña nueva dejaría una pestaña vacía.
+        form.target = format.value === "pdf" ? "_self" : "_blank";
+      };
+      format.addEventListener("change", syncTarget);
+      syncTarget();
+      ai.addEventListener("change", () => { reset(); say(""); });
+
+      const poll = async (taskId, startedAt) => {
+        try {
+          const response = await fetch(`/dashboard/routing/report/interpretation/${encodeURIComponent(taskId)}`);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || httpErrorMessage(response.status));
+          if (data.done) {
+            busy = false;
+            submit.disabled = false;
+            submit.removeAttribute("aria-busy");
+            if (data.ok) {
+              hidden.value = taskId;
+              hidden.disabled = false;
+              submit.textContent = "Abrir informe";
+              say("La interpretación está lista. Pulsa «Abrir informe».", "ready");
+            } else {
+              submit.textContent = "Generar informe";
+              say(`El modelo no pudo escribir la interpretación (${data.error}). Puedes generar el informe sin ella desmarcando la casilla.`, "error");
+            }
+            return;
+          }
+          const seconds = Math.round((Date.now() - startedAt) / 1000);
+          const label = REPORT_STATUS_LABELS[data.status] || data.status;
+          let detail = "";
+          if (data.status === "queued") {
+            // Primera de la cola pero sin arrancar: hay una tarea en marcha y el
+            // broker solo ejecuta una a la vez. Las largas (consenso, troceado)
+            // pueden tardar varios minutos en dejar sitio.
+            detail = data.ahead ? ` (${data.ahead} por delante)` : " (es la siguiente; espera a que termine la tarea en marcha)";
+          }
+          say(`Interpretación: ${label}${detail}. Llevas ${seconds} s esperando.`);
+        } catch (error) {
+          say(`No se pudo consultar la interpretación: ${error.message}. Se reintenta.`, "error");
+        }
+        polling = window.setTimeout(() => poll(taskId, startedAt), 4000);
+      };
+
+      form.addEventListener("submit", async (event) => {
+        syncTarget();
+        if (!ai.checked || !hidden.disabled) return;
+        event.preventDefault();
+        if (busy) return;
+        busy = true;
+        submit.disabled = true;
+        submit.setAttribute("aria-busy", "true");
+        say("Pidiendo la interpretación a un modelo del broker…");
+        try {
+          const response = await fetch("/dashboard/routing/report/interpretation", {
+            method: "POST",
+            headers: {"X-CSRF-Token": csrfToken()}
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.error || httpErrorMessage(response.status));
+          poll(data.task_id, Date.now());
+        } catch (error) {
+          reset();
+          say(`No se pudo pedir la interpretación: ${error.message}`, "error");
+        }
+      });
+    });
+  }
+
   function intervalFrom(trigger) {
     const match = /every\s+(\d+)s/.exec(trigger || "");
     return match ? Number(match[1]) * 1000 : null;
@@ -1027,6 +1212,8 @@
         await submitHtmlForm(form, event.submitter, "main.content", "Probador actualizado");
       });
     });
+    bindSortableTables(root);
+    bindReportForm(root);
     bindPhaseTracks();
     // Va al final: reconstruye sobre el panel recién pintado el filtro escrito
     // y las casillas marcadas, que el servidor no conoce.

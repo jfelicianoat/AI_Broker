@@ -152,9 +152,21 @@ def _local_entry(name: str) -> dict:
     }
 
 
+def _ranking_config() -> BrokerConfig:
+    """Config para medir el orden por tiempo esperado.
+
+    Sin el reparto del bloque cloud (routing.cloud_exploration_rate), que es
+    aleatorio por diseño y lo cubre tests/test_cloud_first.py: con él, los
+    tests que usan modelos de NVIDIA medirían el sorteo y no el ranking.
+    """
+    config = BrokerConfig()
+    config.routing.cloud_exploration_rate = 0.0
+    return config
+
+
 def _router(catalog: list[dict], stats: dict | None, routing: RoutingConfig | None = None,
             stats_loader=None) -> RoutedModelProvider:
-    config = BrokerConfig()
+    config = _ranking_config()
     if routing is not None:
         config.routing = routing
     loader = stats_loader if stats_loader is not None else (lambda: stats) if stats is not None else None
@@ -237,7 +249,7 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
             ("nvidia", "api", "gratis-lento", "prose"): ModelStats(10, 10, 30000.0, 0.0),
         }
         router = RoutedModelProvider(
-            BrokerConfig(),
+            _ranking_config(),
             ollama=_CatalogStub([]),
             deepseek=_CatalogStub([]),
             custom={"nvidia": _CatalogStub([gratis_lento, caro_rapido])},
@@ -264,7 +276,7 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
             ("nvidia", "api", "lento-solido", "prose"): ModelStats(10, 10, 3000.0, 0.0),
         }
         router = RoutedModelProvider(
-            BrokerConfig(),
+            _ranking_config(),
             ollama=_CatalogStub([]),
             deepseek=_CatalogStub([]),
             custom={"nvidia": _CatalogStub([rapido_fragil, lento_solido])},
@@ -295,7 +307,7 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
             ),
         }
         router = RoutedModelProvider(
-            BrokerConfig(),
+            _ranking_config(),
             ollama=_CatalogStub([]),
             deepseek=_CatalogStub([]),
             custom={"nvidia": _CatalogStub([pequeno, grande])},
@@ -318,7 +330,7 @@ class AdaptiveSelectionTests(unittest.IsolatedAsyncioTestCase):
         sin_medir = {**_local_entry("sin-medir"), "provider": "nvidia", "deployment": "api"}
         stats = {("nvidia", "api", "medido", "prose"): ModelStats(10, 10, 9000.0, 0.0)}
         router = RoutedModelProvider(
-            BrokerConfig(),
+            _ranking_config(),
             ollama=_CatalogStub([]),
             deepseek=_CatalogStub([]),
             custom={"nvidia": _CatalogStub([sin_medir, medido])},

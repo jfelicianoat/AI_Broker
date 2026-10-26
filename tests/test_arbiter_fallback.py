@@ -146,6 +146,75 @@ class TestTheTaskSurvivesItsArbiter:
         assert state["status"] == "failed"
         assert provider.synthesis_attempts == ["arbitro_1"]
 
+    def test_a_substitute_without_room_for_the_synthesis_degrades(self, tmp_path) -> None:
+        """La secuencia de task_baafa8d6… (2026-10-24): el árbitro hace eco y
+        el sustituto, de 8k de ventana, no cabe con las tres propuestas. Su
+        CONTEXT_LIMIT_EXCEEDED habla de él, no de la petición, y antes
+        tumbaba la tarea con las propuestas ya hechas."""
+
+        class SmallSubstitute(ArbiterProvider):
+            async def synthesize(self, request, model, proposals):
+                if model.model == "arbitro_2":
+                    self.synthesis_attempts.append(model.model)
+                    raise ProviderError(
+                        "CONTEXT_LIMIT_EXCEEDED",
+                        "La inferencia requiere como maximo conservador 25554 tokens y el modelo admite 8192",
+                    )
+                return await super().synthesize(request, model, proposals)
+
+        provider = SmallSubstitute()
+        state, _ = _run(tmp_path, provider)
+        assert provider.synthesis_attempts == ["arbitro_1", "arbitro_2"]
+        assert state["status"] == "completed"
+        assert state["result"]["consensus"]["synthesized"] is False
+        assert state["result"]["assistant_content"] == "respuesta completa de prop_1"
+        assert [item["code"] for item in state["result"]["arbiter_failures"]] == [
+            "PROMPT_ECHOED", "CONTEXT_LIMIT_EXCEEDED",
+        ]
+
+    def test_the_substitute_must_fit_the_synthesis(self, tmp_path) -> None:
+        """El repuesto se mide con lo que va a leer (petición + propuestas),
+        no con la petición sola: el de 8k se salta sin invocarlo."""
+
+        class SizedArbiters(ArbiterProvider):
+            windows = {"arbitro_1": 200_000, "arbitro_2": 8_192, "arbitro_3": 200_000}
+
+            async def select(self, request, count, roles):
+                if roles[0] != "arbiter":
+                    return await super().select(request, count, roles)
+                names = list(self.windows)
+                return [
+                    ModelReference(provider="ollama", deployment="local",
+                                   model=names[index % len(names)], role=role)
+                    for index, role in enumerate(roles)
+                ]
+
+            async def models(self):
+                return [
+                    {"provider": "ollama", "deployment": "local", "name": name,
+                     "context_window": self.windows.get(name, 200_000),
+                     "capabilities": ["completion"], "size_bytes": 1}
+                    for name in ["prop_1", "prop_2", "prop_3", *self.windows]
+                ]
+
+            async def propose(self, request, model, ordinal):
+                return ModelOutput(content=f"{model.model} " + "apunte " * 3000, tokens_input=10,
+                                   tokens_output=5, cost_usd=0.0, latency_ms=1.0)
+
+        provider = SizedArbiters(arbiters_ok={"arbitro_3"})
+        state, _ = _run(tmp_path, provider)
+        assert provider.synthesis_attempts == ["arbitro_1", "arbitro_3"]
+        assert state["status"] == "completed"
+        assert state["result"]["consensus"]["synthesized"] is True
+
+        # Si ningún repuesto cabe, no se gasta una invocación perdida.
+        SizedArbiters.windows = {"arbitro_1": 200_000, "arbitro_2": 8_192, "arbitro_3": 8_192}
+        provider = SizedArbiters()
+        state, _ = _run(tmp_path / "ninguno", provider)
+        assert provider.synthesis_attempts == ["arbitro_1"]
+        assert state["status"] == "completed"
+        assert state["result"]["consensus"]["synthesized"] is False
+
     def test_a_hand_picked_arbiter_is_not_swapped(self, tmp_path) -> None:
         """Si el cliente eligió árbitro, el modelo es parte de lo pedido: se
         degrada, pero no se cambia por otro a su espalda."""

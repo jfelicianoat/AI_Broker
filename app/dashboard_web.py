@@ -72,7 +72,26 @@ from app.providers.routing import task_affinity_excluded, task_affinity_patterns
 from app.repository import IdempotencyConflict, QueueFull, TaskRepository, lane_for_request
 from app.residency import build_report, local_openai_provider_roots
 from app.resource_scheduler import ResourceScheduler
+from app.routing_report import (
+    INTERPRETATION_REQUEST_PREFIX,
+    PdfUnavailable,
+    build_report_charts,
+    failure_breakdown,
+    interpretation_html,
+    interpretation_prompt,
+    interpretation_request_payload,
+    latency_profile,
+    render_pdf,
+    report_narrative,
+    report_summary,
+    routing_activity,
+    strategy_totals,
+    unsupported_numbers,
+    worst_day_detail,
+    worst_failure_day,
+)
 from app.schemas import (
+    TERMINAL_STATUSES,
     DashboardInvocationItem,
     DashboardResourcesResponse,
     DashboardTaskDetail,
@@ -483,6 +502,192 @@ def create_dashboard_router(
                 "nav_active": "enrutamiento",
             },
         )
+
+    async def _routing_report_data() -> dict[str, Any]:
+        """Todo lo que lleva el informe, menos lo que depende de cómo se sirve
+        (HTML, descarga o PDF). Lo comparten el informe y la petición de
+        interpretación, para que el modelo lea exactamente las mismas cifras."""
+        catalog, catalog_error = await models()
+        buckets = _routing_insights(repository, config)
+        model_routing = _model_routing_insights(repository, config)
+        affinity = _task_affinity_insights(catalog, config)
+        window_days = config.routing.stats_window_days
+        activity = routing_activity(repository.db, window_days=window_days)
+        for day in activity:
+            day["label"] = datetime.fromisoformat(day["day"]).strftime("%d/%m/%Y")
+        strategies = strategy_totals(buckets)
+        profile = latency_profile(repository.db, window_days=window_days)
+        for group in model_routing["groups"]:
+            for row in group["rows"]:
+                key = (row["provider"], row["deployment"], row["model"], group["task_type"])
+                row.update(profile.get(key, {"p50_ms": None, "p95_ms": None, "cold_starts": 0, "warm_starts": 0}))
+            group["has_cost"] = any(row["avg_cost_usd"] for row in group["rows"])
+        failures = failure_breakdown(repository.db, window_days=window_days)
+        worst = worst_failure_day(activity)
+        summary = report_summary(buckets, model_routing, activity)
+        narrative = report_narrative(
+            summary=summary, activity=activity, buckets=buckets, strategies=strategies,
+            model_routing=model_routing, failures=failures, affinity=affinity,
+            router=config.strategy_router,
+            worst_day=worst_day_detail(repository.db, worst["day"]) if worst else None,
+        )
+        return {
+            "router": config.strategy_router,
+            "buckets": buckets,
+            "model_routing": model_routing,
+            "affinity": affinity,
+            "catalog_error": catalog_error,
+            "activity": activity,
+            "strategies": strategies,
+            "summary": summary,
+            "failures": failures,
+            "narrative": narrative,
+            "charts": build_report_charts(
+                buckets, model_routing, affinity, activity, strategies, failures,
+            ),
+        }
+
+    def _interpretation_view(task_id: str | None) -> dict[str, Any] | None:
+        """La interpretación pedida para este informe, si se pidió. Solo se
+        acepta una tarea creada para eso (request_id con el prefijo): el
+        parámetro viene en la URL y no puede servir para leer el resultado de
+        cualquier otra tarea del broker."""
+        if not task_id:
+            return None
+        try:
+            task = repository.get_task(task_id)
+        except KeyError:
+            return {"ready": False, "message": "La interpretación pedida ya no existe."}
+        if not (task.request_id or "").startswith(INTERPRETATION_REQUEST_PREFIX):
+            return {"ready": False, "message": "Esa tarea no es una interpretación del informe."}
+        if task.status != TaskStatus.completed:
+            if task.status in TERMINAL_STATUSES:
+                code = (task.error or {}).get("code") or task.status.value
+                return {"ready": False, "message": f"El modelo no pudo escribir la interpretación ({code})."}
+            return {"ready": False, "message": "La interpretación aún no estaba lista al generar el informe."}
+        result = task.result or {}
+        text = str(result.get("assistant_content") or result.get("result_markdown") or "").strip()
+        if not text:
+            return {"ready": False, "message": "El modelo terminó sin escribir texto."}
+        used = result.get("model_used") or {}
+        try:
+            data = repository.get_task_request(task_id).content.prompt or ""
+        except KeyError:
+            data = ""
+        return {
+            "ready": True,
+            "html": interpretation_html(text),
+            "unsupported": unsupported_numbers(text, data) if data else [],
+            "model": f"{used.get('provider', '?')}/{used.get('model', '?')}",
+            "written_at": task.updated_at.astimezone().strftime("%d/%m/%Y %H:%M"),
+        }
+
+    @protected.get("/dashboard/routing/report")
+    async def routing_report(
+        request: Request,
+        download: bool = False,
+        format: Literal["html", "pdf"] = "html",
+        interpretation: str | None = None,
+    ):
+        data = await _routing_report_data()
+        now = datetime.now().astimezone()
+        context = {
+            **data,
+            "interpretation": _interpretation_view(interpretation),
+            "generated_at_label": now.strftime("%d/%m/%Y %H:%M"),
+        }
+        if format == "pdf":
+            html = templates.get_template("routing_report.html").render(
+                {**context, "downloaded": True, "script_nonce": "", "pdf": True},
+            )
+            try:
+                pdf = await run_in_threadpool(render_pdf, html)
+            except PdfUnavailable as error:
+                logger.warning("routing_report.pdf_unavailable", extra={"error": str(error)})
+                return PlainTextResponse(f"No se ha podido generar el PDF: {error}", status_code=503)
+            filename = f"informe-enrutamiento-{now:%Y%m%d-%H%M}.pdf"
+            return Response(
+                pdf, media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        # Nonce propio: la CSP global prohíbe scripts en línea y el informe
+        # necesita uno (el botón de imprimir) sin depender de /static, porque el
+        # fichero descargado se abre sin el broker.
+        nonce = secrets.token_urlsafe(16)
+        response = _template_response(
+            request, "routing_report.html",
+            {**context, "downloaded": download, "script_nonce": nonce, "pdf": False},
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; "
+            f"script-src 'nonce-{nonce}'; "
+            "style-src 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "base-uri 'none'; "
+            "form-action 'none'; "
+            "frame-ancestors 'none'"
+        )
+        if download:
+            filename = f"informe-enrutamiento-{now:%Y%m%d-%H%M}.html"
+            response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    @protected.post("/dashboard/routing/report/interpretation")
+    async def request_routing_interpretation(request: Request):
+        """Encola la interpretación con IA. Va por la cola normal del broker
+        (con prioridad alta) y no en línea con la petición HTTP: un modelo
+        local puede tardar minutos y el navegador no tiene por qué esperar
+        con la conexión abierta."""
+        _verify_dashboard_mutation(request)
+        data = await _routing_report_data()
+        prompt = interpretation_prompt(
+            summary=data["summary"], narrative=data["narrative"],
+            model_routing=data["model_routing"], failures=data["failures"],
+            strategies=data["strategies"],
+        )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + f".{secrets.token_hex(3)}"
+        payload = TaskCreateRequest.model_validate(interpretation_request_payload(
+            prompt, stamp=stamp, timeout_seconds=config.processing.default_task_timeout_seconds,
+        ))
+        try:
+            task, created = repository.create_task(
+                payload,
+                queue_max_size=config.processing.queue_max_size,
+                kind=lane_for_request(payload, embedding_lane=config.processing.embedding_lane.enabled),
+            )
+        except QueueFull:
+            return JSONResponse({"error": "La cola del broker está llena; prueba más tarde."}, status_code=503)
+        if created:
+            coordinator.initialize_run(task.task_id, payload)
+        return JSONResponse({"task_id": task.task_id})
+
+    @protected.get("/dashboard/routing/report/interpretation/{task_id}")
+    async def routing_interpretation_status(task_id: str):
+        try:
+            task = repository.get_task(task_id)
+        except KeyError:
+            return JSONResponse({"error": "La tarea no existe."}, status_code=404)
+        if not (task.request_id or "").startswith(INTERPRETATION_REQUEST_PREFIX):
+            return JSONResponse({"error": "Esa tarea no es una interpretación del informe."}, status_code=404)
+        done = task.status in TERMINAL_STATUSES
+        error = None
+        if done and task.status != TaskStatus.completed:
+            error = (task.error or {}).get("message") or (task.error or {}).get("code") or task.status.value
+        position = None
+        if task.status == TaskStatus.queued:
+            row = repository.db.query_one(
+                "SELECT COUNT(*) AS n FROM tasks WHERE status = 'queued' AND kind = ? "
+                "AND (queue_position < (SELECT queue_position FROM tasks WHERE id = ?))",
+                (task.kind.value, task_id),
+            )
+            position = int(row["n"]) if row is not None else None
+        return JSONResponse({
+            "status": task.status.value,
+            "done": done,
+            "ok": task.status == TaskStatus.completed,
+            "error": error,
+            "ahead": position,
+        })
 
     def _file_views() -> list[dict[str, Any]]:
         if ingestion is None:
@@ -1462,11 +1667,21 @@ def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[
     insights: list[dict[str, Any]] = []
     for bucket in repository.routing_case_buckets():
         cases = repository.routing_cases_for_bucket(bucket["signal_bucket"])
+        heuristic = heuristic_for_bucket(bucket["signal_bucket"])
+        # La huella del bucket no incluye la clasificación de datos, y bajo
+        # `confidential`/`local_only` el clasificador rebaja `agent` (ver
+        # strategy_router.classify_request). Por eso la heurística recalculada
+        # aquí puede no ser la que corrió: se toma como punto de partida la
+        # elegida de verdad en los casos recientes, que es la que el aprendizaje
+        # compara en ejecución, y se dice cuando no coinciden.
+        chosen_counts: dict[str, int] = {}
+        for case in cases:
+            chosen_counts[case["chosen_strategy"]] = chosen_counts.get(case["chosen_strategy"], 0) + 1
+        chosen = max(chosen_counts, key=lambda name: chosen_counts[name]) if chosen_counts else heuristic
         recommendation = None
         if cases:
-            heuristic = heuristic_for_bucket(bucket["signal_bucket"])
             rec = recommend_from_cases(
-                heuristic, cases,
+                chosen, cases,
                 min_cases=router.learning_min_cases,
                 escalation_threshold=router.learning_escalation_threshold,
                 failure_threshold=router.learning_failure_threshold,
@@ -1486,7 +1701,9 @@ def _routing_insights(repository: TaskRepository, config: BrokerConfig) -> list[
         ]
         insights.append({
             "label": describe_bucket(bucket["signal_bucket"]),
-            "heuristic": heuristic_for_bucket(bucket["signal_bucket"]),
+            "heuristic": chosen,
+            "nominal_heuristic": heuristic,
+            "heuristic_overridden": chosen != heuristic,
             "total": bucket["total"],
             "escalation_rate": round(escalation_rate * 100),
             "single_chosen": bucket["single_chosen"],
@@ -1526,6 +1743,11 @@ def _model_routing_insights(repository: TaskRepository, config: BrokerConfig) ->
             "deployment": deployment,
             "model": model,
             "attempts": stat.attempts,
+            "successes": stat.successes,
+            # Lo que se enseña es la tasa observada. La suavizada (Laplace,
+            # (aciertos+1)/(intentos+2)) es la que usa el router y con pocos
+            # casos se aleja mucho: 1 de 1 sale 67 %, 3 de 3 sale 80 %.
+            "observed_rate": round(stat.successes / stat.attempts * 100) if stat.attempts else None,
             "success_rate": round(stat.success_rate * 100),
             "avg_latency_ms": round(stat.avg_latency_ms) if stat.avg_latency_ms is not None else None,
             "avg_cost_usd": stat.avg_cost_usd,

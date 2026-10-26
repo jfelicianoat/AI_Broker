@@ -93,6 +93,38 @@ _SIGNATURES: tuple[tuple[re.Pattern[str], Diagnosis], ...] = (
         ),
     ),
     (
+        # Ollama cuando el llama-server del modelo no llega a arrancar a
+        # tiempo (task_7ef46572…, 2026-10-24): suele coincidir con otra carga
+        # en curso o con un runtime recién reiniciado, y al rato arranca.
+        re.compile(r"timed out waiting for llama-server to start", re.I),
+        Diagnosis(
+            "MODEL_LOAD_TIMEOUT",
+            "el motor del modelo no terminó de arrancar a tiempo.",
+            "No es un fallo del prompt ni del modelo: el runtime estaba ocupado o "
+            "reiniciándose. El broker reintenta la tarea; si se repite, revisa el log "
+            "del proveedor.",
+            retryable=True,
+        ),
+    ),
+    (
+        # Agregadores que anuncian un modelo en /models y luego no lo sirven:
+        # HCNSEC listaba DeepSeek-V4-Pro y lo desviaba a otro que respondía
+        # 400 «Requested model … not supported» (task_4389236e…, 2026-10-25).
+        # Como MODEL_UNAVAILABLE entra en la cuarentena (definitive_codes) y
+        # deja de ofrecerse; como MODEL_ERROR se habría seguido eligiendo.
+        re.compile(
+            r"requested model .* not supported|model[_ ]not[_ ]found|"
+            r"model .* does not exist|unknown model|no such model",
+            re.I,
+        ),
+        Diagnosis(
+            "MODEL_UNAVAILABLE",
+            "el proveedor anuncia este modelo pero no lo sirve.",
+            "Es un fallo del catálogo del proveedor, no de la petición. El broker lo "
+            "aparta tras dos fallos seguidos; si persiste, exclúyelo con sync_exclude.",
+        ),
+    ),
+    (
         re.compile(r"Model is unloaded|model not loaded", re.I),
         Diagnosis(
             "MODEL_NOT_LOADED",

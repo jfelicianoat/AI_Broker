@@ -167,6 +167,7 @@ El motor de la cola y la memoria de los modelos locales.
 | `task_timeout_seconds` | `3000` | 1–86400 | **Techo** del plazo de una tarea: ninguna pasa de aquí, pida lo que pida. Por encima de `default_task_timeout_seconds` a propósito — por debajo lo dejaría de adorno |
 | `default_task_timeout_seconds` | `2400` | 1–86400 | Plazo que se le pone a la petición que no trae `execution.timeout_seconds`. El plazo efectivo es el **menor** de este y `task_timeout_seconds`: subir uno solo no cambia nada. 2400 y no 600 porque un modelo local grande paga la carga desde disco dentro de su primera invocación |
 | `max_task_attempts` | `3` | 1–100 | Intentos antes de `TASK_RETRY_LIMIT_EXCEEDED`. Cada arranque devuelve a `queued` las tareas que estaban activas, con `attempt+1` |
+| `outage_retry_seconds` | `60.0` | 1–3600 | Espera antes de reintentar una tarea que cayó con su proveedor (`PROVIDER_UNAVAILABLE`, `PROVIDER_ENGINE_CRASHED`, `MODEL_LOAD_TIMEOUT`, `MODEL_NOT_LOADED`, `MODEL_UNAVAILABLE`, `RATE_LIMITED`, siempre con `retryable=true`). Crece con el intento (×1, ×2…) y comparte el tope de `max_task_attempts`. No reintenta si la tarea ya completó alguna llamada remota |
 | `unload_after_task` | `true` | | Descargar los modelos locales al terminar cada tarea |
 | `idle_unload_seconds` | `0.0` | 0–86400 | Segundos de broker parado tras los que se descargan los modelos locales. `0` = nunca |
 | `auto_dispatch` | `true` | | Dispatcher autónomo. Con `false` solo avanza con `POST /api/v1/dispatcher/tick` |
@@ -341,6 +342,8 @@ elegibilidad. No cambia quién es elegible, solo a quién se prefiere.
 | `stats_window_days` | `7` | 1–365 | Ventana de histórico: las invocaciones más antiguas no pesan |
 | `min_invocations` | `3` | ≥1 | Por debajo de esto el modelo puntúa neutro. Un modelo recién añadido no queda castigado por no tener historia |
 | `exploration_rate` | `0.0` | 0–1 | Probabilidad de ascender a otro candidato a la primera posición. Sin esto, el que gana en cuanto supera `min_invocations` se autorrefuerza: solo él acumula invocaciones, así que ningún otro alcanza evidencia para competir. La exploración prioriza a los que aún no llegan a `min_invocations` en ese tipo de tarea |
+| `prefer_cloud_when_allowed` | `true` | — | Con `cloud_allowed` (clasificación `public`/`internal`), los modelos servidos por una máquina ajena van delante de todos los locales. Un proveedor con URL de loopback (unsloth, lemonade) no cuenta como cloud aunque su `deployment` lo diga |
+| `cloud_exploration_rate` | `0.5` | 0–1 | Dentro del bloque cloud, probabilidad de dar la tarea a un cloud con poca evidencia en vez de al más rápido medido: reparte la carga y va midiendo el catálogo |
 
 El ranking estima **tiempo esperado hasta una respuesta correcta**, en segundos,
 no una puntuación sin unidades — de ahí que los pesos `success_weight`,
@@ -364,6 +367,7 @@ modelo que falla **rápido y siempre** puede seguir puntuando bien.
 | `role_max_failure_rate` | `0.3` | >0, ≤1 | Aptitud por rol de consenso: fracción de fallos definitivos como proponente (o como árbitro) a partir de la cual el modelo deja de elegirse para ESE rol. Sigue en `single`. `1.0` = desactivado |
 | `role_min_attempts` | `5` | 1–1000 | Invocaciones mínimas en el rol, dentro de la ventana, para aplicar la regla |
 | `role_window_hours` | `168.0` | >0, ≤8760 | Ventana de la aptitud por rol (7 días) |
+| `arbiter_proven_attempts` | `3` | 1–1000 | Arbitrajes en un tipo de tarea, dentro de la ventana, para que el historial de un modelo como árbitro cuente como probado. Por debajo, solo pasa delante de los probados en las tareas que toca explorar (`routing.exploration_rate`) |
 
 Por defecto: `INVALID_PROVIDER_RESPONSE`, `PROMPT_ECHOED`, `DEGENERATE_OUTPUT`,
 `MODEL_COMPATIBILITY_MISMATCH`, `MODEL_UNAVAILABLE`,
@@ -469,14 +473,21 @@ proveedor caído no impide aceptar trabajo en cola.
 
 ## `logging`
 
-Requiere reiniciar para aplicar.
+Guardado desde el panel (Configuración → Registro) se aplica al momento: se reinstalan
+los handlers y se poda en ese instante. Editado a mano en el YAML, al reiniciar.
+
+Un fichero por día con la fecha local en el nombre: `logs/ai-broker-2026-10-25.log`. La poda
+corre al arrancar, al guardar la sección y en cada rotación, y también alcanza a los
+ficheros del esquema anterior (`ai-broker.log`, `ai-broker.log.N`), juzgados por su fecha
+de modificación.
 
 | Clave | Defecto | Qué hace |
 |---|---|---|
 | `level` | `INFO` | |
-| `directory` / `filename` | `logs` / `ai-broker.log` | |
-| `max_bytes` | `10485760` | Rotación por tamaño |
-| `backup_count` | `5` | Ficheros rotados que se conservan (1–100) |
+| `directory` / `filename` | `logs` / `ai-broker.log` | `filename` es el nombre base: se escribe `ai-broker-AAAA-MM-DD.log` |
+| `max_bytes` | `10485760` | Tope de cada fichero dentro de un día; al pasarlo sigue en `.1`, `.2`… (0 = sin tope) |
+| `keep_forever` | `false` | `true` = no se borra ningún log |
+| `retention_days` | `30` | Con `keep_forever: false`, se borran los logs de hace más de N días (1–36500) |
 | `console_enabled` | `true` | |
 
 Formato JSON Lines. El access log registra método, ruta, código, duración y
@@ -535,8 +546,8 @@ usar los nombres reservados `ollama`, `deepseek` ni `bootstrap`.
 | `sync_exclude` | `[]` | Patrones fnmatch que apartan del catálogo. Se aplica después de `sync_include` y manda sobre él |
 | `catalog_cache_seconds` | `5.0` | |
 | `default_context_window` | `128000` | Ventana que se asume para un modelo descubierto sin declarar |
-| `jit_context_window` | `null` | Contexto con el que el servidor carga un modelo bajo demanda, si es menor que el declarado. LM Studio carga con su `defaultContextLength` (8192 en el PC de IA) y rechaza con 400 lo que no quepa; con este valor el broker no le manda textos que no le caben. Fuente en el catálogo: `jit_default` |
-| `lmstudio_loaded_context` | `false` | Lee de la API nativa de LM Studio (`/api/v0/models`) el `loaded_context_length` de cada modelo cargado y lo usa como su contexto, por encima de lo declarado y de `jit_context_window`. Fuente: `loaded`. Si la API no contesta, manda lo demás |
+| `jit_context_window` | `null` | Contexto con el que el servidor carga un modelo bajo demanda, si es menor que el declarado. LM Studio carga con su `defaultContextLength` y rechaza con 400 lo que no quepa; con este valor el broker no le manda textos que no le caben. Debe coincidir con ese ajuste de LM Studio: en el PC de IA ambos pasaron de 8192 a 32768 el 2026-10-26, porque con 8k el tope de salida se recortaba hasta dejar respuestas cortadas. Fuente en el catálogo: `jit_default`. El router prefiere, además, modelos que puedan escribir al menos la mitad del `max_output_tokens` pedido |
+| `lmstudio_loaded_context` | `false` | Lee de la API nativa de LM Studio (`/api/v0/models`) el `loaded_context_length` de cada modelo cargado y lo usa como su contexto, por encima de lo declarado y de `jit_context_window`. Fuente: `loaded`. De los no cargados lee `max_context_length`, que acota lo anterior: LM Studio no carga un modelo por encima de su máximo. Fuente: `model_max`. Si la API no contesta, manda lo demás |
 | `probe_max_output_tokens` | `1` | Tokens de cada petición de sondeo (1–1024) |
 | `probe_delay_seconds` | `1.0` | Pausa entre sondeos, para no golpear el endpoint (0–60) |
 | `probe_max_models` | `50` | Modelos por tanda de sondeo (1–1000). Se respeta tal cual: si el catálogo tiene más modelos sin analizar, el panel avisa de cuántos quedan para la siguiente tanda |
