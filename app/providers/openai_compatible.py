@@ -37,6 +37,7 @@ from app.providers.base import (
     numeric_vector,
     probe_rate_limit_streak_limit,
     provider_error_from_http,
+    provider_error_from_transport,
     rate_limited_error,
     request_with_context_capped_output,
     rescued_content,
@@ -729,7 +730,9 @@ class OpenAICompatibleProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider=self.config.id, timeout_seconds=self.config.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         data = payload.get("data") or []
@@ -789,7 +792,9 @@ class OpenAICompatibleProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider=self.config.id, timeout_seconds=self.config.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         data = [item for item in payload.get("data") or [] if isinstance(item, dict)]
@@ -849,7 +854,9 @@ class OpenAICompatibleProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider=self.config.id, timeout_seconds=self.config.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         choices = payload.get("choices") or []
@@ -943,7 +950,9 @@ class OpenAICompatibleProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider=self.config.id, timeout_seconds=self.config.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider=self.config.id, model=model) from error
         choices = payload.get("choices") or []

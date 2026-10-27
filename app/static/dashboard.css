@@ -46,6 +46,22 @@
   --info-line: #244b6d;
   --info-ink: #9fc9f0;
 
+  /* Identidad de carril: por qué cola pasó una tarea. No es estado ni traza,
+     por eso tiene tonos propios lejos de verde/ámbar/rojo/azul/teal. Solo
+     aparece como marca de 3px y como chip con su nombre (Doble Señal). */
+  --lane-local: #a993f5;
+  --lane-local-fill: #18142e;
+  --lane-local-line: #4b3f86;
+  --lane-local-ink: #cfc3ff;
+  --lane-cloud: #ee8cc6;
+  --lane-cloud-fill: #27121f;
+  --lane-cloud-line: #6c3256;
+  --lane-cloud-ink: #ffbde2;
+  --lane-embedding: #c2cf5a;
+  --lane-embedding-fill: #1b1f0c;
+  --lane-embedding-line: #565f22;
+  --lane-embedding-ink: #e0e99c;
+
   /* Translúcidos: la barra fija deja entrever el contenido que pasa por
      debajo; el velo del modal oscurece por debajo del fondo del mundo. */
   --topbar-bg: rgba(7, 17, 29, .96);
@@ -111,8 +127,8 @@ a { color: inherit; }
 
 .main-grid { margin-top: 14px; display: grid; grid-template-columns: minmax(560px, 1.55fr) minmax(330px, .95fr); gap: 14px; align-items: start; }
 .main-grid .active-panel { grid-column: 1; grid-row: 1; }
-.main-grid .queue-preview-panel { grid-column: 2; grid-row: 1; }
-.main-grid .health-panel { grid-column: 1; grid-row: 2; }
+.lanes-section { margin-top: 14px; }
+.main-grid .health-panel { grid-column: 2; grid-row: 1; }
 .main-grid .resources-panel { grid-column: 2; grid-row: 2; }
 .tasks-stack { display: grid; gap: 14px; }
 .queue-preview-list { display: grid; }
@@ -752,3 +768,43 @@ label.field-flagged { color: var(--red-ink); font-weight: 600; }
 .embedding-lane-subtitle { margin: 0; padding: 12px 16px 4px; font-size: var(--text-body); font-weight: 600; border-top: 1px solid var(--border-soft); }
 .embedding-lane-panel .embedding-lane-running { grid-template-columns: auto minmax(0, 1fr); }
 .embedding-lane-dim { color: var(--text-4); }
+
+/* ── Carriles ────────────────────────────────────────────────────────────
+   Cada clase lane-* fija las cuatro variables y los componentes de abajo las
+   usan sin saber de qué carril se trata. Conversiones va en neutro: no es una
+   cola de modelos y no compite por la atención con las otras tres. */
+.lane-inference { --lane: var(--lane-local); --lane-fill: var(--lane-local-fill); --lane-line: var(--lane-local-line); --lane-ink: var(--lane-local-ink); }
+.lane-cloud { --lane: var(--lane-cloud); --lane-fill: var(--lane-cloud-fill); --lane-line: var(--lane-cloud-line); --lane-ink: var(--lane-cloud-ink); }
+.lane-embedding { --lane: var(--lane-embedding); --lane-fill: var(--lane-embedding-fill); --lane-line: var(--lane-embedding-line); --lane-ink: var(--lane-embedding-ink); }
+.lane-ingestion { --lane: var(--muted-line); --lane-fill: var(--raised); --lane-line: var(--muted-line); --lane-ink: var(--text-3); }
+
+/* Llamada remota de una tarea de la cola local: con los colores de la cola
+   cloud, que es lo que es aunque ocupe el turno local. */
+.lane-remote-tag { border: 1px solid var(--lane-cloud-line); background: var(--lane-cloud-fill); color: var(--lane-cloud-ink); }
+.lane-chip { display: inline-flex; align-items: center; min-height: 23px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--lane-line); background: var(--lane-fill); color: var(--lane-ink); font-size: var(--text-label); font-weight: 650; white-space: nowrap; }
+tr.lane-row > td:first-child { border-left: 3px solid var(--lane); }
+
+.lanes-panel { grid-column: 1 / -1; }
+.lanes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+.lane-column { min-width: 0; border-left: 3px solid var(--lane); border-right: 1px solid var(--border-soft); display: flex; flex-direction: column; }
+.lane-column:last-child { border-right: 0; }
+.lane-head { padding: 14px 16px 12px; display: grid; gap: 6px; border-bottom: 1px solid var(--border-soft); }
+.lane-name { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.lane-name h3 { margin: 0; font-size: var(--text-title); font-weight: 680; }
+.lane-counts { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: var(--text-read); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.lane-counts strong { color: var(--text); font-size: var(--text-headline); font-weight: 720; letter-spacing: -.02em; }
+.lane-note { margin: 0; font-size: var(--text-body); color: var(--muted); }
+.lane-note.attention { color: var(--amber-ink); }
+.lane-section-title { margin: 0; padding: 10px 16px 4px; font-size: var(--text-title-sm); font-weight: 650; color: var(--text-4); }
+.lane-list { list-style: none; margin: 0; padding: 0; }
+.lane-item { padding: 9px 16px; border-bottom: 1px solid var(--border-soft); display: grid; gap: 3px; font-size: var(--text-read); }
+.lane-item:last-child { border-bottom: 0; }
+.lane-item-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.lane-item-top .task-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-item-meta { color: var(--text-4); font-size: var(--text-title-sm); overflow-wrap: anywhere; }
+.lane-item-meta .lane-seconds { font-variant-numeric: tabular-nums; color: var(--text-2); white-space: nowrap; }
+.lane-empty { padding: 10px 16px 14px; color: var(--muted); font-size: var(--text-body); }
+.lane-more { padding: 8px 16px 12px; color: var(--text-4); font-size: var(--text-body); }
+@media (max-width: 700px) {
+  .lane-column { border-right: 0; border-bottom: 1px solid var(--border); }
+}

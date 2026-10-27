@@ -6,6 +6,7 @@ import hashlib
 import logging
 import re
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ from app.providers.base import (
     with_images_reattached,
     with_output_language,
 )
+from app.providers.routing import remote_only_scope
 from app.repository import _utc_now_iso
 from app.resource_scheduler import (
     ModelFootprint,
@@ -46,6 +48,7 @@ from app.schemas import (
     SchedulingPolicy,
     SelectionMode,
     TaskCreateRequest,
+    TaskKind,
     TaskStatus,
     is_local_deployment,
     run_code_available,
@@ -491,15 +494,18 @@ class ConsensusCoordinator:
             return True
 
     async def process_task(self, repository, task_id: str) -> None:
+        cloud_lane = repository.get_task_kind(task_id) == TaskKind.cloud
         # Primero de todo: echar de la máquina a los sondeos en sombra. Son
         # trabajo opcional y su modelo puede estar ocupando la VRAM que esta
-        # tarea necesita, con un lease que impide desalojarlo.
-        try:
-            await self.shadow_probe.yield_to_real_work()
-        except Exception:  # noqa: BLE001 - ceder es best-effort, nunca bloquea
-            logger.warning("shadow_probe.preempt_failed", extra={
-                "event": "shadow_probe.preempt_failed", "task_id": task_id,
-            })
+        # tarea necesita, con un lease que impide desalojarlo. Una tarea del
+        # carril cloud no necesita VRAM: echarlos sería tirar su medida.
+        if not cloud_lane:
+            try:
+                await self.shadow_probe.yield_to_real_work()
+            except Exception:  # noqa: BLE001 - ceder es best-effort, nunca bloquea
+                logger.warning("shadow_probe.preempt_failed", extra={
+                    "event": "shadow_probe.preempt_failed", "task_id": task_id,
+                })
         request = repository.get_task_request(task_id)
         # Antes de gastar nada: si la tarea declara dependencias y siguen sin
         # cumplirse, vuelve a la cola sin haber tocado un modelo.
@@ -540,7 +546,9 @@ class ConsensusCoordinator:
         try:
             # Desde 3.12 wait_for corre en esta misma tarea: el ámbito se
             # restaura al salir para que no se cuele en la siguiente.
-            with task_type_scope(classify_task_type(request)):
+            with task_type_scope(classify_task_type(request)), (
+                remote_only_scope() if cloud_lane else nullcontext()
+            ):
                 await asyncio.wait_for(
                     self._process_task_request(repository, task_id, request),
                     timeout=effective_timeout,
@@ -595,6 +603,8 @@ class ConsensusCoordinator:
         except ProviderError as error:
             if repository.is_cancel_requested(task_id):
                 repository.update_task(task_id, TaskStatus.cancelled, clear_queue_position=True)
+                return
+            if cloud_lane and self._demote_from_cloud_lane(repository, task_id, error):
                 return
             if error.code in {"VRAM_INSUFFICIENT", "LOCAL_MODEL_SLOTS_BUSY"}:
                 # No cabe AHORA, pero cabría en la máquina vacía: no es un
@@ -678,6 +688,35 @@ class ConsensusCoordinator:
                     self.shadow_probe.schedule(repository, task_id, request)
             except Exception:
                 logger.warning("shadow_probe.schedule_failed", extra={"task_id": task_id})
+
+    def _demote_from_cloud_lane(self, repository, task_id: str, error: ProviderError) -> bool:
+        """True si la tarea pasa a la cola local porque ningún remoto la atendió.
+
+        Antes del carril cloud, «cloud primero» dejaba los locales como relevo
+        dentro de la misma lista. Aquí el relevo es la cola local entera: la
+        tarea no puede caer a un local sin pedir el turno de la GPU.
+
+        Lo que un local tampoco arreglaría falla aquí, como antes: el
+        presupuesto agotado sigue agotado y una cancelación es una orden.
+        Las invocaciones remotas fallidas ya están registradas, así que el
+        ranking aprende de ellas igual que si la tarea hubiera fallado.
+        """
+        if error.code in {"TASK_CANCELLED", "BUDGET_EXCEEDED"}:
+            return False
+        try:
+            demoted = repository.demote_to_inference_lane(
+                task_id, {"code": error.code, "message": str(error)},
+            )
+        except Exception:  # noqa: BLE001 - si no se puede bajar, falla como antes
+            logger.warning("task.lane_demote_failed", exc_info=True, extra={
+                "event": "task.lane_demote_failed", "task_id": task_id,
+            })
+            return False
+        if demoted:
+            logger.warning("task.lane_demoted", extra={
+                "event": "task.lane_demoted", "task_id": task_id, "code": error.code,
+            })
+        return demoted
 
     def _retry_after_outage(self, repository, task_id: str, error: ProviderError) -> bool:
         """True si la tarea vuelve a la cola porque cayó el proveedor, no ella."""
@@ -988,6 +1027,8 @@ class ConsensusCoordinator:
         )
         # Un blip transitorio del provider (429/5xx) no debe tirar la tarea:
         # el campo retryable del error deja de ser una promesa vacía al cliente.
+        # El plazo agotado NO es un blip: se pasa al siguiente candidato (ver
+        # provider_error_from_transport).
         retry_delays = (0.5, 1.0)
         output: ModelOutput | None = None
         invocation_id: str | None = None
@@ -1015,6 +1056,7 @@ class ConsensusCoordinator:
                 if (
                     not error.retryable
                     or error.code == "TASK_CANCELLED"
+                    or error.details.get("timed_out")
                     or attempt_index >= len(retry_delays)
                     or repository.is_cancel_requested(task_id)
                 ):

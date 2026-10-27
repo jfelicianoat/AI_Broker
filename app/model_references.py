@@ -7,10 +7,13 @@ falla en la siguiente tarea que la use, y borrar el único modelo con cierta
 capacidad deja al broker sin poder atender esa clase de peticiones.
 
 Módulo sin efectos ni dependencias de red: recibe la configuración y el
-catálogo, y devuelve avisos en texto.
+catálogo, y devuelve avisos en texto. La única lectura es el tamaño de algún
+blob en disco, en `deletion_footprint`.
 """
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import BrokerConfig
@@ -102,3 +105,63 @@ def _capabilities_lost(
                 "las tareas que la necesiten no tendrán dónde ejecutarse en esta máquina"
             )
     return lost
+
+
+@dataclass(frozen=True)
+class DeletionFootprint:
+    """Lo que de verdad libera borrar un modelo.
+
+    `freed_bytes` es None cuando no se puede saber: sin la lista de ficheros
+    del modelo, o cuando comparte parte de ellos y los que no comparte no se
+    pueden medir desde aquí. Mejor no dar cifra que dar una inventada."""
+
+    freed_bytes: int | None
+    shared_with: tuple[str, ...]
+
+
+def deletion_footprint(
+    catalog: list[dict[str, Any]],
+    provider_id: str,
+    model_name: str,
+) -> DeletionFootprint:
+    """Espacio que libera borrar este modelo y con quién comparte ficheros.
+
+    Ollama guarda cada modelo como un manifiesto que apunta a blobs, y varios
+    modelos pueden apuntar a los mismos: un alias (`x:latest` y `x:30b`) o un
+    modelo creado desde otro con distinto system prompt. Al borrar, Ollama solo
+    quita los blobs que nadie más usa, así que el tamaño del modelo no es lo
+    que se libera: con un alias no se libera nada.
+
+    `blobs` son las rutas de los ficheros grandes (pesos, proyector) que da
+    `/api/show`. Solo cuando la coincidencia es parcial hay que medir los
+    ficheros propios en disco, y eso solo funciona si Ollama corre en esta
+    misma máquina."""
+    provider = provider_id.lower()
+    local = [
+        item for item in catalog
+        if str(item.get("provider") or "").lower() == provider
+        and is_local_deployment(item.get("deployment"))
+    ]
+    entry = next((item for item in local if item.get("name") == model_name), None)
+    mine = set((entry or {}).get("blobs") or [])
+    if entry is None or not mine:
+        return DeletionFootprint(freed_bytes=None, shared_with=())
+    shared_with: list[str] = []
+    used_by_others: set[str] = set()
+    for item in local:
+        if item.get("name") == model_name:
+            continue
+        theirs = mine & set(item.get("blobs") or [])
+        if theirs:
+            shared_with.append(str(item.get("name")))
+            used_by_others |= theirs
+    if not shared_with:
+        return DeletionFootprint(freed_bytes=int(entry.get("size_bytes") or 0), shared_with=())
+    own = mine - used_by_others
+    if not own:
+        return DeletionFootprint(freed_bytes=0, shared_with=tuple(sorted(shared_with)))
+    try:
+        freed: int | None = sum(os.path.getsize(path) for path in own)
+    except OSError:
+        freed = None
+    return DeletionFootprint(freed_bytes=freed, shared_with=tuple(sorted(shared_with)))

@@ -7,7 +7,7 @@
   <div class="panel-heading" id="cola">
     <div>
       <h2>Cola de tareas</h2>
-      <p>{{ queue.total }} pendientes - se muestran hasta {{ queue.page_size }}</p>
+      <p>{{ queue.total }} pendientes en todos los carriles - se muestran hasta {{ queue.page_size }}. La posición ordena dentro de cada carril.</p>
     </div>
     <button class="button secondary compact" type="button" data-refresh-target="#queue-panel">Actualizar</button>
   </div>
@@ -54,7 +54,7 @@
       </thead>
       <tbody>
       {% for task in queue.items %}
-        <tr data-queue-row="{{ task.task_id }}">
+        <tr class="lane-row lane-{{ task.kind.value }}" data-queue-row="{{ task.task_id }}">
           <td class="select-cell">
             <input type="checkbox" data-queue-select value="{{ task.task_id }}"
                    aria-label="Seleccionar tarea {{ task.task_id }}">
@@ -62,7 +62,7 @@
           <td class="position">{{ task.queue_position or '-' }}</td>
           <td>
             <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
-            <small>{{ task.kind|lane_label }} · {{ task.origin or 'api' }}</small>
+            <small><span class="lane-chip">{{ task.kind|lane_label }}</span> · {{ task.origin or 'api' }}</small>
           </td>
           <td>
             {# Una conversión no tiene modelo ni estrategia: lo que identifica

@@ -59,6 +59,7 @@ AUTHENTICATED_ROUTES = {
     ("POST", "/api/v1/dispatcher/tick"),
     ("POST", "/api/v1/dispatcher/ingestion/tick"),
     ("POST", "/api/v1/dispatcher/embedding/tick"),
+    ("POST", "/api/v1/dispatcher/cloud/tick"),
     ("GET", "/api/v1/usage"),
     ("GET", "/api/v1/dashboard/summary"),
     ("GET", "/api/v1/dashboard/tasks"),

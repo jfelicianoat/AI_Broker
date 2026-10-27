@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app import execution_fingerprint, invocation_context
 from app.artifacts import ArtifactRecord
+from app.config import BrokerConfig, cloud_lane_providers
 from app.db import Database, dumps_json, loads_json
 from app.providers import ModelOutput, ProviderError
 from app.schemas import (
@@ -107,13 +108,53 @@ def _make_room_in_queue(
     return position
 
 
-def lane_for_request(request: TaskCreateRequest, *, embedding_lane: bool) -> TaskKind:
+def lane_for_request(
+    request: TaskCreateRequest, *, embedding_lane: bool,
+    cloud_providers: frozenset[str] | None = None,
+) -> TaskKind:
     """Carril en el que se encola una petición. Fuente única para la API y el
     probador del panel: si discreparan, la misma petición correría en carriles
-    distintos según por dónde entrase."""
-    if embedding_lane and request.inference_kind == InferenceKind.embedding:
-        return TaskKind.embedding
+    distintos según por dónde entrase.
+
+    `cloud_providers` es `app.config.cloud_lane_providers`: None con el carril
+    cloud apagado. Van al carril cloud las single y las auto de chat que pueden
+    ir a la nube y tienen algún proveedor remoto entre los permitidos; con
+    «cloud primero» es justo lo que el ranking iba a probar primero. Un
+    target_model se queda en inferencia: elegir carril por él obligaría a saber
+    dónde corre antes de mirar el catálogo, y lo pedido no se cambia de sitio.
+
+    Las auto entran aunque el router acabe eligiendo agente o consenso: dentro
+    del carril cloud toda elección de modelo (proponentes, árbitro, escalado)
+    pasa por remote_only_scope, y si los remotos no bastan la tarea baja a la
+    cola local. Antes iban siempre a la local, donde ocupaban el único turno
+    con la GPU ociosa mientras proponían modelos remotos (2026-10-27). Las que
+    piden agente o consenso de forma explícita se quedan en la local: ahí la
+    mezcla con modelos locales es lo pedido, no un accidente del router.
+    """
+    if request.inference_kind == InferenceKind.embedding:
+        return TaskKind.embedding if embedding_lane else TaskKind.inference
+    requirements = request.model_requirements
+    if (
+        cloud_providers
+        and request.execution.strategy in {ExecutionStrategy.single, ExecutionStrategy.auto}
+        and requirements.cloud_allowed is True
+        and requirements.target_model is None
+        and (
+            requirements.allowed_providers is None
+            or any(item.lower() in cloud_providers for item in requirements.allowed_providers)
+        )
+    ):
+        return TaskKind.cloud
     return TaskKind.inference
+
+
+def request_lane(request: TaskCreateRequest, config: BrokerConfig) -> TaskKind:
+    """`lane_for_request` con los carriles tal como los dejó la config."""
+    return lane_for_request(
+        request,
+        embedding_lane=config.processing.embedding_lane.enabled,
+        cloud_providers=cloud_lane_providers(config),
+    )
 
 
 class IdempotencyConflict(ValueError):
@@ -344,14 +385,28 @@ class TaskRepository:
     def claim_next_embedding_task(self, max_parallel: int) -> str | None:
         """Reclama un embedding si su carril tiene sitio.
 
+        Sin reserva anti-inanición: aquí todos piden el mismo modelo pequeño,
+        y nadie se queda sin turno por tamaño."""
+        return self.claim_next_lane_task(TaskKind.embedding, max_parallel)
+
+    def claim_next_cloud_task(self, max_parallel: int) -> str | None:
+        """Reclama una tarea del carril cloud si tiene sitio.
+
+        Sin reserva anti-inanición por memoria: nada de aquí ocupa memoria
+        local, así que nadie espera por tamaño."""
+        return self.claim_next_lane_task(TaskKind.cloud, max_parallel)
+
+    def claim_next_lane_task(self, kind: TaskKind, max_parallel: int) -> str | None:
+        """Reclama una tarea de un carril con concurrencia propia.
+
         Mismo orden que la inferencia —`queue_position`, que ya refleja la
         prioridad al encolar— y la misma regla de `not_before` para lo que
-        espera memoria o dependencias. Sin reserva anti-inanición: aquí todos
-        piden el mismo modelo pequeño, y nadie se queda sin turno por tamaño.
+        espera memoria o dependencias.
 
         El conteo de activos y el reclamo van en la misma transacción
         inmediata: dos vueltas del despachador no pueden pasar el mismo hueco.
         """
+        lane = kind.value
         active = ACTIVE_INFERENCE_STATUSES
         marks = ",".join("?" for _ in active)
         claimable = self.CLAIMABLE_INFERENCE_STATUSES
@@ -359,16 +414,16 @@ class TaskRepository:
         now = _utc_now_iso()
         with self.db.transaction() as connection:
             running = connection.execute(
-                f"SELECT COUNT(*) AS total FROM tasks WHERE kind = 'embedding' AND status IN ({marks})",
-                active,
+                f"SELECT COUNT(*) AS total FROM tasks WHERE kind = ? AND status IN ({marks})",
+                (lane, *active),
             ).fetchone()
             if int(running["total"]) >= max_parallel:
                 return None
             row = connection.execute(
                 f"SELECT id, progress_json FROM tasks WHERE status IN ({claim_marks}) "
-                f"AND kind = 'embedding' AND (not_before IS NULL OR not_before <= ?) "
+                f"AND kind = ? AND (not_before IS NULL OR not_before <= ?) "
                 f"ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT 1",
-                (*claimable, now),
+                (*claimable, lane, now),
             ).fetchone()
             if row is None:
                 return None
@@ -384,7 +439,7 @@ class TaskRepository:
                 return None
             connection.execute(
                 "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
-                (row["id"], "task.claimed", dumps_json({"status": "routing", "lane": "embedding"}), now),
+                (row["id"], "task.claimed", dumps_json({"status": "routing", "lane": lane}), now),
             )
             return str(row["id"])
 
@@ -606,6 +661,55 @@ class TaskRepository:
                 (task_id, "task.retry_scheduled", dumps_json(state), now.isoformat()),
             )
             return state
+
+    def demote_to_inference_lane(self, task_id: str, error: dict[str, Any]) -> bool:
+        """Pasa una tarea del carril cloud a la cola local.
+
+        Se usa cuando ningún modelo remoto la atendió. Entra en la cola de
+        inferencia según su prioridad, como si acabara de llegar, y no gasta
+        un intento: el fallo fue de los remotos, y los locales aún no la han
+        visto. El evento lleva el motivo para que el panel diga por qué una
+        tarea cloud acabó en la GPU. False si ya no estaba en el carril cloud
+        (cancelada entre medias, o bajada por otra vuelta).
+        """
+        now = _utc_now_iso()
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                "SELECT kind, priority, created_at, progress_json FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["kind"] != TaskKind.cloud.value:
+                return False
+            position = _make_room_in_queue(
+                connection, int(row["priority"]), str(row["created_at"]),
+                exclude_id=task_id, kind=TaskKind.inference.value,
+            )
+            progress = loads_json(row["progress_json"], {})
+            progress = {
+                "phase": TaskStatus.queued.value,
+                "invocations_completed": 0,
+                "invocations_total": progress.get("invocations_total", 1),
+                "demoted_from_cloud": {"code": error.get("code"), "message": error.get("message")},
+            }
+            cursor = connection.execute(
+                "UPDATE tasks SET kind = ?, status = ?, queue_position = ?, not_before = NULL, "
+                "progress_json = ?, error_json = NULL, updated_at = ? WHERE id = ? AND kind = ?",
+                (
+                    TaskKind.inference.value, TaskStatus.queued.value, position,
+                    dumps_json(progress), now, task_id, TaskKind.cloud.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False
+            connection.execute(
+                "INSERT INTO events(task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "task.lane_demoted", dumps_json({
+                    "from": TaskKind.cloud.value, "to": TaskKind.inference.value,
+                    "code": error.get("code"), "message": error.get("message"),
+                }), now),
+            )
+            return True
 
     def abandon_open_invocations(self, task_id: str) -> int:
         """Cierra como 'ambiguous' las invocaciones que la tarea dejó abiertas.
@@ -1604,7 +1708,7 @@ class TaskRepository:
         llamadas locales el reintento automático es seguro: cuesta cómputo,
         no dinero.
         """
-        # Solo inferencia y embeddings: las conversiones interrumpidas las
+        # Inferencia, embeddings y cloud: las conversiones interrumpidas las
         # recupera `requeue_interrupted_ingestion_tasks`, que no tiene que
         # razonar sobre invocaciones ambiguas ni sobre coste ya facturado.
         active_statuses = ACTIVE_INFERENCE_STATUSES
@@ -1614,7 +1718,7 @@ class TaskRepository:
         with self.db.transaction() as connection:
             rows = connection.execute(
                 "SELECT id, attempt, progress_json FROM tasks "
-                f"WHERE kind IN ('inference', 'embedding') AND status IN ({placeholders})",
+                f"WHERE kind IN ('inference', 'embedding', 'cloud') AND status IN ({placeholders})",
                 active_statuses,
             ).fetchall()
             position = 0

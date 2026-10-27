@@ -98,6 +98,7 @@
           <div><dt>Modelo fallido</dt><dd>{{ task_result.error_provider }}/{{ task_result.error_deployment }}/{{ task_result.error_model }}</dd></div>
           <div><dt>Rol fallido</dt><dd>{{ task_result.error_role or 'N/D' }}</dd></div>
         {% endif %}
+        <div><dt>Carril</dt><dd class="lane-{{ detail.task.kind.value }}"><span class="lane-chip">{{ detail.task.kind|lane_label }}</span></dd></div>
         <div><dt>Estrategia</dt><dd>{% if detail.task.kind.value == 'ingestion' %}{{ detail.task.kind|lane_label }}{% else %}{{ detail.task.execution_strategy.value }}/{{ detail.task.execution_preset.value }}{% endif %}</dd></div>
         <div><dt>Tokens salida</dt><dd>{{ detail.task.tokens_output }}</dd></div>
         <div><dt>Coste</dt><dd>${{ '%.4f'|format(detail.task.cost_actual_usd) }}</dd></div>
@@ -144,6 +145,13 @@
     <div class="alert warning">
       <strong>Escalado a mixture por baja confianza</strong>
       <p>La respuesta del modelo único puntuó {{ '%.2f'|format(escalated[0].payload.confidence) }} de confianza; el broker escaló al consenso.</p>
+    </div>
+  {% endif %}
+  {% set demotions = (detail.events|selectattr('event_type', 'equalto', 'task.lane_demoted')|list) %}
+  {% if demotions %}
+    <div class="alert warning">
+      <strong>Pasó de la cola cloud a la local</strong>
+      <p>Ningún modelo remoto la atendió ({{ demotions[0].payload.code }}: {{ demotions[0].payload.message }}). Volvió a la cola local por su prioridad, sin gastar un intento.</p>
     </div>
   {% endif %}
   {% set dependency_timeouts = (detail.events|selectattr('event_type', 'equalto', 'task.dependency_timeout')|list) %}

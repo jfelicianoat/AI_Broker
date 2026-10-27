@@ -39,7 +39,12 @@ from app.dashboard_web import (
     valid_csrf_token_shape,
 )
 from app.db import Database
-from app.dispatcher import dispatcher_loop, embedding_dispatcher_loop, ingestion_dispatcher_loop
+from app.dispatcher import (
+    cloud_dispatcher_loop,
+    dispatcher_loop,
+    embedding_dispatcher_loop,
+    ingestion_dispatcher_loop,
+)
 from app.health import HealthCache, health_response
 from app.ingestion import (
     ALLOWED_FORMATS,
@@ -67,7 +72,7 @@ from app.model_fingerprints import fingerprint_recorder
 from app.model_quarantine import load_arbiter_record, load_quarantine, load_role_unfitness
 from app.model_stats import load_model_stats
 from app.providers import build_provider
-from app.repository import IdempotencyConflict, QueueFull, TaskRepository, lane_for_request
+from app.repository import IdempotencyConflict, QueueFull, TaskRepository, request_lane
 from app.resource_scheduler import ResourceScheduler
 from app.sandbox import SandboxExecutor
 from app.schemas import (
@@ -323,6 +328,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         dispatcher_task = None
         ingestion_dispatcher_task = None
         embedding_dispatcher_task = None
+        cloud_dispatcher_task = None
         if broker_config.processing.auto_dispatch:
             dispatcher_task = asyncio.create_task(
                 dispatcher_loop(
@@ -358,6 +364,20 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                         embedding_lane.max_parallel,
                     )
                 )
+            cloud_lane = broker_config.processing.cloud_lane
+            if cloud_lane.enabled:
+                # Se arranca aunque «cloud primero» esté apagado: ese ajuste se
+                # cambia desde el panel con el broker en marcha, y una tarea
+                # encolada en el carril cloud sin bucle no correría nunca.
+                cloud_dispatcher_task = asyncio.create_task(
+                    cloud_dispatcher_loop(
+                        repository,
+                        coordinator,
+                        stop_dispatcher,
+                        broker_config.processing.dispatcher_interval_seconds,
+                        cloud_lane.max_parallel,
+                    )
+                )
         # Descarga por inactividad: carril propio, con el mismo evento de
         # parada. Se arranca siempre que haya un Ollama al que preguntar, no
         # solo cuando el ajuste está puesto: el plazo y `unload_after_task` se
@@ -381,6 +401,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         app.state.dispatcher_task = dispatcher_task
         app.state.ingestion_dispatcher_task = ingestion_dispatcher_task
         app.state.embedding_dispatcher_task = embedding_dispatcher_task
+        app.state.cloud_dispatcher_task = cloud_dispatcher_task
         app.state.idle_unload_task = idle_unload_task
         try:
             yield
@@ -391,7 +412,8 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             pending_loops = [
                 task
                 for task in (
-                    dispatcher_task, ingestion_dispatcher_task, embedding_dispatcher_task, idle_unload_task,
+                    dispatcher_task, ingestion_dispatcher_task, embedding_dispatcher_task,
+                    cloud_dispatcher_task, idle_unload_task,
                 )
                 if task is not None
             ]
@@ -656,9 +678,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             task, created = repository.create_task(
                 payload,
                 queue_max_size=broker_config.processing.queue_max_size,
-                kind=lane_for_request(
-                    payload, embedding_lane=broker_config.processing.embedding_lane.enabled,
-                ),
+                kind=request_lane(payload, broker_config),
             )
         except IdempotencyConflict as exc:
             raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
@@ -904,7 +924,26 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             # activo, un cliente que ya usaba este tick para sus embeddings
             # seguiría viéndolos en cola para siempre.
             task_id = await _embedding_tick()
+        if task_id is None and broker_config.processing.cloud_lane.enabled:
+            task_id = await _cloud_tick()
         return {"task_id": task_id}
+
+    async def _cloud_tick() -> str | None:
+        task_id = await asyncio.to_thread(
+            repository.claim_next_cloud_task,
+            broker_config.processing.cloud_lane.max_parallel,
+        )
+        if task_id is not None:
+            await coordinator.process_task(repository, task_id)
+        return task_id
+
+    @app.post("/api/v1/dispatcher/cloud/tick")
+    async def cloud_dispatcher_tick(request: Request) -> dict[str, str | None]:
+        """Avanza el carril cloud una tarea (con auto_dispatch apagado)."""
+        verify_admin_access(request, broker_config)
+        if not broker_config.processing.cloud_lane.enabled:
+            raise HTTPException(status_code=409, detail="CLOUD_LANE_DISABLED")
+        return {"task_id": await _cloud_tick()}
 
     async def _embedding_tick() -> str | None:
         task_id = await asyncio.to_thread(
@@ -1071,6 +1110,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 [TaskKind.inference]
                 + ([TaskKind.ingestion] if broker_config.ingestion.enabled else [])
                 + ([TaskKind.embedding] if broker_config.processing.embedding_lane.enabled else [])
+                + ([TaskKind.cloud] if broker_config.processing.cloud_lane.enabled else [])
             ),
             # Contrato 2.12. El lote se anuncia siempre (no depende del carril);
             # el carril, solo si está activo.

@@ -5,7 +5,15 @@
 <div class="model-delete-confirm" role="alertdialog" aria-label="Confirmar borrado de {{ model }}">
   <p class="model-delete-question">
     <strong>¿Borrar {{ model }} del disco?</strong>
-    {% if size_bytes %}<span>Libera {{ (size_bytes / 1024**3)|round(1) }} GB.</span>{% endif %}
+    {# Lo que se libera de verdad. Un alias comparte los ficheros con otro
+       modelo: se borra el nombre y el disco se queda igual. #}
+    {% if freed_bytes == 0 %}
+      <span>No libera espacio: sus ficheros los usa también {{ shared_with|join(', ') }}.</span>
+    {% elif freed_bytes %}
+      <span>Libera {{ (freed_bytes / 1024**3)|round(1) }} GB{% if shared_with %} (el resto lo comparte con {{ shared_with|join(', ') }}){% endif %}.</span>
+    {% elif shared_with %}
+      <span>Comparte ficheros con {{ shared_with|join(', ') }}: no se sabe cuánto espacio libera.</span>
+    {% endif %}
     <span>No se puede deshacer: habrá que descargarlo entero otra vez.</span>
   </p>
   {% if consequences %}
