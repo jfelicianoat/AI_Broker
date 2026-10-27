@@ -63,13 +63,13 @@ from app.ingestion.service import (
     AttachmentError,
     stream_upload_to_temp,
 )
-from app.model_references import deletion_warnings
+from app.model_references import deletion_footprint, deletion_warnings
 from app.model_stats import load_model_stats
 from app.model_timing import estimate_seconds
 from app.prompt_compressor import PromptCompressor
 from app.providers import OpenAICompatibleProvider, ProviderError
 from app.providers.routing import task_affinity_excluded, task_affinity_patterns
-from app.repository import IdempotencyConflict, QueueFull, TaskRepository, lane_for_request
+from app.repository import IdempotencyConflict, QueueFull, TaskRepository, request_lane
 from app.residency import build_report, local_openai_provider_roots
 from app.resource_scheduler import ResourceScheduler
 from app.routing_report import (
@@ -294,7 +294,7 @@ def create_dashboard_router(
     async def dashboard(request: Request):
         context: dict[str, Any] = {
             "summary": queries.summary(window_hours=24, lane_capacities=lane_capacities(config)),
-            "queue": queries.list_tasks(page=1, page_size=5, status=PENDING_TASK_STATUSES, origin=None),
+            "lanes": queries.lanes_view(config),
             "active": queries.active_task_detail(),
             "embedding_lane": queries.embedding_lane_view(config),
             "health": await health_loader(),
@@ -310,8 +310,8 @@ def create_dashboard_router(
             request,
             "tasks.html",
             {
+                "lanes": queries.lanes_view(config),
                 "queue": queries.list_tasks(page=1, page_size=50, status=PENDING_TASK_STATUSES, origin=None),
-                "embedding_lane": queries.embedding_lane_view(config),
                 "history": queries.list_terminal_tasks(page_size=20),
                 "nav_active": "tareas",
             },
@@ -653,7 +653,7 @@ def create_dashboard_router(
             task, created = repository.create_task(
                 payload,
                 queue_max_size=config.processing.queue_max_size,
-                kind=lane_for_request(payload, embedding_lane=config.processing.embedding_lane.enabled),
+                kind=request_lane(payload, config),
             )
         except QueueFull:
             return JSONResponse({"error": "La cola del broker está llena; prueba más tarde."}, status_code=503)
@@ -958,6 +958,14 @@ def create_dashboard_router(
             },
         )
 
+    @protected.get("/dashboard/fragments/lanes", response_class=HTMLResponse)
+    async def lanes_fragment(request: Request):
+        return templates.TemplateResponse(
+            request=request,
+            name="fragments/lanes.html",
+            context={"lanes": queries.lanes_view(config)},
+        )
+
     @protected.get("/dashboard/fragments/embedding-lane", response_class=HTMLResponse)
     async def embedding_lane_fragment(request: Request):
         return templates.TemplateResponse(
@@ -1251,21 +1259,17 @@ def create_dashboard_router(
         if confirmed != model_name:
             # Paso 1: se pinta la confirmación en la propia fila.
             catalog, _ = await models()
-            entry = next(
-                (
-                    item for item in catalog
-                    if item.get("name") == model_name
-                    and str(item.get("provider") or "").lower() == provider_id.lower()
-                ),
-                None,
-            )
+            footprint = deletion_footprint(catalog, provider_id, model_name)
             return templates.TemplateResponse(
                 request=request,
                 name="fragments/model_delete_confirm.html",
                 context={
                     "provider": provider_id,
                     "model": model_name,
-                    "size_bytes": int((entry or {}).get("size_bytes") or 0),
+                    # Lo que se libera de verdad, no lo que ocupa: un alias
+                    # comparte los ficheros y borrarlo no libera nada.
+                    "freed_bytes": footprint.freed_bytes,
+                    "shared_with": footprint.shared_with,
                     # Qué deja de funcionar. No bloquea: la decisión sigue
                     # siendo suya, pero no puede tomarla sin saberlo.
                     "consequences": deletion_warnings(config, catalog, provider_id, model_name),
@@ -1297,7 +1301,8 @@ def create_dashboard_router(
             )
             query["model_delete"] = "ok"
             query["model_deleted"] = model_name
-            query["model_freed"] = str(freed)
+            if freed is not None:
+                query["model_freed"] = str(freed)
         except PromptTesterError as error:
             query["model_delete"] = "error"
             query["model_error"] = str(error)
@@ -1343,9 +1348,7 @@ def create_dashboard_router(
                 task, created = repository.create_task(
                     payload,
                     queue_max_size=config.processing.queue_max_size,
-                    kind=lane_for_request(
-                        payload, embedding_lane=config.processing.embedding_lane.enabled,
-                    ),
+                    kind=request_lane(payload, config),
                 )
                 if created:
                     coordinator.initialize_run(task.task_id, payload)
@@ -1997,11 +2000,17 @@ def _model_delete_notice(
             "title": "No se ha borrado el modelo",
             "message": error or "El proveedor no ha podido borrarlo.",
         }
+    # Sin cifra no se dice nada del espacio: mejor callar que inventar.
     try:
-        freed = int(freed_bytes or 0)
+        freed = int(freed_bytes) if freed_bytes else None
     except ValueError:
-        freed = 0
-    liberado = f" Liberados {freed / 1024**3:.1f} GB." if freed else ""
+        freed = None
+    if freed is None:
+        liberado = ""
+    elif freed == 0:
+        liberado = " No ha liberado espacio: sus ficheros los sigue usando otro modelo."
+    else:
+        liberado = f" Liberados {freed / 1024**3:.1f} GB."
     return {
         "kind": "success",
         "title": "Modelo borrado del disco",

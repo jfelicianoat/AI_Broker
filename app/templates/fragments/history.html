@@ -27,10 +27,10 @@
         </thead>
         <tbody>
           {% for task in history.items %}
-          <tr>
+          <tr class="lane-row lane-{{ task.kind.value }}">
             <td>
               <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
-              <small>{{ task.origin or 'api' }}</small>
+              <small><span class="lane-chip">{{ task.kind|lane_label }}</span> · {{ task.origin or 'api' }}</small>
               {% if task.excluded_from_model_learning %}
                 {# Sin esta marca, un panel de fiabilidad se lee sin saber qué
                    se contó y qué no. #}

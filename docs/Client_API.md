@@ -40,7 +40,7 @@ Devuelve, entre otros:
 | `system1_semantic_routing` | `bool` | Si System-1 y su enrutado semántico están habilitados. Puede operar en modo sombra (§15.6) |
 | `system1_evaluation` | `bool` | Si el juicio admite `target` y devuelve la nota de cada intento, también la rechazada (§15.8) |
 | `derived_data_boundary` | `bool` | `true` → puedes omitir `cloud_allowed` y `allowed_providers` (§4) |
-| `work_lanes` | `[string]` | Carriles activos: `inference` siempre; `ingestion` y `embedding` si están encendidos |
+| `work_lanes` | `[string]` | Carriles activos: `inference` siempre; `ingestion`, `embedding` y `cloud` si están encendidos |
 | `embedding_batch_max` | `int \| null` | Máximo de textos en `content.inputs` (§5.10). Ausente o `null` = broker sin lotes: manda un texto por tarea |
 | `embedding_lane` | `{max_parallel, batch_max} \| null` | Carril propio de embeddings (§5.10). `null` = apagado: tus embeddings hacen cola con el chat |
 | `strategies` | `[string]` | Qué estrategias acepta. `auto` solo aparece si el meta-router está activo |
@@ -90,7 +90,7 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
   },
   "derived_data_boundary": true,
   "task_group_status": true,
-  "work_lanes": ["inference", "ingestion", "embedding"],
+  "work_lanes": ["inference", "ingestion", "embedding", "cloud"],
   "embedding_batch_max": 64,
   "embedding_lane": { "max_parallel": 1, "batch_max": 64 },
   "generation_determinism": true,
@@ -1150,6 +1150,7 @@ Ampliación aditiva: toda petición válida en 2.11 sigue siéndolo y devuelve l
 
 - **`content.inputs`** para vectorizar un lote en una tarea, con `embedding_batch_max` en `/capabilities` y `result.embeddings` en el mismo orden (§5.10).
 - **Carril `embedding`**: las tareas de embedding no consumen el workflow único de inferencia. Se anuncia en `work_lanes` y en `embedding_lane: {max_parallel, batch_max}`. Las tareas de ese carril llevan `kind: "embedding"`.
+- **Carril `cloud`**: las tareas `single` de chat que pueden ir a la nube (`cloud_allowed: true`, algún proveedor remoto entre `allowed_providers`, sin `target_model`) corren en paralelo contra modelos remotos y no esperan a la inferencia local. Llevan `kind: "cloud"`; si ningún remoto responde, la tarea pasa a la cola local y su `kind` cambia a `"inference"`. Se anuncia en `work_lanes`. Nada cambia en lo que envías: el carril lo decide el broker.
 - **`EMBEDDING_INPUT_TOO_LONG`** con el índice del texto: nunca se trunca.
 - **Identidad del modelo** junto a los vectores: `result.embedding_model` y `result.dimensions`, también en la petición de un solo texto.
 - **Arreglo:** `inference_kind: "embedding"` ya no exige `output.json_schema`.

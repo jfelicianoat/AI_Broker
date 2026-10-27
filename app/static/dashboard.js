@@ -505,8 +505,14 @@
     if (confirmMessage && !(await confirmDialog(confirmMessage))) return true;
     element.setAttribute("aria-busy", "true");
     try {
+      // hx-vals viaja como formulario urlencoded: es lo que leen los
+      // endpoints del panel (_read_urlencoded_form). Sin esto el POST llegaba
+      // vacío y el botón Borrar de Modelos no hacía nada.
+      const vals = element.getAttribute("hx-vals");
+      const body = vals ? new URLSearchParams(JSON.parse(vals)) : undefined;
       const response = await fetch(url, {
         method,
+        body,
         headers: {
           "HX-Request": "true",
           "Accept": "text/html",
@@ -515,7 +521,13 @@
       });
       if (!response.ok) throw new Error(httpErrorMessage(response.status));
       const targetSelector = element.getAttribute("hx-target");
-      const target = targetSelector ? document.querySelector(targetSelector) : element;
+      // "closest <selector>" como en htmx: el destino es un antepasado del
+      // propio elemento, no algo que buscar en todo el documento.
+      const target = !targetSelector
+        ? element
+        : targetSelector.startsWith("closest ")
+          ? element.closest(targetSelector.slice("closest ".length))
+          : document.querySelector(targetSelector);
       const swap = element.getAttribute("hx-swap") || "innerHTML";
       if (response.status !== 204 && target) {
         const html = await response.text();

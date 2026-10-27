@@ -4,7 +4,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.config import BrokerConfig
+from app.config import BrokerConfig, served_remotely
 from app.db import Database, loads_json
 from app.repository import TaskRepository, _parse_dt
 from app.schemas import (
@@ -57,7 +57,29 @@ def lane_capacities(config: BrokerConfig) -> dict[str, int]:
     }
     if config.processing.embedding_lane.enabled:
         capacities[TaskKind.embedding.value] = config.processing.embedding_lane.max_parallel
+    if config.processing.cloud_lane.enabled:
+        capacities[TaskKind.cloud.value] = config.processing.cloud_lane.max_parallel
     return capacities
+
+
+# Orden de las columnas en el panel: las tres colas de modelos primero, y las
+# conversiones al final porque no son trabajo de un LLM.
+LANE_ORDER = (TaskKind.inference, TaskKind.cloud, TaskKind.embedding, TaskKind.ingestion)
+
+
+def _lane_task_label(kind: TaskKind, row: Any) -> str:
+    """Qué es la tarea, en una línea, según su carril."""
+    request = loads_json(row["request_json"], {}) or {}
+    if kind == TaskKind.ingestion:
+        return str(request.get("filename") or "Conversión de fichero")
+    if kind == TaskKind.embedding:
+        total = int(row["texts"] or 1)
+        return f"{total} texto{'s' if total != 1 else ''}"
+    metadata = (request.get("content") or {}).get("metadata") or {}
+    purpose = metadata.get("purpose") or metadata.get("origin")
+    execution = request.get("execution") or {}
+    strategy = execution.get("strategy") or "single"
+    return f"{strategy} · {purpose}" if purpose else str(strategy)
 
 
 class DashboardQueryRepository:
@@ -84,10 +106,7 @@ class DashboardQueryRepository:
         )
         counts = {str(row["kind"]): row for row in rows}
         lanes: list[LaneOccupancy] = []
-        kinds = [TaskKind.inference, TaskKind.ingestion]
-        if TaskKind.embedding.value in capacities:
-            kinds.append(TaskKind.embedding)
-        for kind in kinds:
+        for kind in [item for item in LANE_ORDER if item.value in capacities]:
             row = counts.get(kind.value)
             lanes.append(
                 LaneOccupancy(
@@ -429,6 +448,109 @@ class DashboardQueryRepository:
                 for row in models
             ],
         }
+
+    def lanes_view(self, config: BrokerConfig, *, window_hours: int = 1, next_limit: int = 5) -> list[dict[str, Any]]:
+        """Las colas una al lado de otra: qué corre y qué viene en cada carril.
+
+        Con el carril cloud la cola dejó de ser una: una tarea cloud puede ir
+        por delante de una local llegada antes, y la tabla única de la cola no
+        lo explicaba. Cada columna enseña su propio orden real de reclamo.
+        """
+        capacities = lane_capacities(config)
+        active_marks = ",".join("?" for _ in ACTIVE_STATUSES)
+        pending = ("queued", "waiting_for_memory", "waiting_for_dependencies")
+        pending_marks = ",".join("?" for _ in pending)
+        now = datetime.now(timezone.utc)
+        since = (now - timedelta(hours=window_hours)).isoformat()
+        texts = "COALESCE(json_array_length(request_json, '$.content.inputs'), 1)"
+        lanes = []
+        for kind in LANE_ORDER:
+            if kind.value not in capacities:
+                continue
+            running_rows = self.db.query_all(
+                f"""
+                SELECT id, priority, status, progress_json, request_json, updated_at, {texts} AS texts
+                FROM tasks WHERE kind = ? AND status IN ({active_marks})
+                ORDER BY updated_at ASC
+                """,
+                (kind.value, *ACTIVE_STATUSES),
+            )
+            next_rows = self.db.query_all(
+                f"""
+                SELECT id, priority, status, request_json, progress_json, {texts} AS texts
+                FROM tasks WHERE kind = ? AND status IN ({pending_marks})
+                ORDER BY queue_position ASC, priority ASC, created_at ASC LIMIT ?
+                """,
+                (kind.value, *pending, next_limit),
+            )
+            totals = self.db.query_one(
+                f"""
+                SELECT COUNT(*) AS pending,
+                       SUM(CASE WHEN status <> 'queued' THEN 1 ELSE 0 END) AS waiting
+                FROM tasks WHERE kind = ? AND status IN ({pending_marks})
+                """,
+                (kind.value, *pending),
+            )
+            recent = self.db.query_one(
+                """
+                SELECT SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+                FROM tasks WHERE kind = ? AND updated_at >= ? AND status IN ('completed', 'failed')
+                """,
+                (kind.value, since),
+            )
+            running = []
+            for row in running_rows:
+                progress = loads_json(row["progress_json"], {}) or {}
+                models = progress.get("active_invocations") or []
+                model = models[0] if models and isinstance(models[0], dict) else {}
+                running.append({
+                    "task_id": row["id"],
+                    "status": TaskStatus(row["status"]),
+                    "priority": row["priority"],
+                    "what": _lane_task_label(kind, row),
+                    "model": model.get("model"),
+                    "provider": model.get("provider"),
+                    # Una tarea de la cola local puede estar llamando a un
+                    # remoto (un proponente del consenso, por ejemplo): ocupa
+                    # el turno, pero la GPU está libre. Se marca para que no
+                    # parezca un cloud colado en la cola equivocada.
+                    "remote": bool(model) and served_remotely(
+                        config, model.get("provider"), model.get("deployment"),
+                    ),
+                    "seconds": max(0.0, (now - _parse_dt(row["updated_at"])).total_seconds()),
+                })
+            lanes.append({
+                "kind": kind,
+                "capacity": int(capacities[kind.value]),
+                "running": running,
+                "next": [
+                    {
+                        "task_id": row["id"],
+                        "status": TaskStatus(row["status"]),
+                        "priority": row["priority"],
+                        "what": _lane_task_label(kind, row),
+                        "demoted": bool((loads_json(row["progress_json"], {}) or {}).get("demoted_from_cloud")),
+                    }
+                    for row in next_rows
+                ],
+                "pending": int((totals["pending"] if totals else 0) or 0),
+                "waiting": int((totals["waiting"] if totals else 0) or 0),
+                "completed": int((recent["completed"] if recent else 0) or 0),
+                "failed": int((recent["failed"] if recent else 0) or 0),
+                "window_hours": window_hours,
+            })
+        demoted = self.db.query_one(
+            "SELECT COUNT(*) AS total FROM events WHERE event_type = 'task.lane_demoted' AND created_at >= ?",
+            (since,),
+        )
+        for lane in lanes:
+            if lane["kind"] == TaskKind.cloud:
+                # Lo que el carril cloud no pudo atender y pasó a la GPU: sin
+                # esta cifra, un proveedor caído solo se nota en que la cola
+                # local crece.
+                lane["demoted"] = int((demoted["total"] if demoted else 0) or 0)
+        return lanes
 
     def active_task_detail(self) -> DashboardTaskDetail | None:
         """El workflow de inferencia en curso, que es único por invariante.

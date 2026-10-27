@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from app.config import (
     effective_max_loaded_local_models,
     local_memory_budget_bytes,
 )
+from app.model_references import deletion_footprint
 from app.providers.base import (
     _IMAGE_ONLY_ANSWER,
     AgentTurn,
@@ -36,6 +38,7 @@ from app.providers.base import (
     normalized_stop_reason,
     numeric_vector,
     provider_error_from_http,
+    provider_error_from_transport,
     provider_http_error_message,
     request_with_context_capped_output,
     returned_images,
@@ -67,7 +70,12 @@ _EMPTY_METADATA: dict[str, Any] = {
     "layers": None,
     "chat_template": None,
     "tokenizer": None,
+    "blobs": [],
 }
+
+# Línea `FROM <ruta>/sha256-<hex>` del modelfile que devuelve /api/show: una
+# por cada fichero grande del modelo (pesos, proyector, adaptador).
+_MODELFILE_BLOB = re.compile(r"^FROM\s+(\S*sha256[-:][0-9a-f]{64})\s*$", re.MULTILINE)
 
 
 def _gib(value: float) -> str:
@@ -293,7 +301,9 @@ class OllamaLifecycleManager:
             payload = response.json()
             return list(payload.get("models") or [])
         except httpx.HTTPError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
 
     @asynccontextmanager
     async def lease(self, model: str, estimated_size: int = 0):
@@ -618,8 +628,12 @@ class OllamaProvider:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def delete_model(self, model: str) -> int:
-        """Borra un modelo local del disco. Devuelve los bytes que ocupaba.
+    async def delete_model(self, model: str) -> int | None:
+        """Borra un modelo local del disco. Devuelve los bytes liberados.
+
+        No es el tamaño del modelo: si comparte blobs con otro (un alias, por
+        ejemplo) Ollama los conserva y se libera menos, o nada. None si no se
+        puede saber (ver deletion_footprint).
 
         Lo hace el propio Ollama (`DELETE /api/delete`), no el broker a mano:
         varios modelos comparten blobs y solo el runtime sabe cuáles quedan sin
@@ -644,7 +658,9 @@ class OllamaProvider:
             raise ProviderError(
                 "MODEL_NOT_LOCAL", f"{model} no es un modelo local: no hay nada que borrar del disco",
             )
-        size_bytes = int(entry.get("size_bytes") or 0)
+        # Se calcula ANTES de borrar: después el modelo ya no está en el
+        # catálogo y no queda con qué comparar.
+        freed = deletion_footprint(catalog, "ollama", model).freed_bytes
         try:
             await self.lifecycle.unload(model)
         except ProviderError:
@@ -663,7 +679,7 @@ class OllamaProvider:
             raise ProviderError("MODEL_DELETE_FAILED", str(error), retryable=True) from error
         # El catálogo cacheado sigue nombrando un modelo que ya no existe.
         self._catalog_cache.clear()
-        return size_bytes
+        return freed
 
     async def models(self) -> list[dict[str, Any]]:
         cached = self._catalog_cache.get()
@@ -674,7 +690,9 @@ class OllamaProvider:
             response.raise_for_status()
             items = list(response.json().get("models") or [])
         except httpx.HTTPError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
         # Los metadatos se piden SIEMPRE, no solo cuando falta el contexto o las
         # capacidades: la plantilla de chat y el tokenizador forman parte de la
         # identidad de la ejecución (app.execution_fingerprint) y dejarlos al
@@ -703,6 +721,9 @@ class OllamaProvider:
                 "family": details.get("family"),
                 "parameter_size": details.get("parameter_size"), "quantization": details.get("quantization_level"),
                 "layers": metadata.get("layers"),
+                # Ficheros grandes del modelo; los comparte con otros si es un
+                # alias o se creó desde otro (ver deletion_footprint).
+                "blobs": list(metadata.get("blobs") or []),
                 "compatibility": "compatible",
                 "compatibility_checked_at": None,
                 "compatibility_error": None,
@@ -890,6 +911,7 @@ class OllamaProvider:
                     if tokenizer
                     else None
                 ),
+                "blobs": sorted(set(_MODELFILE_BLOB.findall(str(payload.get("modelfile") or "")))),
             }
         except (httpx.HTTPError, TypeError, ValueError):
             return dict(_EMPTY_METADATA)
@@ -918,7 +940,9 @@ class OllamaProvider:
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
         except httpx.HTTPError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
         if not isinstance(payload, dict):
             raise ProviderError("INVALID_PROVIDER_RESPONSE", "System One no devolvió un objeto JSON")
         return payload
@@ -993,7 +1017,9 @@ class OllamaProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
         message = payload.get("message") or {}
@@ -1065,7 +1091,9 @@ class OllamaProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
         message = payload.get("message") or {}
@@ -1143,7 +1171,9 @@ class OllamaProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
         embeddings = payload.get("embeddings") or []
@@ -1196,7 +1226,9 @@ class OllamaProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="ollama", timeout_seconds=self.config.providers.ollama.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="ollama", model=model) from error
         raw = payload.get("embeddings") or []

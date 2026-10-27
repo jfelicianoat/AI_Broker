@@ -146,11 +146,15 @@ class TaskKind(str, Enum):
     # décimas de segundo y antes hacía cola detrás de una generación de minutos:
     # con una tarea por fragmento, indexar unas notas llevaba horas.
     embedding = "embedding"
+    # Tareas single que van a un modelo remoto (processing.cloud_lane). Corren
+    # en paralelo y sin tocar la GPU; si ningún remoto responde, la tarea pasa
+    # a `inference` en vez de fallar.
+    cloud = "cloud"
 
 
 # Carriles cuya fila lleva un TaskCreateRequest en `request_json`. La ingesta
 # guarda un descriptor de conversión y validarlo como petición reventaría.
-REQUEST_CARRYING_KINDS = frozenset({TaskKind.inference, TaskKind.embedding})
+REQUEST_CARRYING_KINDS = frozenset({TaskKind.inference, TaskKind.embedding, TaskKind.cloud})
 
 # Política de privacidad fail-closed: solo lo que se ejecuta en esta máquina
 # cuenta como local ("bootstrap" es el proveedor fake in-process). Cualquier

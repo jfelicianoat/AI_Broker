@@ -7,8 +7,8 @@
      data-announce="{% if active %}Tarea activa en fase {{ active.progress.get('phase', active.task.status.value)|status_label }}, {{ active.progress.get('invocations_completed', 0) }} de {{ active.progress.get('invocations_total', 'un número indeterminado de') }} invocaciones{% else %}Sin tarea activa{% endif %}">
   <div class="panel-heading">
     <div>
-      <h2>Tarea activa</h2>
-      <p>Solo un workflow puede estar activo</p>
+      <h2>Tarea local activa</h2>
+      <p>El carril local corre una tarea a la vez; las cloud van por su carril</p>
     </div>
     {% if active %}<span class="badge badge-active">{{ active.task.status|status_label }}</span>{% endif %}
   </div>

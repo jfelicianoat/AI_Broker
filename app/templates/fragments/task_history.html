@@ -29,10 +29,11 @@
         </thead>
         <tbody>
           {% for task in history.items %}
-          <tr>
+          <tr class="lane-row lane-{{ task.kind.value }}">
             <td>
               <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}">{{ task.task_id }}</a>
               <div class="history-tags">
+                <span class="lane-chip">{{ task.kind|lane_label }}</span>
                 <span class="tag">{{ task.origin or 'api' }}</span>
                 {% if task.excluded_from_model_learning %}
                   <span class="badge badge-muted" title="No cuenta para las métricas ni la cuarentena del router">sin aprendizaje</span>

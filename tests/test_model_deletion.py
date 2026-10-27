@@ -4,6 +4,7 @@ Es la única acción irreversible de la interfaz, así que lo que más se prueba
 aquí es lo que NO debe borrar: sin confirmación, con trabajo en curso, en un
 proveedor sin API de borrado, o un modelo que no está en este disco.
 """
+import json
 from pathlib import Path
 
 import httpx
@@ -24,15 +25,29 @@ _TAGS = {
 }
 
 
+_PESOS = "C:/ollama/blobs/sha256-" + "a" * 64
+_PESOS_ALIAS = "C:/ollama/blobs/sha256-" + "b" * 64
+
+
+def _show(request: httpx.Request) -> httpx.Response:
+    """`/api/show` con el modelfile: sus líneas FROM son los ficheros grandes.
+    `alias:a` y `alias:b` apuntan al mismo blob, como `x:latest` y `x:30b`."""
+    model = json.loads(request.content)["model"]
+    blob = {"grande:70b": _PESOS}.get(model, _PESOS_ALIAS)
+    return httpx.Response(200, json={"modelfile": f"# Modelfile\nFROM {blob}\nTEMPLATE x\n"})
+
+
 def _ollama(handler) -> OllamaProvider:
     return OllamaProvider(BrokerConfig(), transport=httpx.MockTransport(handler))
 
 
-def _handler(state: dict):
+def _handler(state: dict, tags: dict | None = None):
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/api/tags":
-            return httpx.Response(200, json=_TAGS)
+            return httpx.Response(200, json=tags or _TAGS)
+        if path == "/api/show":
+            return _show(request)
         if path == "/api/ps":
             return httpx.Response(200, json={"models": []})
         if path == "/api/generate":
@@ -59,6 +74,55 @@ def test_deleting_a_local_model_asks_ollama_and_reports_freed_space() -> None:
     assert state["deleted"] == "DELETE"
     assert "grande:70b" in state["body"]
     assert freed == 42_000_000_000
+
+
+def test_deleting_an_alias_frees_nothing() -> None:
+    """Dos nombres del mismo modelo comparten los pesos: Ollama borra el nombre
+    y conserva el blob. Decir «liberados 18 GB» sería mentir."""
+    import asyncio
+
+    tags = {"models": [
+        {"name": "alias:a", "size": 18_000_000_000, "capabilities": ["completion"]},
+        {"name": "alias:b", "size": 18_000_000_000, "capabilities": ["completion"]},
+    ]}
+    state: dict = {}
+    provider = _ollama(_handler(state, tags))
+    freed = asyncio.run(provider.delete_model("alias:a"))
+    asyncio.run(provider.close())
+
+    assert state["deleted"] == "DELETE"
+    assert freed == 0
+
+
+def test_footprint_measures_only_the_files_nobody_else_uses(tmp_path: Path) -> None:
+    """Coincidencia parcial: un modelo creado desde otro con su propio
+    proyector. Solo se libera lo propio, y eso hay que medirlo en disco."""
+    from app.model_references import deletion_footprint
+
+    pesos = tmp_path / "pesos"
+    proyector = tmp_path / "proyector"
+    pesos.write_bytes(b"x" * 100)
+    proyector.write_bytes(b"x" * 7)
+    catalog = [
+        {"name": "base:7b", "provider": "ollama", "deployment": "local",
+         "size_bytes": 100, "blobs": [str(pesos)]},
+        {"name": "vista:7b", "provider": "ollama", "deployment": "local",
+         "size_bytes": 107, "blobs": [str(pesos), str(proyector)]},
+    ]
+
+    footprint = deletion_footprint(catalog, "ollama", "vista:7b")
+    assert footprint.freed_bytes == 7
+    assert footprint.shared_with == ("base:7b",)
+    assert deletion_footprint(catalog, "ollama", "base:7b").freed_bytes == 0
+
+
+def test_footprint_gives_no_figure_without_the_file_list() -> None:
+    """Sin /api/show no se sabe si comparte ficheros: mejor ninguna cifra que
+    el tamaño del modelo, que con un alias sería falso."""
+    from app.model_references import deletion_footprint
+
+    catalog = [{"name": "x:1b", "provider": "ollama", "deployment": "local", "size_bytes": 5}]
+    assert deletion_footprint(catalog, "ollama", "x:1b").freed_bytes is None
 
 
 def test_a_cloud_model_is_not_deletable() -> None:
@@ -180,6 +244,36 @@ def test_the_second_click_deletes(tmp_path: Path) -> None:
     assert response.status_code == 303
     assert calls == [("ollama", "grande:70b")]
     assert "model_delete=ok" in response.headers["location"]
+
+
+def test_the_notice_says_when_nothing_was_freed(tmp_path: Path) -> None:
+    with _client(tmp_path) as client:
+        page = client.get(
+            "/dashboard/models?model_delete=ok&model_deleted=alias:a&model_freed=0",
+        )
+    assert "No ha liberado espacio" in page.text
+    assert "Liberados" not in page.text
+
+
+def test_the_confirmation_warns_that_an_alias_frees_nothing(tmp_path: Path) -> None:
+    catalog = [
+        {"name": name, "provider": "ollama", "deployment": "local",
+         "status": "available", "size_bytes": 18_000_000_000, "context_window": 8192,
+         "capabilities": ["completion"], "compatibility": "compatible",
+         "blobs": [_PESOS_ALIAS]}
+        for name in ("alias:a", "alias:b")
+    ]
+    with _client(tmp_path) as client:
+        async def fake_models():
+            return catalog
+
+        client.app.state.provider.models = fake_models
+        response = _post_delete(client, {"provider": "ollama", "model": "alias:a"})
+
+    assert response.status_code == 200
+    assert "No libera espacio" in response.text
+    assert "alias:b" in response.text
+    assert "Libera 16" not in response.text
 
 
 def test_it_refuses_while_the_machine_is_working(tmp_path: Path) -> None:

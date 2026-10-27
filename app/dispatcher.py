@@ -5,7 +5,8 @@ tiene su propio bucle y su propio límite de concurrencia, porque convertir un
 fichero no debe consumir el turno de las respuestas — si compartieran carril,
 subir un PDF congelaría la cola de inferencia. Los embeddings (contrato 2.12)
 tienen el suyo por la misma razón: un vector de décimas de segundo no puede
-esperar minutos detrás de una generación.
+esperar minutos detrás de una generación. Y las tareas cloud tienen el suyo
+porque una llamada remota colgada no debe dejar ociosa la GPU.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from typing import Any
 
 from app.coordinator import ConsensusCoordinator
 from app.repository import TaskRepository
-from app.schemas import TaskStatus
+from app.schemas import TaskKind, TaskStatus
 
 
 async def dispatcher_loop(
@@ -122,17 +123,49 @@ async def embedding_dispatcher_loop(
     el workflow único de inferencia.
 
     Antes un embedding de 200 ms esperaba en la cola a que terminase la
-    generación de chat en curso, y la tarea tardaba 35–54 s. Cada tarea pasa
-    por el mismo `process_task` que la inferencia —enrutado, memoria,
-    cancelación, telemetría—; lo único que cambia es quién le da el turno.
-    La cancelación la atiende el propio coordinador, como en inferencia."""
-    logger = logging.getLogger("ai_broker.dispatcher.embedding")
+    generación de chat en curso, y la tarea tardaba 35–54 s."""
+    await lane_dispatcher_loop(
+        repository, coordinator, stop, interval_seconds, max_parallel, kind=TaskKind.embedding,
+    )
+
+
+async def cloud_dispatcher_loop(
+    repository: TaskRepository,
+    coordinator: ConsensusCoordinator,
+    stop: asyncio.Event,
+    interval_seconds: float,
+    max_parallel: int,
+) -> None:
+    """Carril cloud: hasta `max_parallel` tareas remotas a la vez.
+
+    Antes una llamada cloud colgada ocupaba el workflow único y la cola local
+    esperaba detrás aunque la GPU estuviera libre."""
+    await lane_dispatcher_loop(
+        repository, coordinator, stop, interval_seconds, max_parallel, kind=TaskKind.cloud,
+    )
+
+
+async def lane_dispatcher_loop(
+    repository: TaskRepository,
+    coordinator: ConsensusCoordinator,
+    stop: asyncio.Event,
+    interval_seconds: float,
+    max_parallel: int,
+    *,
+    kind: TaskKind,
+) -> None:
+    """Bucle de un carril con concurrencia propia.
+
+    Cada tarea pasa por el mismo `process_task` que la inferencia —enrutado,
+    memoria, cancelación, telemetría—; lo único que cambia es quién le da el
+    turno. La cancelación la atiende el propio coordinador, como en inferencia."""
+    logger = logging.getLogger(f"ai_broker.dispatcher.{kind.value}")
     running: dict[str, asyncio.Task] = {}
     while not stop.is_set():
         try:
             while len(running) < max_parallel:
                 task_id = await asyncio.to_thread(
-                    repository.claim_next_embedding_task, max_parallel,
+                    repository.claim_next_lane_task, kind, max_parallel,
                 )
                 if task_id is None:
                     break
@@ -141,8 +174,8 @@ async def embedding_dispatcher_loop(
                 job.add_done_callback(_forget(running, task_id))
         except Exception:
             logger.exception(
-                "dispatcher.embedding_iteration_failed",
-                extra={"event": "dispatcher.embedding_iteration_failed"},
+                f"dispatcher.{kind.value}_iteration_failed",
+                extra={"event": f"dispatcher.{kind.value}_iteration_failed"},
             )
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)

@@ -1,0 +1,91 @@
+<div id="lanes-panel"
+     class="panel lanes-panel"
+     hx-get="/dashboard/fragments/lanes"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     data-refresh-pauseable
+     data-announce="{% for lane in lanes %}{{ lane.kind|lane_label }}: {{ lane.running|length }} en curso, {{ lane.pending }} en cola{% if not loop.last %}; {% endif %}{% endfor %}">
+  <div class="panel-heading" id="colas">
+    <div>
+      <h2>Colas</h2>
+      <p>Cada carril reclama por su cuenta: una tarea cloud no espera a la GPU, ni una local a la nube.</p>
+    </div>
+    <button class="button secondary compact" type="button" data-refresh-target="#lanes-panel">Actualizar</button>
+  </div>
+  <div class="lanes-grid">
+    {% for lane in lanes %}
+      {% set kind = lane.kind.value %}
+      <section class="lane-column lane-{{ kind }}" aria-labelledby="lane-title-{{ kind }}">
+        <div class="lane-head">
+          <div class="lane-name">
+            <h3 id="lane-title-{{ kind }}">{{ lane.kind|lane_label }}</h3>
+            <span class="lane-chip">
+              {%- if kind == 'inference' %}GPU de este PC
+              {%- elif kind == 'cloud' %}modelos remotos
+              {%- elif kind == 'embedding' %}vectores
+              {%- else %}ficheros{% endif -%}
+            </span>
+          </div>
+          <div class="lane-counts">
+            <span><strong>{{ lane.running|length }}</strong>/{{ lane.capacity }} en curso</span>
+            <span><strong>{{ lane.pending }}</strong> en cola</span>
+          </div>
+          <p class="lane-note">
+            Última hora: {{ lane.completed }} completada{{ 's' if lane.completed != 1 }},
+            {{ lane.failed }} fallida{{ 's' if lane.failed != 1 }}
+            {%- if lane.waiting %} · {{ lane.waiting }} esperando memoria o dependencias{% endif %}
+          </p>
+          {% if kind == 'cloud' and lane.demoted %}
+            {# Un remoto caído no se ve en el carril cloud, que sigue vacío y
+               sano: se ve en lo que tuvo que bajar a la GPU. #}
+            <p class="lane-note attention">{{ lane.demoted }} pasada{{ 's' if lane.demoted != 1 }} a la cola local en la última hora: ningún remoto respondió</p>
+          {% endif %}
+        </div>
+
+        <h4 class="lane-section-title">En curso</h4>
+        {% if lane.running %}
+          <ul class="lane-list">
+            {% for task in lane.running %}
+              <li class="lane-item">
+                <div class="lane-item-top">
+                  <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id }}</a>
+                  <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+                </div>
+                <div class="lane-item-meta">
+                  {% if task.model %}{{ task.model }} <span class="tag">{{ task.provider }}</span>
+                    {%- if task.remote and kind == 'inference' %} <span class="tag lane-remote-tag" title="Esta llamada la atiende otra máquina: la tarea ocupa el turno local, pero la GPU de este PC está libre">remoto</span>{% endif %} · {% endif %}
+                  {{ task.what }} · <span class="lane-seconds">{{ '%.0f'|format(task.seconds) }} s</span>
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="lane-empty">Nada en curso.</div>
+        {% endif %}
+
+        <h4 class="lane-section-title">Siguientes</h4>
+        {% if lane.next %}
+          <ol class="lane-list">
+            {% for task in lane.next %}
+              <li class="lane-item">
+                <div class="lane-item-top">
+                  <a class="task-link" href="/dashboard/tasks/{{ task.task_id }}" title="{{ task.task_id }}">{{ loop.index }}. {{ task.task_id }}</a>
+                  <span class="badge badge-{{ task.status.value }}">{{ task.status|status_label }}</span>
+                </div>
+                <div class="lane-item-meta">
+                  {{ task.what }} · prioridad {{ task.priority }}
+                  {%- if task.demoted %} · <span class="lane-chip lane-cloud">venía de Cloud</span>{% endif %}
+                </div>
+              </li>
+            {% endfor %}
+          </ol>
+          {% if lane.pending > lane.next|length %}
+            <div class="lane-more">y {{ lane.pending - lane.next|length }} más en esta cola</div>
+          {% endif %}
+        {% else %}
+          <div class="lane-empty">Cola vacía.</div>
+        {% endif %}
+      </section>
+    {% endfor %}
+  </div>
+</div>

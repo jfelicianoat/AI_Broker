@@ -38,6 +38,18 @@ colors:
   info-fill: "#0c1e30"
   info-line: "#244b6d"
   info-ink: "#9fc9f0"
+  lane-local: "#a993f5"
+  lane-local-fill: "#18142e"
+  lane-local-line: "#4b3f86"
+  lane-local-ink: "#cfc3ff"
+  lane-cloud: "#ee8cc6"
+  lane-cloud-fill: "#27121f"
+  lane-cloud-line: "#6c3256"
+  lane-cloud-ink: "#ffbde2"
+  lane-embedding: "#c2cf5a"
+  lane-embedding-fill: "#1b1f0c"
+  lane-embedding-line: "#565f22"
+  lane-embedding-ink: "#e0e99c"
   topbar-bg: "rgba(7, 17, 29, .96)"
   backdrop: "rgba(3, 9, 15, .62)"
 typography:
@@ -226,6 +238,14 @@ Cuatro familias declinadas idénticamente. Tres son estado; la cuarta, `info`, n
 - **Ámbar de Aviso** `--amber` (`#f5ad31`) · `--amber-fill` (`#211b0d`) · `--amber-line` (`#6b511f`) · `--amber-ink` (`#ffd37a`): degradado, en cola, desconocido, y el banner de conexión perdida.
 - **Rojo de Fallo** `--red` (`#f06a6a`) · `--red-fill` (`#2a171e`) · `--red-line` (`#6d343b`) · `--red-ink` (`#ff9ca4`): no disponible, fallido, incompatible, destructivo.
 - **Azul de Información** `--info-fill` (`#0c1e30`) · `--info-line` (`#244b6d`) · `--info-ink` (`#9fc9f0`): la alerta informativa, la insignia neutra y el estado `error` reintentable. No tiene tono puro porque no hay punto de estado «informativo».
+
+### Identidad de carril
+
+- **Violeta Local** `--lane-local` (`#a993f5`), **Rosa Cloud** `--lane-cloud` (`#ee8cc6`) y **Lima Embeddings** `--lane-embedding` (`#c2cf5a`), cada uno con su tríada `-fill` / `-line` / `-ink`. Conversiones no tiene tono: va en `--muted-line` porque no es una cola de modelos.
+
+Responden a la pregunta de la Regla de la Voz Única: por qué cola pasó una tarea no es estado (no se gana con un hecho), ni traza (no es navegable), ni acento (no está vivo). Es una categoría fija, y desde que hay tres colas de modelos el operador necesita reconocerla de un vistazo en una tabla mezclada (decisión del usuario, 2026-10-27). Los tonos están elegidos lejos de verde, ámbar, rojo, azul y teal para que nunca se lean como estado.
+
+**La Regla del Carril Marcado.** El color de carril solo aparece como marca de 3px a la izquierda (columna de carril, primera celda de una fila) y como chip con el nombre del carril. Nunca rellena una superficie, nunca tiñe texto suelto y nunca viaja sin su nombre.
 
 ### Neutral
 

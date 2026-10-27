@@ -1004,6 +1004,37 @@ def provider_error_from_http(
     )
 
 
+def provider_error_from_transport(
+    error: httpx.HTTPError, *, provider: str, timeout_seconds: float | None = None,
+) -> ProviderError:
+    """Fallo de red de un proveedor, distinguiendo el plazo agotado.
+
+    Los dos salen como PROVIDER_UNAVAILABLE reintentable —para la cuarentena y
+    la recuperación son lo mismo: el proveedor no atendió—, pero el
+    coordinador NO debe reintentar el mismo modelo tras un plazo agotado. Una
+    conexión rechazada se arregla en un segundo; un modelo que no contestó en
+    300 s no contesta al siguiente intento (nvidia/deepseek-v4.1-flash,
+    2026-10-27: tres intentos de 300 s sin un token, con la cola parada
+    detrás). `details["timed_out"]` es la marca que lo decide.
+
+    str() de un ReadTimeout de httpx suele ser la cadena vacía: sin un mensaje
+    propio el fallo llegaba al panel sin decir qué pasó.
+    """
+    timed_out = isinstance(error, httpx.TimeoutException)
+    raw = str(error).strip()
+    if timed_out:
+        wait = f" en {timeout_seconds:g} s" if timeout_seconds else ""
+        message = f"{provider} no respondió{wait} (plazo agotado)"
+        if raw:
+            message += f": {raw}"
+    else:
+        message = raw or f"{provider}: {type(error).__name__}"
+    return ProviderError(
+        "PROVIDER_UNAVAILABLE", message, retryable=True,
+        details={"provider": provider, "timed_out": timed_out},
+    )
+
+
 def provider_http_error_message(error: httpx.HTTPStatusError) -> str:
     response = error.response
     body = response.text.strip()

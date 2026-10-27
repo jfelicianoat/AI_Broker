@@ -4,18 +4,20 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from app.config import (
     BrokerConfig,
     TaskAffinityConfig,
     effective_max_parallel_invocations,
     local_memory_budget_bytes,
+    served_remotely,
 )
 from app.model_capabilities import supports_image_output, supports_vision
 from app.model_enrichment import ModelEnrichment
@@ -77,6 +79,21 @@ logger = logging.getLogger("ai_broker.routing")
 # descargar uno. Con caché corta se evita una consulta por candidato sin que el
 # dato llegue a envejecer dentro de una misma decisión.
 _LOADED_MODELS_TTL_SECONDS = 2.0
+
+# Lo fija el coordinador mientras procesa una tarea del carril cloud: la
+# selección solo ve modelos servidos por otra máquina. Una variable de contexto
+# y no un campo de la petición porque es una decisión de despacho, no algo que
+# el cliente pidiera, y no debe acabar en request_json ni en el hash.
+_remote_only: ContextVar[bool] = ContextVar("routing_remote_only", default=False)
+
+
+@contextmanager
+def remote_only_scope() -> Iterator[None]:
+    token = _remote_only.set(True)
+    try:
+        yield
+    finally:
+        _remote_only.reset(token)
 
 
 def _entry_key(entry: dict[str, Any], task_type: str) -> ModelKey:
@@ -764,17 +781,7 @@ class RoutedModelProvider:
         «cloud» la volvería a dejar en la GPU local. Para la frontera de
         datos sigue mandando la etiqueta, que es lo prudente.
         """
-        if is_local_deployment(entry.get("deployment")):
-            return False
-        provider_id = str(entry.get("provider") or "").lower()
-        custom = next(
-            (item for item in self.config.providers.custom if item.id.lower() == provider_id), None,
-        )
-        if custom is None:
-            # Ollama Cloud (modelos `-cloud` de Ollama) y DeepSeek: remotos.
-            return True
-        host = (urlparse(custom.base_url).hostname or "").lower()
-        return host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+        return served_remotely(self.config, entry.get("provider"), entry.get("deployment"))
 
     @staticmethod
     def _loaded_state(
@@ -966,6 +973,10 @@ class RoutedModelProvider:
             # Fail-closed: sin cloud_allowed solo entran deployments locales;
             # "api" o valores desconocidos se tratan como externos.
             catalog = [item for item in catalog if is_local_deployment(item.get("deployment"))]
+        if _remote_only.get():
+            # Carril cloud: un local aquí correría en la GPU fuera del turno
+            # único de inferencia, junto a lo que ya la esté usando.
+            catalog = [item for item in catalog if self._served_remotely(item)]
         catalog = [item for item in catalog if item.get("compatibility") != "incompatible"]
         catalog = self._without_quarantined(catalog)
         required_capability = "embedding" if request.inference_kind == InferenceKind.embedding else "completion"
@@ -1331,8 +1342,9 @@ class RoutedModelProvider:
         )
         return [ranked[chosen], *ranked[:chosen], *ranked[chosen + 1:]]
 
-    async def delete_local_model(self, provider_id: str, model: str) -> int:
-        """Borra del disco un modelo local. Devuelve los bytes liberados.
+    async def delete_local_model(self, provider_id: str, model: str) -> int | None:
+        """Borra del disco un modelo local. Devuelve los bytes liberados, o
+        None si no se puede saber cuántos.
 
         Solo Ollama: es el único proveedor con API de borrado, y por tanto el
         único donde el runtime puede quitar los blobs que dejan de estar

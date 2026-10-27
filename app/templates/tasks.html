@@ -15,7 +15,7 @@
 
 {% block content %}
   <section class="tasks-stack">
-    {% with lane = embedding_lane %}{% include 'fragments/embedding_lane.html' %}{% endwith %}
+    {% include 'fragments/lanes.html' %}
     {% include 'fragments/queue.html' %}
     {% include 'fragments/history.html' %}
   </section>

@@ -28,9 +28,12 @@ STATUS_LABELS = {
 # `unavailable`) porque es contrato; el panel no debe mostrarlo así. El
 # vocabulario se alinea con COMPATIBILITY_TEXTS ("No operativo").
 # Carriles de trabajo. "Conversiones" en vez de "Ingesta" porque el panel debe
-# nombrar lo que el usuario ve pasar, no el módulo que lo implementa.
+# nombrar lo que el usuario ve pasar, no el módulo que lo implementa. Y
+# "Local" en vez de "Inferencia" desde que existe el carril cloud: los dos
+# infieren, lo que los separa es dónde corre el modelo.
 LANE_LABELS = {
-    "inference": "Inferencia",
+    "inference": "Local",
+    "cloud": "Cloud",
     "ingestion": "Conversiones",
     "embedding": "Embeddings",
 }

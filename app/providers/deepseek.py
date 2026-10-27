@@ -20,6 +20,7 @@ from app.providers.base import (
     estimate_tokens_upper_bound,
     normalized_stop_reason,
     provider_error_from_http,
+    provider_error_from_transport,
     request_with_context_capped_output,
     rescued_content,
     served_generation,
@@ -92,7 +93,9 @@ class DeepSeekProvider:
         except ProviderError:
             raise
         except httpx.HTTPError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="deepseek", timeout_seconds=self.config.timeout_seconds,
+            ) from error
 
     @staticmethod
     def _known_features(model_id: str) -> dict[str, bool]:
@@ -138,7 +141,9 @@ class DeepSeekProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="deepseek", timeout_seconds=self.config.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="deepseek", model=model) from error
         choices = payload.get("choices") or []
@@ -196,7 +201,9 @@ class DeepSeekProvider:
         except ProviderError:
             raise
         except httpx.TransportError as error:
-            raise ProviderError("PROVIDER_UNAVAILABLE", str(error), retryable=True) from error
+            raise provider_error_from_transport(
+                error, provider="deepseek", timeout_seconds=self.config.timeout_seconds,
+            ) from error
         except httpx.HTTPStatusError as error:
             raise provider_error_from_http(error, provider="deepseek", model=model) from error
         message = ((payload.get("choices") or [{}])[0].get("message")) or {}

@@ -24,9 +24,12 @@
     {% include 'fragments/summary.html' %}
   </section>
 
+  <section class="lanes-section">
+    {% include 'fragments/lanes.html' %}
+  </section>
+
   <section class="main-grid">
     {% include 'fragments/active.html' %}
-    {% include 'fragments/queue_preview.html' %}
     {% with lane = embedding_lane %}{% include 'fragments/embedding_lane.html' %}{% endwith %}
     {% include 'fragments/health.html' %}
     {% include 'fragments/resources.html' %}

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 # El default del contrato y el del operador son el mismo número a propósito:
 # quien no configura nada obtiene lo que el esquema promete.
-from app.schemas import DEFAULT_TASK_TIMEOUT_SECONDS
+from app.schemas import DEFAULT_TASK_TIMEOUT_SECONDS, is_local_deployment
 
 # Techo por defecto de una tarea. Está POR ENCIMA del plazo por defecto a
 # propósito y esa es toda su razón de ser: el plazo efectivo es el menor de los
@@ -183,6 +183,27 @@ class EmbeddingLaneConfig(BaseModel):
     batch_max: int = Field(default=64, ge=1, le=2048)
 
 
+class CloudLaneConfig(BaseModel):
+    """Carril propio de las tareas single y auto que van a un modelo remoto.
+
+    Antes compartían el único workflow de inferencia con lo local: una llamada
+    cloud colgada (nvidia/deepseek-v4.1-flash, 2026-10-27, 300 s por intento)
+    paraba la cola entera aunque la GPU estuviera ociosa. Aquí corren a la vez
+    y solo contra modelos servidos por otra máquina; si ninguno responde, la
+    tarea baja al carril local en vez de fallar (ver
+    ConsensusCoordinator._demote_from_cloud_lane).
+
+    Requiere `routing.prefer_cloud_when_allowed`: sin «cloud primero» el
+    ranking puede preferir un local y mandar la tarea aquí sería decidir por él.
+    """
+
+    # Apagado, todo vuelve a la cola de inferencia, como antes del carril.
+    enabled: bool = True
+    # Tareas cloud a la vez. Cuesta ancho de banda y cupo de los proveedores
+    # gratuitos, no GPU: el tope protege del 429 en ráfaga, no de la máquina.
+    max_parallel: int = Field(default=4, ge=1, le=16)
+
+
 class ProcessingConfig(BaseModel):
     max_active_workflows: int = 1
     max_parallel_invocations: int | str = "auto"
@@ -235,6 +256,7 @@ class ProcessingConfig(BaseModel):
     # respuesta ya. La conversación se congela y se retoma donde quedó.
     yield_to_urgent_tasks: bool = True
     embedding_lane: EmbeddingLaneConfig = Field(default_factory=EmbeddingLaneConfig)
+    cloud_lane: CloudLaneConfig = Field(default_factory=CloudLaneConfig)
 
     @model_validator(mode="after")
     def validate_single_workflow(self) -> ProcessingConfig:
@@ -1081,6 +1103,54 @@ class BrokerConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     larm: LarmConfig = Field(default_factory=LarmConfig)
+
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def is_loopback_url(url: str) -> bool:
+    """¿Apunta a este mismo PC? La etiqueta `deployment` no lo dice: unsloth
+    (127.0.0.1:8888) se declara `cloud` y lemonade (localhost:13305) `api`."""
+    return (urlparse(url).hostname or "").lower() in LOOPBACK_HOSTS
+
+
+def served_remotely(config: BrokerConfig, provider: str | None, deployment: str | None) -> bool:
+    """¿Lo atiende de verdad una máquina ajena?
+
+    La etiqueta `deployment` no basta: unsloth (127.0.0.1:8888) se declara
+    `cloud` y lemonade (localhost:13305) `api`, y los dos corren en este mismo
+    PC. Para la frontera de datos sigue mandando la etiqueta, que es lo
+    prudente; esto es para saber si una llamada ocupa la GPU local.
+    """
+    if is_local_deployment(deployment):
+        return False
+    provider_id = str(provider or "").lower()
+    custom = next((item for item in config.providers.custom if item.id.lower() == provider_id), None)
+    if custom is None:
+        # Ollama Cloud (modelos `-cloud` de Ollama) y DeepSeek: remotos.
+        return True
+    return not is_loopback_url(custom.base_url)
+
+
+def cloud_lane_providers(config: BrokerConfig) -> frozenset[str] | None:
+    """Proveedores (en minúsculas) cuyas tareas pueden ir al carril cloud, o
+    None si el carril no está en uso.
+
+    Solo cuenta lo que atiende otra máquina. Ollama queda fuera aunque sirva
+    modelos `-cloud`: su catálogo es sobre todo local, y una petición limitada
+    a Ollama acabaría casi siempre en la GPU.
+    """
+    if not (config.processing.cloud_lane.enabled and config.routing.prefer_cloud_when_allowed):
+        return None
+    remote = {
+        item.id.lower()
+        for item in config.providers.custom
+        if item.enabled and item.deployment.lower() not in {"local", "bootstrap"}
+        and not is_loopback_url(item.base_url)
+    }
+    if config.providers.deepseek.enabled:
+        remote.add("deepseek")
+    return frozenset(remote)
 
 
 def local_memory_pool(config: BrokerConfig) -> Literal["vram", "unified"]:
