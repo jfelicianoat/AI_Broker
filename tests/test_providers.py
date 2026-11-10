@@ -1002,6 +1002,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
             base_url="http://localhost:13305/v1",
             sync_models=True,
             probe_features=False,
+            api_key_env=None,  # local y sin clave: no depender de NVIDIA_API_KEY
         )
         provider = OpenAICompatibleProvider(config, transport=httpx.MockTransport(handler))
         catalog = await provider.models()

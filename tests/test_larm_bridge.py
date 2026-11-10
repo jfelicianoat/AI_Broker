@@ -271,7 +271,9 @@ def test_embedding_uses_embedding_capability(tmp_path: Path) -> None:
 
 
 def test_endpoint_credential_travels_only_from_the_local_channel(tmp_path: Path) -> None:
-    config = broker_config(tmp_path)
+    # Pipe explícito: el token lo da el doble, y sin esto la ruta se deriva
+    # del SID de Windows, que en Linux no existe (AUTH_BACKEND_UNAVAILABLE).
+    config = broker_config(tmp_path, credentials_pipe=r"\\.\pipe\LARM-test-credentials")
     fake = FakeLarm()
     fake.credential_required = True
     runtime = FakeRuntime(fake)

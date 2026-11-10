@@ -1,0 +1,5 @@
+# Esquemas LARM vendorizados: el test compara su SHA-256 con el paquete
+# oficial byte a byte. Sin esto, un checkout con core.autocrlf=true (el
+# defecto de los runners Windows de GitHub) los convierte a CRLF y el hash
+# deja de coincidir.
+tests/fixtures/larm/*.json -text

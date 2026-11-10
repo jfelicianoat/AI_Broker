@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import BinaryIO
 
@@ -30,7 +31,9 @@ class StateLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+b")
         try:
-            if os.name == "nt":
+            # sys.platform (no os.name): mypy solo descarta la rama ajena
+            # al SO con esta forma; con os.name fallaba en Linux por msvcrt.
+            if sys.platform == "win32":
                 import msvcrt
 
                 if handle.seek(0, os.SEEK_END) == 0:

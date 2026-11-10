@@ -128,8 +128,9 @@ class SandboxExecutor:
             ])
             for dest_name, local_path in files.items():
                 # Defensa extra contra travesía de rutas: solo el nombre, sin componentes de ruta.
+                # `.name` de "../../" es "..": hay que descartarlo aparte.
                 safe_name = PurePosixPath(dest_name).name
-                if not safe_name:
+                if safe_name in ("", ".", ".."):
                     continue
                 await self._run_management_command([
                     self.settings.docker_path, "cp", str(local_path),
