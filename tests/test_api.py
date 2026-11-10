@@ -3308,7 +3308,14 @@ def test_ready_returns_503_when_dispatcher_stops(tmp_path: Path) -> None:
 def test_health_reports_disk_dependency(tmp_path: Path) -> None:
     from app.config import HealthConfig
 
-    with make_client(tmp_path) as client:
+    # Umbral 0: el resultado no depende del espacio libre real de la máquina
+    # (con el umbral por defecto de 10 GB, un disco casi lleno daba degraded).
+    healthy_config = BrokerConfig(
+        persistence=PersistenceConfig(database=str(tmp_path / "broker.db")),
+        processing=ProcessingConfig(auto_dispatch=False, provider_mode="bootstrap"),
+        health=HealthConfig(disk_free_alert_gb=0),
+    )
+    with TestClient(create_app(healthy_config)) as client:
         report = client.get("/health").json()
         assert report["dependencies"]["disk"]["status"] == "healthy"
 

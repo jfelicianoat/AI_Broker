@@ -363,3 +363,38 @@ def test_mcp_servers_alone_satisfy_the_agent_tool_requirement() -> None:
         "execution": {"strategy": "agent", "agent": {"skills": [], "mcp_servers": ["echo"]}},
     })
     assert request.execution.agent.mcp_servers == ["echo"]
+
+
+# --------------------------------------------------- call_structured: contrato
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"structuredContent": {"ok": 1}}, {"ok": 1}),
+        ({"content": [{"type": "text", "text": '{"ok": 2}'}]}, {"ok": 2}),
+        ({"isError": True}, "returned an error"),
+        ({"content": []}, "one structured JSON object"),
+        ({"content": [{"type": "image"}]}, "one structured JSON object"),
+        ({"content": [{"type": "text", "text": "no json"}]}, "invalid JSON"),
+        ({"content": [{"type": "text", "text": "[1, 2]"}]}, "non-object"),
+    ],
+)
+def test_call_structured_accepts_only_one_json_object(payload, expected) -> None:
+    registry = MCPRegistry(MCPConfig())
+
+    async def fake_payload(server_id, tool, arguments):
+        return payload
+
+    registry._call_payload = fake_payload  # type: ignore[method-assign]
+    if isinstance(expected, dict):
+        assert asyncio.run(registry.call_structured("s", "t", {})) == expected
+    else:
+        with pytest.raises(MCPError, match=expected):
+            asyncio.run(registry.call_structured("s", "t", {}))
+
+
+def test_call_payload_rejects_unknown_server() -> None:
+    registry = MCPRegistry(MCPConfig())
+    with pytest.raises(MCPError, match="no está configurado"):
+        asyncio.run(registry.call_structured("fantasma", "t", {}))

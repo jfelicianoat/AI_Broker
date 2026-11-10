@@ -342,7 +342,12 @@ def test_timeouts_are_retryable_and_missing_credentials_are_not(
 
 
 def test_credentials_channel_timeout_releases_the_lease(tmp_path: Path) -> None:
-    config = broker_config(tmp_path, credentials_pipe_timeout_seconds=0.1)
+    # Pipe explícito: el token lo da el doble, y sin esto la ruta se deriva
+    # del SID de Windows, que en Linux no existe (AUTH_BACKEND_UNAVAILABLE).
+    config = broker_config(
+        tmp_path, credentials_pipe_timeout_seconds=0.1,
+        credentials_pipe=r"\\.\pipe\LARM-test-credentials",
+    )
     fake = FakeLarm()
     fake.credential_required = True
 

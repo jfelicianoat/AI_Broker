@@ -379,6 +379,9 @@ def test_an_openai_compatible_endpoint_gets_a_data_uri() -> None:
         OpenAICompatibleProviderConfig(
             id="lmstudio", enabled=True, base_url="http://127.0.0.1:1234/v1",
             deployment="local", sync_models=True,
+            # Servidor local sin clave: sin esto el test dependía de que
+            # NVIDIA_API_KEY (la variable por defecto) existiera en la máquina.
+            api_key_env=None,
         ),
         transport=httpx.MockTransport(handler),
     )
@@ -414,6 +417,9 @@ def test_a_text_only_task_keeps_the_plain_string_content() -> None:
         OpenAICompatibleProviderConfig(
             id="lmstudio", enabled=True, base_url="http://127.0.0.1:1234/v1",
             deployment="local", sync_models=True,
+            # Servidor local sin clave: sin esto el test dependía de que
+            # NVIDIA_API_KEY (la variable por defecto) existiera en la máquina.
+            api_key_env=None,
         ),
         transport=httpx.MockTransport(handler),
     )
@@ -465,7 +471,9 @@ def test_a_returned_image_is_stored_as_an_artifact(tmp_path: Path) -> None:
 # ------------------------------------------------------ formatos que nadie mira
 
 def _image_bytes(mode: str = "RGB", fmt: str = "TIFF") -> bytes:
-    from PIL import Image
+    # Pillow es opcional (llega con el extra de docling): sin él, el broker
+    # responde EngineMissing y estos tests no tienen nada que comprobar.
+    Image = pytest.importorskip("PIL.Image")
 
     buffer = io.BytesIO()
     Image.new("RGB", (8, 8), (10, 200, 30)).convert(mode).save(buffer, format=fmt)
