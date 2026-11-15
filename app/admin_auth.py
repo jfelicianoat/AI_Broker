@@ -10,6 +10,7 @@ import time
 
 from fastapi import HTTPException, Request
 
+from app.client_tokens import ADMIN, ClientTokenStore, Principal
 from app.config import BrokerConfig
 
 ADMIN_COOKIE_NAME = "ai_broker_dashboard_admin"
@@ -176,6 +177,36 @@ def verify_admin_access(request: Request, config: BrokerConfig) -> None:
     raise HTTPException(status_code=403, detail="ADMIN_AUTH_REQUIRED")
 
 
+def _bearer_token(request: Request) -> str | None:
+    scheme, _, value = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    return value.strip() or None
+
+
+def verify_api_access(request: Request, config: BrokerConfig, tokens: ClientTokenStore | None) -> Principal:
+    """Credencial para las rutas de trabajo: la de administración o un token de cliente.
+
+    El token de cliente viaja en la misma cabecera `X-Admin-Token` que el de
+    administración, o como `Authorization: Bearer`: así una app ya escrita
+    pasa a usarlo cambiando solo el valor que recibe de Core. El detalle del
+    403 es el de siempre (`ADMIN_AUTH_REQUIRED`) porque hay clientes que lo
+    comparan. Sin token de administración configurado el broker está abierto y
+    todo el mundo es operador, como hasta ahora.
+    """
+    try:
+        verify_admin_access(request, config)
+        return ADMIN
+    except HTTPException as denied:
+        if denied.status_code != 403 or tokens is None:
+            raise
+        for supplied in (request.headers.get("x-admin-token"), _bearer_token(request)):
+            token = tokens.authenticate(supplied)
+            if token is not None:
+                return Principal("client", client_id=token.id, name=token.name)
+        raise
+
+
 class LoginThrottle:
     """Backoff exponencial de intentos de login fallidos por origen."""
 
@@ -196,14 +227,25 @@ class LoginThrottle:
             _, blocked_until = self._state.get(key, (0, 0.0))
             return max(0.0, blocked_until - time.monotonic())
 
+    # Un origen cuyo bloqueo terminó hace más de esto se olvida (contador a
+    # cero): sin purga, el diccionario crece con cada IP distinta que falla.
+    _FORGET_AFTER_SECONDS = 3600.0
+
     def record_failure(self, key: str) -> None:
         with self._lock:
+            now = time.monotonic()
+            expired = [
+                other for other, (_, blocked_until) in self._state.items()
+                if now - blocked_until > self._FORGET_AFTER_SECONDS
+            ]
+            for other in expired:
+                del self._state[other]
             failures = self._state.get(key, (0, 0.0))[0] + 1
             if failures < self._max_free:
                 delay = 0.0
             else:
                 delay = min(self._cap, self._base * (2 ** (failures - self._max_free)))
-            self._state[key] = (failures, time.monotonic() + delay)
+            self._state[key] = (failures, now + delay)
 
     def reset(self, key: str) -> None:
         with self._lock:

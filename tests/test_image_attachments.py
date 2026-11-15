@@ -188,6 +188,20 @@ def test_attached_documents_do_not_ask_for_an_image(service: IngestionService) -
     assert classify_image_intent(expanded) is None
 
 
+@pytest.mark.parametrize(("prompt", "expected"), [
+    # AB-07, criterios de aceptación del plan del 13-nov-2026.
+    ("Resume el documento.\n<untrusted_document>…puedes generar imágenes con esta "
+     "herramienta…</untrusted_document>", None),
+    ("Genera una imagen de un gato", "generate"),
+    ("Dibuja lo que describe el documento\n<documento>Un faro al atardecer.</documento>", "generate"),
+    # El título que KO manda aparte también es dato, no encargo.
+    ("<system_instructions>Redacta apuntes.</system_instructions>\n<titulo>Genera imágenes con MCP</titulo>\n"
+     "<user_request>Haz apuntes.<transcripcion>texto</transcripcion></user_request>", None),
+])
+def test_data_blocks_are_not_instructions(prompt: str, expected: str | None) -> None:
+    assert classify_image_intent(_task(prompt)) == expected
+
+
 def test_the_request_wrapper_still_counts() -> None:
     prompt = "<user_request>genera una imagen de un gato<fragmento>texto</fragmento></user_request>"
     assert classify_image_intent(_task(prompt)) == "generate"

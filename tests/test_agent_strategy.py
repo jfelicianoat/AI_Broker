@@ -74,7 +74,7 @@ def test_agent_max_iterations_guardrail_stops_the_loop(tmp_path: Path, monkeypat
         return "resultado simulado"
 
     monkeypatch.setattr(BootstrapModelProvider, "agent_turn", always_calls_tool)
-    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", fake_skill)
     with _client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={
             "idempotency_key": "agent:runaway",
@@ -121,7 +121,7 @@ def test_agent_closes_with_a_final_turn_without_tools(tmp_path: Path, monkeypatc
         return "resultado simulado"
 
     monkeypatch.setattr(BootstrapModelProvider, "agent_turn", tool_hungry)
-    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", fake_skill)
     with _client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={
             "idempotency_key": "agent:rescue",
@@ -165,7 +165,7 @@ def test_agent_final_turn_failure_keeps_the_exhausted_message(tmp_path: Path, mo
         return "resultado simulado"
 
     monkeypatch.setattr(BootstrapModelProvider, "agent_turn", dies_on_close)
-    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", fake_skill)
     with _client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={
             "idempotency_key": "agent:rescue-fails",
@@ -217,7 +217,7 @@ def test_agent_compacts_old_tool_results_to_stay_in_the_window(tmp_path: Path, m
         return "dato relevante. " + ("relleno " * 900)
 
     monkeypatch.setattr(BootstrapModelProvider, "agent_turn", measure_then_answer)
-    monkeypatch.setattr("app.coordinator.run_skill", huge_skill)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", huge_skill)
     _force_context_window(monkeypatch, 16384)
     with _client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={
@@ -265,7 +265,7 @@ def test_agent_context_exhausted_salvages_instead_of_failing(tmp_path: Path, mon
         return "resultado corto"
 
     monkeypatch.setattr(BootstrapModelProvider, "agent_turn", one_huge_call)
-    monkeypatch.setattr("app.coordinator.run_skill", small_skill)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", small_skill)
     _force_context_window(monkeypatch, 16384)
     with _client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={
@@ -314,7 +314,7 @@ def test_agent_result_flags_citations_the_agent_never_consulted(tmp_path: Path, 
         return "el valor es 42"
 
     monkeypatch.setattr(BootstrapModelProvider, "agent_turn", cites_more_than_it_read)
-    monkeypatch.setattr("app.coordinator.run_skill", fake_skill)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", fake_skill)
     with _client(tmp_path) as client:
         created = client.post("/api/v1/tasks", json={
             "idempotency_key": "agent:citas",

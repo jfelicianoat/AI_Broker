@@ -36,6 +36,79 @@ _STARTUP_MARGIN_SECONDS = 25.0
 # Subcomandos de preparación (volume create/create/start/cp): son metadata,
 # no ejecución de código del modelo, así que un plazo corto y fijo basta.
 _MANAGEMENT_TIMEOUT_SECONDS = 20.0
+# Plazo para recoger al CLI de Docker después de matarlo: sin esperarlo queda
+# un proceso sin recoger; con un plazo, un kill atascado no cuelga la tarea.
+_REAP_TIMEOUT_SECONDS = 5.0
+_READ_CHUNK_BYTES = 65536
+
+
+def _output_limit_bytes(max_output_chars: int) -> int:
+    """Bytes que se guardan por flujo (stdout/stderr) antes de cortar.
+
+    4 bytes por carácter es el máximo de UTF-8; el margen cubre la cabecera
+    que añade _format_result. Lo que pase de aquí nunca llega a la memoria
+    del broker: el límite de memoria del contenedor no acota su stdout."""
+    return max_output_chars * 4 + _READ_CHUNK_BYTES
+
+
+async def _reap(process: asyncio.subprocess.Process) -> None:
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=_REAP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("sandbox.reap_timeout", extra={"event": "sandbox.reap_timeout"})
+
+
+async def _communicate_capped(
+    process: asyncio.subprocess.Process, data: bytes, limit_bytes: int,
+) -> tuple[bytes, bytes, bool]:
+    """Como process.communicate(data), pero sin acumular más de limit_bytes
+    por flujo. Si un flujo se pasa, se mata el proceso y se descarta el resto
+    hasta EOF. Devuelve (stdout, stderr, se_paso_del_limite)."""
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    exceeded = False
+
+    async def feed() -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(data)
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # El proceso terminó (o lo matamos) antes de leer todo el código:
+            # lo mismo que ignora communicate().
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    async def read(stream: asyncio.StreamReader) -> bytes:
+        nonlocal exceeded
+        chunks: list[bytes] = []
+        kept = 0
+        while True:
+            chunk = await stream.read(_READ_CHUNK_BYTES)
+            if not chunk:
+                return b"".join(chunks)
+            if kept >= limit_bytes:
+                continue  # ya cortado: se descarta hasta que el proceso muera
+            room = limit_bytes - kept
+            chunks.append(chunk[:room])
+            kept += min(len(chunk), room)
+            if len(chunk) > room and not exceeded:
+                exceeded = True
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+
+    _, stdout, stderr = await asyncio.gather(feed(), read(process.stdout), read(process.stderr))
+    await process.wait()
+    return stdout, stderr, exceeded
 
 
 class SandboxError(RuntimeError):
@@ -89,20 +162,47 @@ class SandboxExecutor:
                 f"docker no encontrado ({self.settings.docker_path}); "
                 "instala Docker Desktop o corrige sandbox.docker_path"
             ) from error
+        # Matar el CLI de `docker run` no para el contenedor: hay que rematarlo.
+        return await self._collect(process, code, remove_container=container_name)
+
+    async def _collect(
+        self, process: asyncio.subprocess.Process, code: str, *, remove_container: str | None,
+    ) -> str:
+        """Alimenta el código por stdin y recoge la salida con tope de bytes.
+
+        remove_container: contenedor que hay que rematar si se corta la
+        ejecución (None cuando el llamante ya lo limpia en su finally)."""
+        limit = _output_limit_bytes(self.settings.max_output_chars)
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(code.encode("utf-8")),
+            stdout, stderr, exceeded = await asyncio.wait_for(
+                _communicate_capped(process, code.encode("utf-8"), limit),
                 timeout=self.settings.timeout_seconds + _STARTUP_MARGIN_SECONDS,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await self._force_remove(container_name)
+            await _reap(process)
+            if remove_container is not None:
+                await self._force_remove(remove_container)
             raise SandboxError(
                 f"la ejecución superó el plazo de {self.settings.timeout_seconds}s y fue cancelada"
             ) from None
 
         out_text = stdout.decode("utf-8", errors="replace")
         err_text = stderr.decode("utf-8", errors="replace")
+        if exceeded:
+            # Es un resultado del código del modelo, no un fallo de
+            # infraestructura (ver SandboxError): se devuelve como texto, con
+            # el principio de la salida para que el modelo vea qué imprimía.
+            if remove_container is not None:
+                await self._force_remove(remove_container)
+            logger.warning(
+                "sandbox.output_limit_exceeded",
+                extra={"event": "sandbox.output_limit_exceeded", "limit_bytes": limit},
+            )
+            head = self._format_result(0, out_text, err_text)
+            return (
+                f"ERROR: el código escribió más de {limit} bytes de salida y fue interrumpido. "
+                "Reduce lo que imprimes.\n\n" + head
+            )
         if process.returncode != 0 and self._daemon_error(err_text):
             raise SandboxError(
                 "Docker no responde (¿Docker Desktop arrancado?): " + err_text.strip()[:300]
@@ -157,24 +257,8 @@ class SandboxExecutor:
                 f"docker no encontrado ({self.settings.docker_path}); "
                 "instala Docker Desktop o corrige sandbox.docker_path"
             ) from error
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(code.encode("utf-8")),
-                timeout=self.settings.timeout_seconds + _STARTUP_MARGIN_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            process.kill()
-            raise SandboxError(
-                f"la ejecución superó el plazo de {self.settings.timeout_seconds}s y fue cancelada"
-            ) from None
-
-        out_text = stdout.decode("utf-8", errors="replace")
-        err_text = stderr.decode("utf-8", errors="replace")
-        if process.returncode != 0 and self._daemon_error(err_text):
-            raise SandboxError(
-                "Docker no responde (¿Docker Desktop arrancado?): " + err_text.strip()[:300]
-            )
-        return self._format_result(process.returncode or 0, out_text, err_text)
+        # El contenedor lo retira el finally de _run_python_with_files.
+        return await self._collect(process, code, remove_container=None)
 
     async def _run_management_command(self, command: list[str]) -> None:
         """Subcomandos cortos de preparación (volume create/create/start/cp):
@@ -196,7 +280,7 @@ class SandboxExecutor:
                 process.communicate(), timeout=_MANAGEMENT_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            process.kill()
+            await _reap(process)
             raise SandboxError(
                 f"la preparación del sandbox superó {_MANAGEMENT_TIMEOUT_SECONDS}s: {' '.join(command)}"
             ) from None

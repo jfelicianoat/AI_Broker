@@ -353,7 +353,10 @@ class IngestionService:
             return self.config.ingestion.images.enabled
         return requested
 
-    def _reusable_row(self, sha256: str, describe_images: bool, ocr: bool, policy: FilePrivacyPolicy) -> Any:
+    def _reusable_row(
+        self, sha256: str, describe_images: bool, ocr: bool, policy: FilePrivacyPolicy,
+        client_id: str | None = None,
+    ) -> Any:
         """Conversión previa que sirve para lo que se pide ahora.
 
         Una conversión CON descripciones sirve para quien las pide sin ellas
@@ -369,6 +372,10 @@ class IngestionService:
             "SELECT * FROM ingested_files WHERE sha256 = ? "
             "AND COALESCE(describe_images, ?) >= ? AND COALESCE(ocr, 0) >= ? "
             "AND data_classification = ? AND cloud_allowed = ? "
+            # Solo se reutiliza lo del mismo propietario: si no, el segundo
+            # cliente que suba un documento recibiría el file_id del primero,
+            # y con él sabría que otra app ya lo tenía.
+            "AND client_id IS ? "
             "ORDER BY created_at DESC",
             (
                 sha256,
@@ -377,6 +384,7 @@ class IngestionService:
                 int(ocr),
                 policy.data_classification.value,
                 int(policy.cloud_allowed),
+                client_id,
             ),
         )
         for row in rows:
@@ -398,15 +406,17 @@ class IngestionService:
         ocr: bool = False,
         data_classification: DataClassification | str = DataClassification.local_only,
         cloud_allowed: bool = False,
+        client_id: str | None = None,
     ) -> tuple[FileRecord, bool]:
         with self._upload_lock:
             return self._store_upload_from_file(
-                filename, temp_path, describe_images, ocr, data_classification, cloud_allowed,
+                filename, temp_path, describe_images, ocr, data_classification, cloud_allowed, client_id,
             )
 
     def _store_upload_from_file(
         self, filename: str, temp_path: Path, describe_images: bool | None,
         ocr: bool, data_classification: DataClassification | str, cloud_allowed: bool,
+        client_id: str | None = None,
     ) -> tuple[FileRecord, bool]:
         """Valida, deduplica y persiste una subida ya volcada a disco.
 
@@ -448,7 +458,7 @@ class IngestionService:
             # El OCR solo tiene sentido sobre una imagen: un PDF ya lo lleva en
             # su conversión y un .docx no tiene nada que reconocer.
             wants_ocr = bool(ocr) and detection.kind == "image"
-            existing = self._reusable_row(sha256, describe, wants_ocr, policy)
+            existing = self._reusable_row(sha256, describe, wants_ocr, policy, client_id)
             if existing is not None:
                 reused = _record_from_row(existing)
                 if self._storage_healthy(reused):
@@ -501,14 +511,14 @@ class IngestionService:
             INSERT INTO ingested_files (
                 id, sha256, filename, extension, kind, engine, size_bytes, status,
                 error_json, original_path, markdown_path, meta_json, created_at, updated_at,
-                describe_images, ocr, data_classification, cloud_allowed, privacy_policy_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1)
+                describe_images, ocr, data_classification, cloud_allowed, privacy_policy_version, client_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """,
             (
                 file_id, sha256, name, extension, detection.kind,
                 engine, size, status, str(original_path), dumps_json(meta_fields), now, now,
                 int(describe), int(wants_ocr),
-                policy.data_classification.value, int(policy.cloud_allowed),
+                policy.data_classification.value, int(policy.cloud_allowed), client_id,
             ),
         )
         record = self.get(file_id)
@@ -573,6 +583,13 @@ class IngestionService:
         return repaired
 
     # --------------------------------------------------------------- consultas
+
+    def file_owner(self, file_id: str) -> str | None:
+        """client_id del fichero (None = el operador). KeyError si no existe."""
+        row = self.db.query_one("SELECT client_id FROM ingested_files WHERE id = ?", (file_id,))
+        if row is None:
+            raise KeyError(file_id)
+        return row["client_id"]
 
     def get(self, file_id: str) -> FileRecord | None:
         row = self.db.query_one("SELECT * FROM ingested_files WHERE id = ?", (file_id,))

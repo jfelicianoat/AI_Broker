@@ -1,0 +1,25 @@
+{
+  "version": "oro_v1",
+  "descripcion": "Preguntas con una única respuesta comprobable, elegidas porque un modelo solo tiende a fallarlas (trampas de razonamiento, cuentas en varios pasos, conteo). Sirven para comparar mixture_of_agents con cada uno de sus proponentes por separado. tests/test_medir_consenso.py recalcula en Python las respuestas que se pueden calcular.",
+  "instruccion_formato": "Razona lo que necesites y termina con una última línea exactamente así: RESPUESTA: <valor>. Sin unidades salvo que se pidan.",
+  "items": [
+    {"id": "C01", "tipo": "numero", "pregunta": "Un tren sale a las 14:35 y el viaje dura 2 h 50 min. ¿A qué hora llega? Responde en formato HH:MM.", "respuesta": "17:25"},
+    {"id": "C02", "tipo": "numero", "pregunta": "¿Cuántas veces aparece la letra «r» en la palabra «ferrocarril»?", "respuesta": "4"},
+    {"id": "C03", "tipo": "numero", "pregunta": "Si 5 máquinas hacen 5 piezas en 5 minutos, ¿cuántos minutos tardan 100 máquinas en hacer 100 piezas?", "respuesta": "5"},
+    {"id": "C04", "tipo": "numero", "pregunta": "Un bate y una pelota cuestan 1,10 € en total. El bate cuesta 1,00 € más que la pelota. ¿Cuántos céntimos cuesta la pelota?", "respuesta": "5"},
+    {"id": "C05", "tipo": "texto", "pregunta": "¿Qué día de la semana fue el 1 de enero de 2000? Responde con el nombre del día en español.", "respuesta": "sabado"},
+    {"id": "C06", "tipo": "numero", "pregunta": "¿Cuánto suman todos los números primos menores que 30?", "respuesta": "129"},
+    {"id": "C07", "tipo": "numero", "pregunta": "Un nenúfar duplica su superficie cada día y cubre el lago entero el día 48. ¿Qué día cubría la mitad del lago?", "respuesta": "47"},
+    {"id": "C08", "tipo": "numero", "pregunta": "Ana tiene 3 hermanos y 2 hermanas. ¿Cuántas hermanas tiene Luis, uno de sus hermanos?", "respuesta": "3"},
+    {"id": "C09", "tipo": "numero", "pregunta": "Calcula 17 × 23 − 144 ÷ 12.", "respuesta": "379"},
+    {"id": "C10", "tipo": "texto", "pregunta": "Si hoy es miércoles, ¿qué día de la semana será dentro de 100 días? Responde con el nombre del día en español.", "respuesta": "viernes"},
+    {"id": "C11", "tipo": "numero", "pregunta": "¿Cuántos minutos tiene una semana?", "respuesta": "10080"},
+    {"id": "C12", "tipo": "numero", "pregunta": "Un precio sube un 20 % y después baja un 20 %. ¿Qué porcentaje del precio original queda? Responde solo el número.", "respuesta": "96"},
+    {"id": "C13", "tipo": "texto", "pregunta": "Ordena alfabéticamente estas palabras y di cuál queda en tercer lugar: pera, manzana, kiwi, uva, banana.", "respuesta": "manzana"},
+    {"id": "C14", "tipo": "numero", "pregunta": "¿Cuántos días tiene febrero del año 2100?", "respuesta": "28"},
+    {"id": "C15", "tipo": "texto", "pregunta": "Escribe al revés la palabra «murcielago» (sin tilde).", "respuesta": "ogaleicrum"},
+    {"id": "C16", "tipo": "numero", "pregunta": "Si x + 2y = 11 y 3x − y = 5, ¿cuánto vale x?", "respuesta": "3"},
+    {"id": "C17", "tipo": "numero", "pregunta": "¿Cuál es el resto de dividir 2 elevado a 20 entre 7?", "respuesta": "4"},
+    {"id": "C18", "tipo": "texto", "pregunta": "Pedro es más alto que Juan, Juan es más alto que Luis y Luis es más alto que Marta. ¿Quién es el segundo más bajo?", "respuesta": "luis"}
+  ]
+}

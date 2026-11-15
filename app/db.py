@@ -396,6 +396,31 @@ class Database:
             ):
                 if column not in file_columns:
                     self._conn.execute(f"ALTER TABLE ingested_files ADD COLUMN {column} {declaration}")
+            # Tokens por cliente (app/client_tokens.py). Se guarda el hash, nunca
+            # el token: quien lea la base no puede hacerse pasar por un cliente.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS client_tokens (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    token_prefix TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    last_used_at TEXT
+                )
+                """
+            )
+            # Propietario de cada tarea y de cada fichero: NULL = el operador
+            # (token de administración o broker sin token), que es lo que eran
+            # todas las filas anteriores. Un cliente solo ve lo suyo.
+            if "client_id" not in task_columns:
+                self._conn.execute("ALTER TABLE tasks ADD COLUMN client_id TEXT")
+            if "client_id" not in file_columns:
+                self._conn.execute("ALTER TABLE ingested_files ADD COLUMN client_id TEXT")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_client ON tasks(client_id, task_group, status)"
+            )
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency "
                 "ON tasks(idempotency_key) WHERE idempotency_key IS NOT NULL"

@@ -52,7 +52,7 @@ def _arrive_mid_run(monkeypatch, client: TestClient, priority: int) -> list[str]
             arrived.append(task.task_id)
         return "resultado simulado"
 
-    monkeypatch.setattr("app.coordinator.run_skill", skill_with_arrival)
+    monkeypatch.setattr("app.coordinator_agent.run_skill", skill_with_arrival)
     return arrived
 
 

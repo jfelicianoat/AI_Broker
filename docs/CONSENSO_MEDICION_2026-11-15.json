@@ -1,0 +1,382 @@
+{
+  "resumen": {
+    "preguntas": 18,
+    "consenso": {
+      "aciertos": 10,
+      "tasa": 0.556
+    },
+    "por_modelo": {
+      "lmstudio/prism-ml/bonsai-27b": {
+        "preguntas": 1,
+        "aciertos": 1,
+        "fallos_de_ejecucion": 0,
+        "tasa": 1.0
+      },
+      "ollama/granite4.1:30b": {
+        "preguntas": 10,
+        "aciertos": 8,
+        "fallos_de_ejecucion": 1,
+        "tasa": 0.8
+      },
+      "ollama/lfm2:24b": {
+        "preguntas": 10,
+        "aciertos": 6,
+        "fallos_de_ejecucion": 1,
+        "tasa": 0.6
+      },
+      "ollama/qwen3.8:27b": {
+        "preguntas": 10,
+        "aciertos": 9,
+        "fallos_de_ejecucion": 1,
+        "tasa": 0.9
+      }
+    },
+    "mejor_modelo_solo": {
+      "modelo": "lmstudio/prism-ml/bonsai-27b",
+      "tasa": 1.0,
+      "frente_al_consenso": {
+        "consenso_gana": 0,
+        "consenso_pierde": 1,
+        "igual": 0
+      }
+    },
+    "oraculo_por_pregunta": {
+      "aciertos": 10,
+      "tasa": 0.556
+    },
+    "consensos_degradados": 0,
+    "aviso": "Muestra pequeña: con menos de ~50 preguntas, una diferencia de 1 o 2 aciertos no distingue una estrategia de otra.",
+    "duracion_s": 3152.0,
+    "conjunto": "oro_v1"
+  },
+  "detalle": [
+    {
+      "item_id": "C01",
+      "expected": "17:25",
+      "moa_answer": "17:25",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "16:00",
+          "correct": false,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "17:25",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "17:25",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C02",
+      "expected": "4",
+      "moa_answer": "4",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "2. RESPUESTA: 2",
+          "correct": false,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "4",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "4",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C03",
+      "expected": "5",
+      "moa_answer": "5",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "5",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "5",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "5",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C04",
+      "expected": "5",
+      "moa_answer": "5",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "5",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "5",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "5",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C05",
+      "expected": "sabado",
+      "moa_answer": "sábado",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "sábado. RESPUESTA: sábado",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "sábado",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "sábado",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C06",
+      "expected": "129",
+      "moa_answer": "129",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "129",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "129",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "129",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C07",
+      "expected": "47",
+      "moa_answer": "47",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "47",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "47",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "47",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C08",
+      "expected": "3",
+      "moa_answer": "3",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "2",
+          "correct": false,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "3",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "2",
+          "correct": false,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C09",
+      "expected": "379",
+      "moa_answer": "379",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": "379",
+          "correct": true,
+          "error": null
+        },
+        "ollama/granite4.1:30b": {
+          "answer": "379",
+          "correct": true,
+          "error": null
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": "379",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C10",
+      "expected": "viernes",
+      "moa_answer": "viernes",
+      "moa_correct": true,
+      "moa_error": null,
+      "moa_synthesized": true,
+      "singles": {
+        "ollama/lfm2:24b": {
+          "answer": null,
+          "correct": false,
+          "error": "MODEL_ERROR"
+        },
+        "ollama/qwen3.8:27b": {
+          "answer": null,
+          "correct": false,
+          "error": "MODEL_ERROR"
+        },
+        "ollama/granite4.1:30b": {
+          "answer": null,
+          "correct": false,
+          "error": "MODEL_ERROR"
+        }
+      }
+    },
+    {
+      "item_id": "C11",
+      "expected": "10080",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {
+        "lmstudio/prism-ml/bonsai-27b": {
+          "answer": "10080",
+          "correct": true,
+          "error": null
+        }
+      }
+    },
+    {
+      "item_id": "C12",
+      "expected": "96",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    },
+    {
+      "item_id": "C13",
+      "expected": "manzana",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    },
+    {
+      "item_id": "C14",
+      "expected": "28",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    },
+    {
+      "item_id": "C15",
+      "expected": "ogaleicrum",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    },
+    {
+      "item_id": "C16",
+      "expected": "3",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    },
+    {
+      "item_id": "C17",
+      "expected": "4",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    },
+    {
+      "item_id": "C18",
+      "expected": "luis",
+      "moa_answer": null,
+      "moa_correct": false,
+      "moa_error": "CONSENSUS_QUORUM_NOT_REACHED",
+      "moa_synthesized": null,
+      "singles": {}
+    }
+  ]
+}

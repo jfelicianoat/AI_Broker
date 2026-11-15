@@ -282,6 +282,28 @@ def test_real_docker_execution_and_isolation():
 
 
 @pytest.mark.skipif(not docker_ready, reason="requiere Docker en marcha y AI_BROKER_SANDBOX_DOCKER=1")
+def test_real_docker_endless_output_is_cut_and_container_removed():
+    """AB-03: código que imprime sin parar no puede llenar la memoria del
+    broker; se corta al tope, se devuelve el principio y el contenedor muere."""
+    import subprocess
+    import time
+
+    executor = make_executor(timeout_seconds=30)
+    started = time.monotonic()
+    result = asyncio.run(executor.run_python("while True:\n    print('x' * 1000)\n"))
+    elapsed = time.monotonic() - started
+    assert result.startswith("ERROR: el código escribió más de")
+    assert "xxxx" in result
+    # Mucho antes que el plazo de 30 s: se corta por tamaño, no por tiempo.
+    assert elapsed < 20
+    alive = subprocess.run(
+        ["docker", "ps", "-q", "--filter", "name=ai-broker-sbx-"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert alive == ""
+
+
+@pytest.mark.skipif(not docker_ready, reason="requiere Docker en marcha y AI_BROKER_SANDBOX_DOCKER=1")
 def test_real_docker_file_staging(tmp_path: Path) -> None:
     """CSV grande adjuntado: run_code debe poder abrirlo desde el sandbox y
     calcular media/mediana exactas — el bug reportado (CONTEXT_LIMIT_EXCEEDED

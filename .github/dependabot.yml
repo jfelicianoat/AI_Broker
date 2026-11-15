@@ -1,0 +1,15 @@
+# Actualizaciones automáticas de dependencias (COM-01, plan del 13-nov-2026).
+#
+# Ojo con pip: Dependabot lee pyproject.toml, pero no reconoce
+# requirements.lock (solo busca requirements*.txt / *.in), que es lo que
+# instala el CI. Un PR de pip toca los rangos de pyproject; el lockfile hay
+# que regenerarlo a mano en ese mismo PR antes de fusionar.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: { interval: "weekly" }
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5

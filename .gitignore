@@ -4,7 +4,7 @@
 /ai_broker.egg-info/
 /state/
 *.pyc
- /logs/
+/logs/
 /training/
 
 .coverage
@@ -14,3 +14,8 @@
 
 # Certificado y clave TLS del broker (activar_https_broker.bat)
 /certs/
+
+# Copias de configuracion y salida de herramientas: no se versionan
+*.bak
+*.bak-*
+/graphify-out/

@@ -157,6 +157,12 @@ def request_lane(request: TaskCreateRequest, config: BrokerConfig) -> TaskKind:
     )
 
 
+def idempotency_storage_key(key: str, client_id: str | None) -> str:
+    """Clave tal como se guarda: la del operador sin tocar, la de un cliente
+    con su id delante (ver TaskRepository.create_task)."""
+    return key if client_id is None else f"{client_id}/{key}"
+
+
 class IdempotencyConflict(ValueError):
     pass
 
@@ -193,11 +199,18 @@ class TaskRepository:
 
     def create_task(
         self, request: TaskCreateRequest, *, queue_max_size: int,
-        kind: TaskKind = TaskKind.inference,
+        kind: TaskKind = TaskKind.inference, client_id: str | None = None,
     ) -> tuple[TaskStateResponse, bool]:
         """Encola una petición en su carril. `kind` lo decide quien sabe la
         configuración (si el carril de embeddings está activo): el repositorio
-        no la conoce."""
+        no la conoce.
+
+        `client_id` es el token de cliente que la crea (None = el operador).
+        La clave de idempotencia se guarda con su propietario delante: dos
+        clientes pueden usar la misma clave sin pisarse, y ninguno puede
+        sondear las del otro. La `/` no es válida en una clave del contrato,
+        así que no puede chocar con una del operador."""
+        stored_key = idempotency_storage_key(request.idempotency_key, client_id)
         task_id = f"task_{uuid4().hex}"
         now = _utc_now_iso()
         request_json = request.model_dump(mode="json")
@@ -213,7 +226,7 @@ class TaskRepository:
 
         with self.db.transaction() as connection:
             existing = connection.execute(
-                "SELECT id, request_hash FROM tasks WHERE idempotency_key = ?", (request.idempotency_key,)
+                "SELECT id, request_hash FROM tasks WHERE idempotency_key = ?", (stored_key,)
             ).fetchone()
             if existing is not None:
                 if existing["request_hash"] != request_hash:
@@ -227,18 +240,25 @@ class TaskRepository:
                 """
                 INSERT INTO tasks (
                     id, request_id, idempotency_key, request_hash, request_json, kind, status, priority,
-                    queue_position, progress_json, task_group, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    queue_position, progress_json, task_group, client_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, request.request_id, request.idempotency_key, request_hash, dumps_json(request_json),
+                (task_id, request.request_id, stored_key, request_hash, dumps_json(request_json),
                  kind.value, TaskStatus.queued.value, request.priority, queue_position, dumps_json(progress),
-                 request.group, now, now),
+                 request.group, client_id, now, now),
             )
             connection.execute(
                 "INSERT INTO events (task_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
                 (task_id, "task.created", dumps_json({"status": TaskStatus.queued.value}), now),
             )
         return self.get_task(task_id), True
+
+    def task_owner(self, task_id: str) -> str | None:
+        """client_id de la tarea (None = el operador). KeyError si no existe."""
+        row = self.db.query_one("SELECT client_id FROM tasks WHERE id = ?", (task_id,))
+        if row is None:
+            raise KeyError(task_id)
+        return row["client_id"]
 
     def get_task(self, task_id: str) -> TaskStateResponse:
         row = self.db.query_one("SELECT * FROM tasks WHERE id = ?", (task_id,))
@@ -459,11 +479,18 @@ class TaskRepository:
         """
         terminal = tuple(status.value for status in TERMINAL_STATUSES)
         pending: dict[str, Any] = {}
+        # Solo cuentan las tareas del mismo propietario: la de otro cliente es,
+        # para esta, una que no existe (no bloquea), y un grupo es el par
+        # (propietario, nombre). Si no, dos apps que usan el mismo nombre de
+        # grupo se bloquearían entre sí, y una podría seguir el estado de otra.
+        owner_row = self.db.query_one("SELECT client_id FROM tasks WHERE id = ?", (task_id,))
+        owner = owner_row["client_id"] if owner_row is not None else None
         if depends_on:
             id_marks = ",".join("?" for _ in depends_on)
             terminal_marks = ",".join("?" for _ in terminal)
             rows = self.db.query_all(
-                f"SELECT id, status FROM tasks WHERE id IN ({id_marks})", tuple(depends_on),
+                f"SELECT id, status FROM tasks WHERE id IN ({id_marks}) AND client_id IS ?",
+                (*depends_on, owner),
             )
             known = {str(row["id"]): str(row["status"]) for row in rows}
             unfinished = [
@@ -478,8 +505,8 @@ class TaskRepository:
             terminal_marks = ",".join("?" for _ in terminal)
             row = self.db.query_one(
                 f"SELECT COUNT(*) AS pending FROM tasks WHERE task_group = ? AND id <> ? "
-                f"AND status NOT IN ({terminal_marks})",
-                (depends_on_group, task_id, *terminal),
+                f"AND client_id IS ? AND status NOT IN ({terminal_marks})",
+                (depends_on_group, task_id, owner, *terminal),
             )
             remaining = int(row["pending"]) if row else 0
             if remaining:
@@ -1842,7 +1869,8 @@ class TaskRepository:
                 recovered += 1
         return recovered
 
-    def get_group_state(self, group: str) -> TaskGroupStateResponse:
+    def get_group_state(self, group: str, *, client_id: str | None = None,
+                        all_owners: bool = True) -> TaskGroupStateResponse:
         """Recuento por estado de una tirada. KeyError si el grupo no existe.
 
         Un grupo sin tareas es indistinguible de uno mal escrito, y devolver
@@ -1859,9 +1887,9 @@ class TaskRepository:
                        THEN 1 ELSE 0 END) AS pending,
                    MIN(created_at) AS created_at,
                    MAX(updated_at) AS updated_at
-            FROM tasks WHERE task_group = ?
+            FROM tasks WHERE task_group = ? AND (? OR client_id IS ?)
             """,
-            (group,),
+            (group, int(all_owners), client_id),
         )
         if row is None or not int(row["total"] or 0):
             raise KeyError(group)

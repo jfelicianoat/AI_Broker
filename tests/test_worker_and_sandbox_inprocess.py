@@ -118,28 +118,79 @@ def test_use_utf8_tolerates_streams_without_reconfigure() -> None:
 # ------------------------------------------------------------------ sandbox
 
 
+class FakeReader:
+    """StreamReader mínimo: entrega `data` por trozos y luego EOF. Con
+    `endless`, tras los datos repite `endless` hasta que maten al proceso
+    (código que imprime en bucle); con `hang`, se queda esperando sin EOF."""
+
+    def __init__(self, process: FakeProcess, data: bytes, *, endless: bytes = b"", hang: bool = False) -> None:
+        self._process = process
+        self._data = data
+        self._endless = endless
+        self._hang = hang
+        self.bytes_served = 0
+
+    async def read(self, n: int) -> bytes:
+        await asyncio.sleep(0)
+        if self._data:
+            chunk, self._data = self._data[:n], self._data[n:]
+        elif self._endless and not self._process.killed:
+            chunk = self._endless[:n]
+        elif self._hang:
+            await self._process.killed_event.wait()
+            chunk = b""
+        else:
+            chunk = b""
+        self.bytes_served += len(chunk)
+        return chunk
+
+
+class FakeWriter:
+    def __init__(self, process: FakeProcess) -> None:
+        self._process = process
+
+    def write(self, data: bytes) -> None:
+        self._process.stdin_data = (self._process.stdin_data or b"") + data
+
+    async def drain(self) -> None:
+        await asyncio.sleep(0)
+
+    def close(self) -> None:
+        pass
+
+
 class FakeProcess:
-    def __init__(self, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"", hang: bool = False) -> None:
+    def __init__(
+        self, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"", hang: bool = False,
+        endless_stdout: bytes = b"",
+    ) -> None:
         self.returncode = returncode
         self._stdout = stdout
         self._stderr = stderr
         self._hang = hang
         self.killed = False
+        self.waited = False
+        self.killed_event = asyncio.Event()
         self.stdin_data: bytes | None = None
+        self.stdin = FakeWriter(self)
+        self.stdout = FakeReader(self, stdout, endless=endless_stdout, hang=hang)
+        self.stderr = FakeReader(self, stderr, hang=hang)
 
     async def communicate(self, data: bytes | None = None) -> tuple[bytes, bytes]:
         self.stdin_data = data
         if self._hang:
-            await asyncio.sleep(3600)
+            await self.killed_event.wait()
         return self._stdout, self._stderr
 
     async def wait(self) -> int:
-        if self._hang:
-            await asyncio.sleep(3600)
+        if self._hang and not self.killed:
+            await self.killed_event.wait()
+        self.waited = True
         return self.returncode
 
     def kill(self) -> None:
         self.killed = True
+        self.killed_event.set()
 
 
 class FakeDocker:
@@ -279,3 +330,116 @@ def test_force_remove_logs_cleanup_failures(monkeypatch, executor, caplog) -> No
     with caplog.at_level("WARNING", logger="ai_broker.sandbox"):
         asyncio.run(executor._force_remove("sbx", volume_name="vol"))
     assert [record.getMessage() for record in caplog.records].count("sandbox.cleanup_failed") == 2
+
+
+# --------------------------------------- AB-03/AB-04: salida acotada y recogida
+
+
+def test_plain_run_endless_output_is_cut_killed_and_removed(monkeypatch, executor) -> None:
+    import app.sandbox as sandbox
+
+    limit = sandbox._output_limit_bytes(executor.settings.max_output_chars)
+    process = FakeProcess(0, endless_stdout=b"x" * 1000 + b"\n")
+    docker = _install(monkeypatch, FakeDocker({"run": process}))
+    result = asyncio.run(executor.run_python("while True: print('x' * 1000)"))
+    assert result.startswith(f"ERROR: el código escribió más de {limit} bytes de salida")
+    # El modelo ve el principio de lo que imprimía, truncado como siempre.
+    assert "xxxx" in result and "[...salida truncada...]" in result
+    assert process.killed and process.waited
+    assert any(call[1] == "rm" for call in docker.calls)
+    # Lo leído del flujo sin fin no pasa del tope más un trozo de lectura.
+    assert process.stdout.bytes_served <= limit + sandbox._READ_CHUNK_BYTES
+
+
+def test_attach_endless_output_is_cut_and_container_cleaned(monkeypatch, executor, tmp_path: Path) -> None:
+    data = tmp_path / "a.csv"
+    data.write_text("a\n1\n", encoding="utf-8")
+    process = FakeProcess(0, endless_stdout=b"y" * 4096)
+    docker = _install(monkeypatch, FakeDocker({"attach": process}))
+    result = asyncio.run(executor.run_python("while True: print('y')", files={"a.csv": data}))
+    assert result.startswith("ERROR: el código escribió más de")
+    assert process.killed
+    assert any(call[1] == "rm" for call in docker.calls)
+    assert any(call[1:3] == ["volume", "rm"] for call in docker.calls)
+
+
+def test_endless_stderr_is_also_capped(monkeypatch, executor) -> None:
+    process = FakeProcess(1)
+    process.stderr = FakeReader(process, b"", endless=b"E" * 4096)
+    _install(monkeypatch, FakeDocker({"run": process}))
+    result = asyncio.run(executor.run_python("import sys\nwhile True: sys.stderr.write('E')"))
+    assert result.startswith("ERROR: el código escribió más de")
+    assert process.killed
+
+
+def test_output_just_under_the_limit_is_returned_normally(monkeypatch, executor) -> None:
+    import app.sandbox as sandbox
+
+    limit = sandbox._output_limit_bytes(executor.settings.max_output_chars)
+    process = FakeProcess(0, b"z" * limit)
+    _install(monkeypatch, FakeDocker({"run": process}))
+    result = asyncio.run(executor.run_python("print('z' * N)"))
+    assert not result.startswith("ERROR")
+    assert result.endswith("[...salida truncada...]")
+    assert not process.killed
+
+
+def test_small_output_unchanged_with_stderr(monkeypatch, executor) -> None:
+    _install(monkeypatch, FakeDocker({"run": FakeProcess(0, b"ok\n", b"aviso\n")}))
+    assert asyncio.run(executor.run_python("print('ok')")) == "ok\n\n[stderr]\naviso"
+
+
+def test_timeout_reaps_the_killed_process(monkeypatch, executor, fast_timeouts, tmp_path: Path) -> None:
+    plain = FakeProcess(hang=True)
+    _install(monkeypatch, FakeDocker({"run": plain}))
+    with pytest.raises(SandboxError, match="superó el plazo"):
+        asyncio.run(executor.run_python("while True: pass"))
+    assert plain.killed and plain.waited
+
+    attach = FakeProcess(hang=True)
+    _install(monkeypatch, FakeDocker({"attach": attach}))
+    with pytest.raises(SandboxError, match="superó el plazo"):
+        asyncio.run(executor.run_python("while True: pass", files={"a.csv": tmp_path / "a.csv"}))
+    assert attach.killed and attach.waited
+
+    management = FakeProcess(hang=True)
+    _install(monkeypatch, FakeDocker({"start": management}))
+    with pytest.raises(SandboxError, match="preparación del sandbox superó"):
+        asyncio.run(executor.run_python("print(1)", files={"a.csv": tmp_path / "a.csv"}))
+    assert management.killed and management.waited
+
+
+def test_process_dead_before_reading_code_is_not_an_error(monkeypatch, executor) -> None:
+    process = FakeProcess(1, b"", b"boom")
+
+    class BrokenWriter(FakeWriter):
+        async def drain(self) -> None:
+            raise BrokenPipeError
+
+    process.stdin = BrokenWriter(process)
+    _install(monkeypatch, FakeDocker({"run": process}))
+    result = asyncio.run(executor.run_python("print(1)"))
+    assert "exit code 1" in result and "boom" in result
+
+
+def test_reap_tolerates_already_dead_and_stuck_processes(monkeypatch) -> None:
+    import app.sandbox as sandbox
+
+    class Dead:
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+        async def wait(self) -> int:
+            return 0
+
+    class Stuck:
+        def kill(self) -> None:
+            pass
+
+        async def wait(self) -> int:
+            await asyncio.sleep(3600)
+            return 0
+
+    monkeypatch.setattr(sandbox, "_REAP_TIMEOUT_SECONDS", 0.01)
+    asyncio.run(sandbox._reap(Dead()))  # type: ignore[arg-type]
+    asyncio.run(sandbox._reap(Stuck()))  # type: ignore[arg-type]

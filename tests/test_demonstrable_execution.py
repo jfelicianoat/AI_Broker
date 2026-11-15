@@ -70,8 +70,8 @@ def test_every_role_the_broker_writes_is_part_of_the_enum() -> None:
     """El enum se queda corto en cuanto alguien añade un rol y no lo declara:
     entonces la telemetría lo reporta como "unknown" y el cliente pierde
     exactamente la información que este contrato le prometió."""
-    from app.coordinator import ROLE_SYSTEM_PROMPTS
     from app.ingestion.service import VISION_ROLE
+    from app.providers.base import ROLE_SYSTEM_PROMPTS
     from app.shadow_probe import SHADOW_ROLE
 
     escritos = {
@@ -236,7 +236,9 @@ def test_every_final_artifact_type_is_one_the_coordinator_writes() -> None:
     """La lista se queda obsoleta en silencio si alguien añade una estrategia y
     no la declara: entonces su entregable sale sin `final` y el cliente cierra
     la tarjeta sin nada."""
-    fuente = Path("app/coordinator.py").read_text(encoding="utf-8")
+    # El coordinador está repartido en app/coordinator*.py (mixins por
+    # estrategia, AB-08): cada estrategia escribe su entregable en el suyo.
+    fuente = "\n".join(path.read_text(encoding="utf-8") for path in sorted(Path("app").glob("coordinator*.py")))
     from app.schemas import FINAL_ARTIFACT_TYPES
 
     for artifact_type in FINAL_ARTIFACT_TYPES:

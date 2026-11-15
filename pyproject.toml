@@ -65,9 +65,7 @@ fail_under = 90
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-# "deprecated" guarda código legado fuera de uso (p. ej. el antiguo
-# app/providers.py monolítico): no se lintéa ni se importa.
-extend-exclude = [".local", ".venv", "docs", "deprecated"]
+extend-exclude = [".local", ".venv", "docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

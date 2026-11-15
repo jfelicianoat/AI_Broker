@@ -6,6 +6,11 @@ from typing import Annotated, Any, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+#: Versión vigente del contrato con los clientes. Única fuente: la publican
+#: `GET /api/v1/capabilities` y `GET /health`. No es la versión del paquete
+#: (pyproject), que no sigue al contrato.
+CONTRACT_VERSION = "2.12"
+
 
 class StrictBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1287,6 +1292,8 @@ class BrokerCapabilitiesResponse(StrictBaseModel):
     # The judge accepts `target` and reports raw scores per attempt.
     system1_evaluation: bool = False
     contract_version: str
+    # Tokens de cliente con alcance limitado (/api/v1/admin/client-tokens).
+    client_tokens: bool = True
     strategies: list[ExecutionStrategy]
     presets: dict[str, list[ExecutionPreset]]
     scheduling_by_preset: dict[str, list[SchedulingPolicy]]
@@ -1688,6 +1695,9 @@ class HealthResponse(StrictBaseModel):
     status: Literal["healthy", "degraded", "unavailable"]
     checked_at: datetime
     dependencies: dict[str, HealthDependency]
+    # Versión del contrato con los clientes (la misma que capabilities): un
+    # cliente sabe qué broker tiene delante sin pedir otro endpoint.
+    contract_version: str = CONTRACT_VERSION
 
 
 class AuthCheckResponse(StrictBaseModel):
@@ -1702,6 +1712,36 @@ class AuthCheckResponse(StrictBaseModel):
 
     authenticated: Literal[True] = True
     auth_required: bool
+    # Qué credencial es (contrato aditivo, 15-nov-2026): "admin" para el token
+    # de administración (o un broker sin token), "client" para un token de
+    # cliente, que solo abre las rutas de trabajo y solo sobre lo suyo.
+    scope: Literal["admin", "client"] = "admin"
+    client_name: str | None = None
+
+
+class ClientTokenCreateRequest(StrictBaseModel):
+    """Alta de un token de cliente. El nombre identifica a la app en el panel y en los logs."""
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+
+
+class ClientTokenInfo(StrictBaseModel):
+    id: str
+    name: str
+    # Los primeros caracteres del token, para reconocerlo sin poder usarlo.
+    token_prefix: str
+    created_at: datetime
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+    active: bool
+
+
+class ClientTokenCreatedResponse(ClientTokenInfo):
+    # El token en claro. Solo aparece en esta respuesta: el broker guarda su hash.
+    token: str
+
+
+class ClientTokenListResponse(StrictBaseModel):
+    items: list[ClientTokenInfo]
 
 
 def now_utc() -> datetime:

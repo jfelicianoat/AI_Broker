@@ -108,6 +108,8 @@ Respuesta real abreviada, para que no tengas que adivinar la forma:
 
 **Consúltalo al arrancar tu aplicación, no en cada petición.** Cambia solo cuando cambia la configuración del broker.
 
+**`GET /health` también trae `contract_version`**, con el mismo valor que `capabilities`, para quien ya sondea la salud y no quiere otra llamada. Es la versión del contrato, no la del paquete: `pyproject.toml` y `/openapi.json` dicen `0.1.0` y no siguen al contrato. Un broker anterior al 15-nov-2026 no lo incluye en `/health`; en ese caso, léelo de `capabilities`.
+
 Los flags System-1 indican habilitación, no disponibilidad garantizada de sus proveedores. No publican el modelo primario, los umbrales ni el modo sombra; son configuración del operador. Si faltan en un broker anterior, trátalos como `false`.
 
 **El contrato crece de forma aditiva: no rechaces campos desconocidos.** Entre 2.5 y 2.7 aparecieron `derived_data_boundary`, `work_lanes` y el estado `converting`, y seguirán apareciendo otros. Un cliente que trate un campo nuevo como error se romperá en la siguiente versión del broker sin que nada haya cambiado para él. Ignora lo que no conozcas y da valor por defecto a lo que falte.
@@ -183,6 +185,59 @@ En Windows es el Administrador de credenciales: cifrado, con ACL del usuario que
 **Qué hacer ante un `401`/`403`.** Volver a leer la fuente y reintentar **una** vez es el comportamiento correcto: casi siempre significa que el broker se reinició y rotó el token. Si el segundo intento vuelve a fallar, es un problema real de credencial y no un reinicio — no entres en bucle de reintentos. Y recuerda que tus tareas siguen ahí (ver arriba).
 
 **Si `publish_session_token` está en `none`** (el default), no hay fuente local que leer: el token solo existe en la consola del broker. Habla con quien opera el broker antes de construir sobre esto.
+
+### 3.2 Tokens de cliente
+
+El token de administración lo abre todo: configuración, borrado de modelos, reordenar la cola, el panel. Una app que solo manda trabajo no necesita nada de eso. Para ella está el **token de cliente**, anunciado en `capabilities.client_tokens`.
+
+**Qué abre.** Solo las rutas de trabajo:
+
+- crear, leer y cancelar tareas, con sus `invocations`, `artifacts` y `tool_results`;
+- `GET /api/v1/groups/{group}`;
+- subir y leer ficheros (`/api/v1/files`);
+- `POST /api/v1/system1/judge`;
+- `GET /api/v1/auth/check`.
+
+Todo lo demás protegido responde `403 ADMIN_AUTH_REQUIRED`, con el cuerpo bien o mal formado: la cola (`PATCH`), el despachador, el uso, las métricas, el panel, la documentación del API y la gestión de tokens.
+
+**Solo sobre lo suyo.** Cada tarea y cada fichero guardan quién los creó:
+
+- **Lo ajeno no existe:** una tarea o un fichero de otro cliente responde `404 TASK_NOT_FOUND` / `FILE_NOT_FOUND`, igual que si no existiera.
+- **Adjuntos:** adjuntar un fichero ajeno da `404 ATTACHED_FILE_NOT_FOUND`.
+- **Idempotencia:** las claves son de cada cliente. Dos apps pueden usar `informe-42` sin pisarse, y ninguna puede averiguar las del otro.
+- **Deduplicación de ficheros:** solo dentro del mismo cliente. El mismo documento subido por dos apps da dos `file_id`.
+- **Grupos:** un grupo es el par (cliente, nombre). `GET /api/v1/groups/{group}` cuenta solo tus tareas, y `depends_on_group` solo espera a las tuyas.
+- **Dependencias:** en `depends_on`, la tarea de otro cliente cuenta como desconocida: no bloquea y te llega el aviso de siempre.
+- **El operador** (token de administración) lo ve todo. Su vista de un grupo suma las tareas de todos los clientes con ese nombre.
+
+**Cómo se envía.** En la misma cabecera de siempre, o como Bearer:
+
+```http
+X-Admin-Token: abk_…
+Authorization: Bearer abk_…
+```
+
+Una app que ya habla con el broker no cambia código: solo el valor del token. `GET /api/v1/auth/check` dice cuál tienes:
+
+```json
+{ "authenticated": true, "auth_required": true, "scope": "client", "client_name": "knowledge-orchestrator" }
+```
+
+Con el token de administración, `scope` es `"admin"` y `client_name` es `null`.
+
+**No caduca con los reinicios.** Al contrario que el de administración (§3), un token de cliente vive en la base del broker hasta que el operador lo revoca. Un reinicio del broker ya no deja a la app con `403`.
+
+**Gestión (solo con el token de administración):**
+
+| Petición | Qué hace |
+|---|---|
+| `POST /api/v1/admin/client-tokens` con `{"name": "knowledge-orchestrator"}` | Emite un token. Responde `201` con `token`: **es la única vez que se ve**, el broker solo guarda su hash. Nombre: 1-64 caracteres `A-Za-z0-9._-`; `409 CLIENT_TOKEN_NAME_TAKEN` si ya hay uno activo con ese nombre |
+| `GET /api/v1/admin/client-tokens` | Lista los tokens: `id`, `name`, `token_prefix` (los primeros caracteres), `created_at`, `last_used_at`, `revoked_at`, `active`. Nunca el token |
+| `DELETE /api/v1/admin/client-tokens/{id}` | Revoca el token: deja de valer en la siguiente petición. Sus tareas y ficheros siguen ahí, y el operador los ve |
+
+Para rotar el token de una app: revoca el viejo y emite otro con el mismo nombre. Desde la consola del PC del broker, `scripts\client_tokens.py` hace lo mismo con el token de administración del llavero.
+
+**Sin token de administración configurado** (loopback, u opt-out LAN), el broker sigue abierto como siempre: todo el mundo es operador y los tokens de cliente no restringen nada.
 
 ---
 
@@ -312,6 +367,33 @@ La comparación es sobre un hash canónico del cuerpo completo, así que un camb
 | `inputs` | lista de string | Solo con `inference_kind: "embedding"`: lote de textos, un vector por texto (§5.10). **Excluyente con `prompt`**: si llegan los dos, `422` |
 | `attachments` | lista | Solo ficheros ya ingeridos. Ver §7 |
 | `metadata` | objeto libre | Se persiste con la tarea; el panel usa `origin` para etiquetar la procedencia |
+
+#### Datos frente a encargo: cómo marcar lo que no son instrucciones
+
+Antes de enrutar, el broker decide si la tarea pide que **salga** una imagen (generarla o editarla) o el texto que hay dentro de una (OCR). Para eso solo lee las palabras de quien pide. Si lee un documento que *habla* de imágenes, la tarea acaba en `IMAGE_GENERATION_UNSUPPORTED` aunque nadie pidiera dibujar nada.
+
+La regla, que aplica `petition_text` en `app/task_classifier.py`, es esta:
+
+- **Cuentan como encargo** el texto suelto y el contenido de estos envoltorios: `user_request`, `system_instructions`, `instructions`, `instrucciones`, `request`, `peticion`, `task`, `tarea` y `prompt`. Se abren hasta el fondo, así que un bloque de datos puede ir dentro de `<user_request>`.
+- **Cualquier otra etiqueta con apertura y cierre es dato** y no se lee: `<transcripcion>`, `<documento>`, `<titulo>`, `<fragmento>` o `<untrusted_document>`, por ejemplo. El nombre es libre (letras, cifras y `_`), y el bloque puede llevar atributos.
+- También se ignoran los documentos adjuntos que expande el broker y los bloques de contexto `<…history…_json>`, `<…memory…_json>`, `<…scope…_json>`, `<…attachment…_json>` y `<…context…_json>`.
+
+```text
+<system_instructions>Convierte la fuente en apuntes.</system_instructions>
+<titulo>Generar imágenes con MCP</titulo>
+<user_request>Haz los apuntes.
+<transcripcion>… con MCP puedes generar imágenes y vídeos …</transcripcion>
+</user_request>
+```
+
+Este prompt **no** pide una imagen. Sin la etiqueta `<transcripcion>`, el texto pegado dentro de `<user_request>` es indistinguible de lo que pides, y «puedes generar imágenes» lo es todo.
+
+Dos cosas que te tocan a ti:
+
+- **Un bloque sin etiqueta de cierre no es un bloque.** Si recortas la fuente, recorta antes de envolverla.
+- **Si el dato puede contener tus etiquetas** (una transcripción que diga `</transcripcion>`), neutralízalas antes de enviar. Si no, el resto del dato queda fuera del bloque y vuelve a contar como encargo. El broker no puede distinguir un cierre legítimo de uno inyectado.
+
+Esto solo decide la detección de imagen y OCR. **No protege del modelo**: un modelo puede seguir obedeciendo una instrucción escrita dentro del dato. Para el tipo de tarea (código, contexto largo) sí cuentan los adjuntos: un `.py` adjunto hace de la tarea una de código.
 
 ### 5.4 `output`
 
@@ -1143,6 +1225,15 @@ Guíate por el campo `retryable` del error, no por la tabla: es el broker quien 
 ---
 
 ## 12. Qué ha cambiado
+
+### 15 de noviembre de 2026, sin cambio de versión
+
+Ampliación aditiva sobre 2.12; `contract_version` sigue en `"2.12"`.
+
+- **Tokens de cliente** (§3.2): credenciales que solo abren las rutas de trabajo y solo sobre lo que creó ese cliente. Sobreviven a los reinicios. `capabilities.client_tokens` lo anuncia, y `auth/check` añade `scope` y `client_name`.
+- **`contract_version` también en `GET /health`** (y en `/health/ready`), con el mismo valor que `capabilities` (§2).
+- **Documentada la regla de datos frente a encargo** de la detección de imagen y OCR, con las etiquetas que se leen como instrucción (§5.3). El comportamiento ya estaba desde el 20 de octubre; lo nuevo es que es contrato.
+- **`run_code` corta la salida desmesurada.** Si el código escribe por stdout o stderr más de `sandbox.max_output_chars × 4 + 64 KiB` bytes (unos 95 KiB con la configuración por defecto), el contenedor se para en el acto y la herramienta devuelve `ERROR: el código escribió más de N bytes de salida y fue interrumpido.` seguido del principio de la salida. Antes, el broker lo guardaba todo en memoria hasta el plazo y solo después lo truncaba.
 
 ### 2.12 — embeddings en lote y carril propio (21 de octubre de 2026)
 

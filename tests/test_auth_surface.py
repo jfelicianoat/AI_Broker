@@ -67,6 +67,10 @@ AUTHENTICATED_ROUTES = {
     ("GET", "/api/v1/dashboard/resources"),
     ("GET", "/api/v1/dashboard/residency"),
     ("GET", "/api/v1/auth/check"),
+    # Gestión de tokens de cliente: solo el token de administración.
+    ("POST", "/api/v1/admin/client-tokens"),
+    ("GET", "/api/v1/admin/client-tokens"),
+    ("DELETE", "/api/v1/admin/client-tokens/{token_id}"),
     # Documentación autogenerada. FastAPI la sirve abierta; aquí no. El
     # esquema enumera cada ruta, parámetro y modelo del broker, y eso es más
     # de lo que necesita saber quien no puede usarlo.
@@ -265,7 +269,7 @@ def test_auth_check_accepts_the_configured_token(tmp_path: Path, monkeypatch) ->
         response = client.get("/api/v1/auth/check", headers={"X-Admin-Token": ADMIN_TOKEN})
 
         assert response.status_code == 200
-        assert response.json() == {"authenticated": True, "auth_required": True}
+        assert response.json() == {"authenticated": True, "auth_required": True, "scope": "admin", "client_name": None}
 
 
 def test_auth_check_rejects_an_invented_token(tmp_path: Path, monkeypatch) -> None:
@@ -294,7 +298,9 @@ def test_auth_check_says_when_the_broker_asks_for_no_credential(
         response = client.get("/api/v1/auth/check", headers={"X-Admin-Token": "da-igual"})
 
         assert response.status_code == 200
-        assert response.json() == {"authenticated": True, "auth_required": False}
+        assert response.json() == {
+            "authenticated": True, "auth_required": False, "scope": "admin", "client_name": None,
+        }
 
 
 def test_auth_check_accepts_the_dashboard_session_cookie(tmp_path: Path, monkeypatch) -> None:

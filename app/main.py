@@ -25,7 +25,9 @@ from app.admin_auth import (
     AdminTokenLookupError,
     resolve_admin_token,
     verify_admin_access,
+    verify_api_access,
 )
+from app.client_tokens import ClientToken, ClientTokenError, ClientTokenStore, Principal
 from app.config import BrokerConfig, load_config
 from app.coordinator import ConsensusCoordinator
 from app.dashboard import DashboardQueryRepository, lane_capacities
@@ -77,10 +79,15 @@ from app.resource_scheduler import ResourceScheduler
 from app.sandbox import SandboxExecutor
 from app.schemas import (
     AGENT_SKILLS,
+    CONTRACT_VERSION,
     DEFAULT_AGENT_SKILLS,
     EGRESS_AGENT_SKILLS,
     AuthCheckResponse,
     BrokerCapabilitiesResponse,
+    ClientTokenCreatedResponse,
+    ClientTokenCreateRequest,
+    ClientTokenInfo,
+    ClientTokenListResponse,
     DashboardResourcesResponse,
     DashboardSummaryResponse,
     DashboardTaskDetail,
@@ -113,6 +120,7 @@ from app.schemas import (
     ToolResultsRequest,
     UsageResponse,
     apply_default_timeout,
+    attachment_file_id,
     classification_allows_cloud,
     run_code_available,
 )
@@ -130,6 +138,26 @@ from app.system1 import System1Service
 
 # Las rutas /api/v1 que responden sin credencial (Client_API §3). Una petición
 # mal formada a cualquier otra se contesta primero con la credencial.
+# Rutas de trabajo que acepta un token de cliente (app/client_tokens.py). El
+# resto de /api/v1 protegido es administración: cola, despachador, panel, uso,
+# métricas y la propia gestión de tokens. tests/test_client_tokens.py comprueba
+# que esta lista y la del test son la misma.
+_CLIENT_API = {
+    ("POST", "/api/v1/system1/judge"),
+    ("POST", "/api/v1/tasks"),
+    ("GET", "/api/v1/tasks/{task_id}"),
+    ("DELETE", "/api/v1/tasks/{task_id}"),
+    ("GET", "/api/v1/tasks/{task_id}/invocations"),
+    ("GET", "/api/v1/tasks/{task_id}/artifacts"),
+    ("GET", "/api/v1/tasks/{task_id}/artifacts/{artifact_id}"),
+    ("POST", "/api/v1/tasks/{task_id}/tool_results"),
+    ("GET", "/api/v1/groups/{group}"),
+    ("POST", "/api/v1/files"),
+    ("GET", "/api/v1/files/{file_id}"),
+    ("GET", "/api/v1/files/{file_id}/markdown"),
+    ("GET", "/api/v1/auth/check"),
+}
+
 _PUBLIC_API = {
     ("GET", "/api/v1/queue"),
     ("GET", "/api/v1/capabilities"),
@@ -188,6 +216,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     publish_admin_credential_for_local_clients(broker_config, logger)
     db = Database(Path(broker_config.persistence.database), broker_config.persistence.journal_mode, defer_open=True)
     repository = TaskRepository(db)
+    client_tokens = ClientTokenStore(db)
     dashboard_queries = DashboardQueryRepository(db)
     scheduler = ResourceScheduler(broker_config)
     # La selección adaptativa lee la evidencia operativa de esta misma BD;
@@ -553,14 +582,45 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         )
     )
 
+    def _api_principal(request: Request) -> Principal:
+        return verify_api_access(request, broker_config, client_tokens)
+
+    def _require_task_owner(principal: Principal, task_id: str) -> None:
+        """Un cliente solo ve sus tareas; la ajena responde como si no existiera."""
+        if principal.is_admin:
+            return
+        try:
+            owner = repository.task_owner(task_id)
+        except KeyError:
+            owner = None
+        if owner is None or owner != principal.client_id:
+            raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
+
+    def _require_file_owner(principal: Principal, file_id: str, *, detail: str = "FILE_NOT_FOUND") -> None:
+        if principal.is_admin:
+            return
+        try:
+            owner = ingestion.file_owner(file_id)
+        except KeyError:
+            owner = None
+        if owner is None or owner != principal.client_id:
+            raise HTTPException(status_code=404, detail=detail)
+
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         # FastAPI validates the body before the handler checks the token, so an
         # anonymous caller learnt the contract's field names from a 422. On a
         # protected route the credential is answered first.
         if request.url.path.startswith("/api/v1/") and (request.method, request.url.path) not in _PUBLIC_API:
+            route = request.scope.get("route")
+            template = getattr(route, "path", request.url.path)
             try:
-                verify_admin_access(request, broker_config)
+                # Un token de cliente solo ve el 422 de las rutas que puede usar:
+                # en las de administración, los nombres de campo son del operador.
+                if (request.method, template) in _CLIENT_API:
+                    _api_principal(request)
+                else:
+                    verify_admin_access(request, broker_config)
             except HTTPException as denied:
                 return JSONResponse(status_code=denied.status_code, content={"detail": denied.detail})
         return JSONResponse(
@@ -574,7 +634,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.post("/api/v1/system1/judge", response_model=System1Response)
     async def system1_judge(payload: System1Request, request: Request) -> System1Response:
-        verify_admin_access(request, broker_config)
+        _api_principal(request)
         return await system1.judge(payload)
 
     @app.get("/api/v1/system1/metrics")
@@ -584,7 +644,13 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.post("/api/v1/tasks", response_model=TaskAcceptedResponse, status_code=202)
     def create_task(payload: TaskCreateRequest, response: Response, request: Request) -> TaskAcceptedResponse:
-        verify_admin_access(request, broker_config)
+        principal = _api_principal(request)
+        # Un cliente solo puede adjuntar sus ficheros. Se comprueba antes que
+        # nada: el 404 es el mismo que el de un fichero que no existe.
+        for attachment in payload.content.attachments:
+            attached_id = attachment_file_id(attachment)
+            if attached_id is not None:
+                _require_file_owner(principal, attached_id, detail="ATTACHED_FILE_NOT_FOUND")
         # Antes de cualquier otra cosa: la petición que no trae plazo hereda el
         # del operador, y lo hace aquí para que se persista con la tarea en vez
         # de resolverse cada vez que alguien lea el plazo.
@@ -679,6 +745,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 payload,
                 queue_max_size=broker_config.processing.queue_max_size,
                 kind=request_lane(payload, broker_config),
+                client_id=principal.client_id,
             )
         except IdempotencyConflict as exc:
             raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
@@ -702,7 +769,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     def get_task(task_id: str, request: Request) -> TaskStateResponse:
         # La respuesta incluye result/progress (salida completa del modelo):
         # con token configurado es una lectura protegida, igual que las mutaciones.
-        verify_admin_access(request, broker_config)
+        _require_task_owner(_api_principal(request), task_id)
         try:
             return repository.get_task(task_id)
         except KeyError as exc:
@@ -716,7 +783,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         esta información solo existía bajo el panel de administración, que tiene
         otra autenticación y otro ciclo de vida, o dentro de `result`, que es un
         diccionario sin contrato."""
-        verify_admin_access(request, broker_config)
+        _require_task_owner(_api_principal(request), task_id)
         try:
             return repository.list_task_invocations(task_id)
         except KeyError as exc:
@@ -731,7 +798,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         entero en cada sondeo del estado— y ninguna ruta la servía. El listado
         es barato (una consulta) y la descarga va aparte, que es como se sirve
         cualquier binario."""
-        verify_admin_access(request, broker_config)
+        _require_task_owner(_api_principal(request), task_id)
         try:
             return repository.list_task_artifacts(task_id)
         except KeyError as exc:
@@ -746,7 +813,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         disco. Un artefacto podado por retención responde 410 y no 404, porque
         la diferencia importa —existió y se borró a propósito, frente a nunca
         existió—."""
-        verify_admin_access(request, broker_config)
+        _require_task_owner(_api_principal(request), task_id)
         try:
             path, filename, media_type = repository.artifact_path(task_id, artifact_id)
         except KeyError as exc:
@@ -763,15 +830,17 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         sola cosa. Sin esto, un cliente con doscientas tareas tenía que sondear
         doscientos identificadores, y lo barato era mandarlas de una en una —que
         deja la cola vacía y desaprovecha la cola durable."""
-        verify_admin_access(request, broker_config)
+        principal = _api_principal(request)
         try:
-            return repository.get_group_state(group)
+            return repository.get_group_state(
+                group, client_id=principal.client_id, all_owners=principal.is_admin,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="GROUP_NOT_FOUND") from exc
 
     @app.delete("/api/v1/tasks/{task_id}", response_model=TaskStateResponse)
     def cancel_task(task_id: str, request: Request) -> TaskStateResponse:
-        verify_admin_access(request, broker_config)
+        _require_task_owner(_api_principal(request), task_id)
         try:
             return repository.request_cancel(task_id)
         except KeyError as exc:
@@ -781,7 +850,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     def submit_tool_results(task_id: str, payload: ToolResultsRequest, request: Request) -> TaskStateResponse:
         """Passthrough: el cliente entrega los resultados de sus tools de dominio
         y el broker reanuda el bucle del agente re-encolando la tarea."""
-        verify_admin_access(request, broker_config)
+        _require_task_owner(_api_principal(request), task_id)
         try:
             repository.resume_with_tool_results(
                 task_id, [item.model_dump() for item in payload.tool_results],
@@ -837,7 +906,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         logotipos, decoración) desactivarlo es la diferencia entre segundos y
         una espera larguísima.
         """
-        verify_admin_access(request, broker_config)
+        principal = _api_principal(request)
         if not broker_config.ingestion.enabled:
             raise HTTPException(status_code=409, detail="INGESTION_DISABLED")
         max_bytes = broker_config.ingestion.max_file_mb * 1024 * 1024
@@ -856,6 +925,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
                 ocr,
                 data_classification,
                 cloud_allowed,
+                principal.client_id,
             )
         except (IngestionError, UnsupportedFormat) as exc:
             status = 415 if exc.code in {"INGEST_UNSUPPORTED_FORMAT", "INGEST_CONTENT_MISMATCH"} else 422
@@ -882,7 +952,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
 
     @app.get("/api/v1/files/{file_id}", response_model=FileStateResponse)
     def get_file(file_id: str, request: Request) -> FileStateResponse:
-        verify_admin_access(request, broker_config)
+        _require_file_owner(_api_principal(request), file_id)
         record = ingestion.get(file_id)
         if record is None:
             raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
@@ -892,7 +962,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
     def get_file_markdown(file_id: str, request: Request) -> PlainTextResponse:
         # Devuelve el documento convertido íntegro: lectura protegida, como
         # los resultados de tareas.
-        verify_admin_access(request, broker_config)
+        _require_file_owner(_api_principal(request), file_id)
         record = ingestion.get(file_id)
         if record is None:
             raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
@@ -1056,7 +1126,7 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             system1_judgments=broker_config.system1.enabled,
             system1_semantic_routing=broker_config.system1.enabled and broker_config.system1.routing.enabled,
             system1_evaluation=broker_config.system1.enabled,
-            contract_version="2.12",
+            contract_version=CONTRACT_VERSION,
             strategies=[
                 ExecutionStrategy.single,
                 ExecutionStrategy.mixture_of_agents,
@@ -1216,7 +1286,9 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
         credencial (loopback sin token, u opt-out LAN), así que el cliente
         debe decir "este broker no exige token" en vez de "token válido".
         """
-        verify_admin_access(request, broker_config)
+        principal = _api_principal(request)
+        if not principal.is_admin:
+            return AuthCheckResponse(auth_required=True, scope="client", client_name=principal.name)
         try:
             configured = resolve_admin_token(broker_config) is not None
         except AdminTokenLookupError:
@@ -1225,6 +1297,49 @@ def create_app(config: BrokerConfig | None = None, config_path: str | Path = "br
             # de ahí habría respondido 503 y no se llega a esta línea.
             configured = False
         return AuthCheckResponse(auth_required=configured)
+
+    def _client_token_info(token: ClientToken) -> ClientTokenInfo:
+        return ClientTokenInfo(
+            id=token.id, name=token.name, token_prefix=token.token_prefix,
+            created_at=datetime.fromisoformat(token.created_at),
+            revoked_at=datetime.fromisoformat(token.revoked_at) if token.revoked_at else None,
+            last_used_at=datetime.fromisoformat(token.last_used_at) if token.last_used_at else None,
+            active=token.revoked_at is None,
+        )
+
+    @app.post("/api/v1/admin/client-tokens", response_model=ClientTokenCreatedResponse, status_code=201)
+    def create_client_token(payload: ClientTokenCreateRequest, request: Request) -> ClientTokenCreatedResponse:
+        """Emite un token de cliente. El token en claro solo sale en esta respuesta."""
+        verify_admin_access(request, broker_config)
+        try:
+            token, secret = client_tokens.create(payload.name)
+        except ClientTokenError as exc:
+            status = 409 if exc.code == "CLIENT_TOKEN_NAME_TAKEN" else 422
+            raise HTTPException(status_code=status, detail={"code": exc.code, "message": str(exc)}) from exc
+        logger.info(
+            "client_token.created",
+            extra={"event": "client_token.created", "client_id": token.id, "client_name": token.name},
+        )
+        return ClientTokenCreatedResponse(**_client_token_info(token).model_dump(), token=secret)
+
+    @app.get("/api/v1/admin/client-tokens", response_model=ClientTokenListResponse)
+    def list_client_tokens(request: Request) -> ClientTokenListResponse:
+        verify_admin_access(request, broker_config)
+        return ClientTokenListResponse(items=[_client_token_info(t) for t in client_tokens.list()])
+
+    @app.delete("/api/v1/admin/client-tokens/{token_id}", response_model=ClientTokenInfo)
+    def revoke_client_token(token_id: str, request: Request) -> ClientTokenInfo:
+        """Revoca un token. Deja de valer en la siguiente petición; sus tareas siguen ahí."""
+        verify_admin_access(request, broker_config)
+        try:
+            token = client_tokens.revoke(token_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="CLIENT_TOKEN_NOT_FOUND") from exc
+        logger.info(
+            "client_token.revoked",
+            extra={"event": "client_token.revoked", "client_id": token.id, "client_name": token.name},
+        )
+        return _client_token_info(token)
 
     # --- Documentación del API, detrás de credencial -------------------------
     # FastAPI la sirve abierta por defecto. El esquema enumera cada ruta, sus
